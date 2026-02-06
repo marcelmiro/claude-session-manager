@@ -3,32 +3,22 @@ import type {
   Session,
   RepoGroup,
   SessionIndex,
+  PaneInfo,
 } from "../types";
 import { listPanes, capturePane } from "./tmux";
 import { findClaudeProcesses } from "./process";
 import { detectStatus, estimateContextPercent } from "./status";
 
 /**
- * Discover all Claude Code sessions by scanning session index files
- * and correlating them with running tmux panes and Claude processes.
+ * Discover all Claude Code sessions using a two-phase approach:
+ * Phase A: Active sessions from tmux panes (source of truth)
+ * Phase B: Idle sessions from index files (secondary, filtered)
  */
 export async function discoverSessions(): Promise<Session[]> {
   const home = homedir();
   const projectsDir = `${home}/.claude/projects`;
 
-  // Scan for all sessions-index.json files
-  const glob = new Bun.Glob("*/sessions-index.json");
-  const indexFiles: string[] = [];
-  try {
-    for await (const path of glob.scan({ cwd: projectsDir, absolute: true })) {
-      indexFiles.push(path);
-    }
-  } catch {
-    // projects dir may not exist
-    return [];
-  }
-
-  // Gather tmux panes and Claude processes in parallel
+  // Phase A: Gather tmux panes and Claude processes in parallel
   const [panes, claudeProcesses] = await Promise.all([
     listPanes(),
     findClaudeProcesses(),
@@ -36,21 +26,157 @@ export async function discoverSessions(): Promise<Session[]> {
 
   // Build a set of TTYs that have Claude processes running.
   // ps reports TTYs like "ttys001", tmux reports "/dev/ttys001".
-  // Normalize by stripping the "/dev/" prefix for comparison.
   const claudeTtySet = new Set<string>(
     claudeProcesses.map((p) => p.tty),
   );
 
-  // Pre-compute which panes are running Claude by checking TTY overlap
+  // Filter panes to those with a Claude process on their TTY
   const claudePanes = panes.filter((pane) => {
     const normalizedPaneTty = pane.tty.replace(/^\/dev\//, "");
     return claudeTtySet.has(normalizedPaneTty);
   });
 
-  const sessions: Session[] = [];
+  // Phase A: Build active sessions from Claude panes
+  const activeSessionPromises = claudePanes.map((pane) =>
+    buildActiveSession(pane, projectsDir),
+  );
+  const activeSessions = await Promise.all(activeSessionPromises);
 
-  // Track panes already claimed by a session so one pane isn't shared
-  const claimedPaneIds = new Set<string>();
+  // Collect active project paths to exclude from idle discovery
+  const activeProjectPaths = new Set<string>(
+    activeSessions.map((s) => s.repoPath),
+  );
+
+  // Phase B: Discover idle sessions from index files
+  const idleSessions = await discoverIdleSessions(projectsDir, activeProjectPaths);
+
+  return [...activeSessions, ...idleSessions];
+}
+
+/**
+ * Build a Session from an active tmux pane running Claude.
+ * Derives repo info from tmux + git, with best-effort enrichment from JSONL/index.
+ */
+async function buildActiveSession(
+  pane: PaneInfo,
+  projectsDir: string,
+): Promise<Session> {
+  const repoPath = pane.currentPath;
+  const repo = repoPath.split("/").filter(Boolean).pop() ?? "unknown";
+
+  // Run all enrichments in parallel
+  const [status, branch, linesModified, activeInfo] = await Promise.all([
+    capturePane(pane.paneId).then(
+      (captured) => detectStatus(captured, true),
+      () => "input" as const,
+    ),
+    getGitBranch(repoPath),
+    getGitLinesModified(repoPath),
+    findActiveSessionInfo(projectsDir, repoPath),
+  ]);
+
+  return {
+    id: activeInfo?.sessionId ?? "",
+    repo,
+    repoPath,
+    branch,
+    status,
+    contextPercent: activeInfo ? estimateContextPercent(activeInfo.messageCount) : 0,
+    linesModified,
+    messageCount: activeInfo?.messageCount ?? 0,
+    summary: activeInfo?.summary ?? "",
+    modified: new Date(),
+    tmuxPane: {
+      paneId: pane.paneId,
+      windowIndex: pane.windowIndex,
+      sessionName: pane.sessionName,
+    },
+  };
+}
+
+/**
+ * Best-effort: find the active session's info by locating the most recently
+ * modified JSONL file in the Claude projects directory for this repo path.
+ */
+async function findActiveSessionInfo(
+  projectsDir: string,
+  repoPath: string,
+): Promise<{ sessionId: string; messageCount: number; summary: string } | null> {
+  try {
+    // Claude encodes project paths by replacing / with - and prefixing with -
+    // e.g. /Users/foo/bar → -Users-foo-bar
+    const encodedPath = repoPath.replace(/\//g, "-");
+    const projectDir = `${projectsDir}/${encodedPath}`;
+
+    // Find the most recently modified JSONL file
+    const glob = new Bun.Glob("*.jsonl");
+    let newestFile: string | null = null;
+    let newestMtime = 0;
+
+    for await (const path of glob.scan({ cwd: projectDir, absolute: true })) {
+      try {
+        const file = Bun.file(path);
+        const mtime = file.lastModified;
+        if (mtime > newestMtime) {
+          newestMtime = mtime;
+          newestFile = path;
+        }
+      } catch {
+        continue;
+      }
+    }
+
+    if (!newestFile) return null;
+
+    // Extract session ID from filename: {uuid}.jsonl → {uuid}
+    const filename = newestFile.split("/").pop() ?? "";
+    const sessionId = filename.replace(/\.jsonl$/, "");
+
+    // Try to enrich from index file
+    let messageCount = 0;
+    let summary = "";
+
+    try {
+      const indexPath = `${projectDir}/sessions-index.json`;
+      const raw = await Bun.file(indexPath).text();
+      const index: SessionIndex = JSON.parse(raw);
+      const entry = index.entries.find((e) => e.sessionId === sessionId);
+      if (entry) {
+        messageCount = entry.messageCount;
+        summary = entry.summary || entry.firstPrompt || "";
+      }
+    } catch {
+      // No index file or malformed — that's fine
+    }
+
+    return { sessionId, messageCount, summary };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Phase B: Discover idle sessions from session index files.
+ * Skips entries whose projectPath is already covered by an active session,
+ * and entries older than 24 hours.
+ */
+async function discoverIdleSessions(
+  projectsDir: string,
+  activeProjectPaths: Set<string>,
+): Promise<Session[]> {
+  const glob = new Bun.Glob("*/sessions-index.json");
+  const indexFiles: string[] = [];
+
+  try {
+    for await (const path of glob.scan({ cwd: projectsDir, absolute: true })) {
+      indexFiles.push(path);
+    }
+  } catch {
+    return [];
+  }
+
+  const sessions: Session[] = [];
+  const twentyFourHours = 24 * 60 * 60 * 1000;
 
   for (const indexFile of indexFiles) {
     try {
@@ -58,57 +184,21 @@ export async function discoverSessions(): Promise<Session[]> {
       const index: SessionIndex = JSON.parse(raw);
 
       for (const entry of index.entries) {
-        // Skip sidechain sessions
         if (entry.isSidechain) continue;
 
-        // Derive repo name from projectPath: last path segment
+        // Skip if this project has an active pane
+        if (activeProjectPaths.has(entry.projectPath)) continue;
+
+        // Skip entries older than 24h
+        const modifiedMs = new Date(entry.modified).getTime();
+        const ageMs = Date.now() - modifiedMs;
+        if (ageMs > twentyFourHours) continue;
+
         const repo = entry.projectPath.split("/").filter(Boolean).pop() ?? "unknown";
-
-        // Try to match this session to an active tmux pane.
-        // A pane matches if its currentPath exactly equals the session's projectPath
-        // (or is a subdirectory of it) AND it hasn't been claimed already.
-        const matchedPane = claudePanes.find((pane) => {
-          if (claimedPaneIds.has(pane.paneId)) return false;
-          // Exact match or subdirectory (ensure path boundary with trailing /)
-          return (
-            pane.currentPath === entry.projectPath ||
-            pane.currentPath.startsWith(entry.projectPath + "/")
-          );
-        });
-
-        let status: Session["status"] = "idle";
-        let tmuxPane: Session["tmuxPane"] | undefined;
-
-        if (matchedPane) {
-          claimedPaneIds.add(matchedPane.paneId);
-          tmuxPane = {
-            paneId: matchedPane.paneId,
-            windowIndex: matchedPane.windowIndex,
-            sessionName: matchedPane.sessionName,
-          };
-
-          try {
-            const captured = await capturePane(matchedPane.paneId);
-            status = detectStatus(captured, true);
-          } catch {
-            status = "input"; // process exists but capture failed
-          }
-        }
-
-        // Skip stale idle sessions (no active pane AND older than 24 hours)
-        if (status === "idle") {
-          const modifiedMs = new Date(entry.modified).getTime();
-          const ageMs = Date.now() - modifiedMs;
-          const twentyFourHours = 24 * 60 * 60 * 1000;
-          if (ageMs > twentyFourHours) continue;
-        }
-
-        const linesModified = await getGitLinesModified(entry.projectPath);
-        const contextPercent = estimateContextPercent(entry.messageCount);
 
         // For idle sessions, try to get last assistant message as summary
         let summary = entry.summary || entry.firstPrompt || "";
-        if (status === "idle" && entry.fullPath) {
+        if (entry.fullPath) {
           try {
             const lastMsg = await getLastAssistantMessage(entry.fullPath);
             if (lastMsg) {
@@ -119,27 +209,42 @@ export async function discoverSessions(): Promise<Session[]> {
           }
         }
 
+        const linesModified = await getGitLinesModified(entry.projectPath);
+        const contextPercent = estimateContextPercent(entry.messageCount);
+
         sessions.push({
           id: entry.sessionId,
           repo,
           repoPath: entry.projectPath,
           branch: entry.gitBranch || "",
-          status,
+          status: "idle",
           contextPercent,
           linesModified,
           messageCount: entry.messageCount,
           summary,
           modified: new Date(entry.modified),
-          tmuxPane,
+          tmuxPane: undefined,
         });
       }
     } catch {
-      // Skip malformed or unreadable index files
       continue;
     }
   }
 
   return sessions;
+}
+
+/**
+ * Get the current git branch for a project path.
+ * Returns empty string if not a git repo or command fails.
+ */
+async function getGitBranch(projectPath: string): Promise<string> {
+  try {
+    const output = await Bun.$`git -C ${projectPath} branch --show-current`.quiet().text();
+    return output.trim();
+  } catch {
+    return "";
+  }
 }
 
 /**

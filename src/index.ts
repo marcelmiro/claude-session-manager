@@ -69,6 +69,7 @@ function handleEnter() {
 async function handleResume() {
   const session = getSelectedSession();
   if (!session || session.status !== "idle") return;
+  if (!session.id) return;
 
   try {
     await Bun.$`tmux new-window -n "claude" "claude --resume ${session.id}"`.quiet();
