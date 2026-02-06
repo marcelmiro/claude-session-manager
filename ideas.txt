@@ -1,0 +1,84 @@
+CSM Ideas Backlog
+=================
+
+## User Ideas (original)
+
+- Open tmux popup with prefix + a                                          [MVP]
+- Show list of active claude code sessions                                 [MVP]
+- Each item: repo, branch/worktree, status, context %, lines modified      [MVP]
+- Vim-like navigation                                                      [MVP]
+- Open branch in Cursor IDE (cursor {path})
+- Run dev mode (bun --hot or bun run dev in worktree)
+- Create new session with worktree ability by choosing branch
+- 25% bottom preview of claude code window                                 [MVP]
+- Generate session name with AI (optional)
+- When selecting a session, open the correct tmux window/pane              [MVP]
+
+## New Ideas (from planning)
+
+### Actions & Workflows
+- n → new session workflow: pick repo → pick/create branch → optional worktree → launch claude
+- w → worktree manager sub-view (create/delete/list worktrees with session counts)
+- c → open worktree folder in Cursor IDE
+- d → launch dev server in worktree (configurable command per repo)
+- x → kill session with confirmation (SIGTERM)
+- X → kill session + optionally delete worktree
+- f → fork high-context session (claude -r {id} --fork-session)
+- / → filter/search sessions by repo, branch, or name
+- Tab → cycle sort mode (status / modified / repo / context)
+- Shift+j/k → scroll preview pane independently
+
+### AI Session Naming
+- Auto-generate 2-word kebab-case names via claude -p (non-interactive)
+- Cache names in ~/.config/csm/names.json
+- Press s to generate/regenerate, or manually edit
+- Examples: auth-flow, search-perf, api-refactor, dark-mode
+
+### Smart Status & Notifications
+- Background monitor: detect "running" → "input" transitions
+- Flash tmux window name when session needs input: rename-window "⚡ name"
+- tmux bell on status change (triggers visual-bell)
+- macOS system notification via osascript (optional)
+- Never miss a Claude session waiting for you while working in another
+
+### Context Health
+- Color-coded context %: green <50%, yellow 50-80%, red >80%
+- Warning when >80%: show "(fork?)" hint next to percentage
+- Blinking red at >90%: "FORK RECOMMENDED"
+- One-keypress fork to continue with fresh context
+
+### Session Grouping & Display
+- Group sessions by repo with collapsible headers
+- Toggle grouping on/off
+- Show time since last activity: "2m ago", "1h ago"
+- Session tagging / custom labels
+- Configurable columns (show/hide context, lines, etc.)
+
+### Worktree Management
+- Auto-generate worktree paths: ../repo.branch-name convention
+- Safety checks before deletion (uncommitted changes, running sessions)
+- Show session count per worktree
+- Quick-create: branch name → worktree + tmux window + claude in one step
+
+### Cleanup & Maintenance
+- Detect dead sessions (process gone, pane still open or closed)
+- Offer to clean up orphaned session files
+- Detect zombie tmux panes (no process, showing error/exit code)
+- Archive old sessions (move to ~/.claude/archive/)
+
+### Configuration
+- ~/.config/csm/config.json for persistent settings
+- Configurable refresh interval
+- Per-repo dev commands (bun --hot vs bun run dev vs custom)
+- Repo allowlist/blocklist
+- Custom keybindings
+- Worktree path template
+
+### Quality of Life
+- Tmux window auto-naming based on session/worktree
+- Quick-send keystrokes to a session without switching (approve tool call from manager)
+- Session duration tracking (how long has this been running?)
+- Show model being used per session (opus vs sonnet)
+- Copy session ID to clipboard
+- Export session log to markdown
+- Multiple tmux session support (not just "default")

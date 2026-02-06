@@ -1,0 +1,19 @@
+{
+  "name": "csm",
+  "version": "0.1.0",
+  "type": "module",
+  "bin": {
+    "csm": "./bin/csm.ts"
+  },
+  "scripts": {
+    "start": "bun run src/index.ts",
+    "dev": "bun --watch src/index.ts"
+  },
+  "dependencies": {
+    "blessed": "^0.1.81"
+  },
+  "devDependencies": {
+    "@types/blessed": "^0.1.25",
+    "bun-types": "latest"
+  }
+}
