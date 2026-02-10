@@ -6,12 +6,12 @@
  * Replaces the background monitor daemon — tmux IS the scheduler.
  */
 
-import { listPanes, capturePane } from "./core/tmux";
+import { listPanes, capturePane, renameWindow } from "./core/tmux";
 import { findClaudeProcesses } from "./core/process";
 import { detectStatus, type SessionStatus } from "./core/status";
 import { loadConfig } from "./core/config";
 import { loadState, saveState, computeAggregate, buildSessionStates } from "./core/state";
-import { detectTransitions, dispatchNotifications, clearWindowAttentionPrefix } from "./core/notifications";
+import { detectTransitions, dispatchNotifications } from "./core/notifications";
 import type { Session, AggregateStatus } from "./types";
 
 /**
@@ -71,15 +71,40 @@ async function quickDiscoverActive(): Promise<Session[]> {
 
 function formatWidget(aggregate: AggregateStatus): string {
   const parts: string[] = [];
-  if (aggregate.needsAttention > 0) parts.push(`⚡${aggregate.needsAttention}`);
-  if (aggregate.running > 0) parts.push(`🔄${aggregate.running}`);
+  if (aggregate.needsAttention > 0) parts.push(`⚡ ${aggregate.needsAttention}`);
+  if (aggregate.running > 0) parts.push(`🔄 ${aggregate.running}`);
   return parts.join(" ");
 }
 
 async function main(): Promise<void> {
   const [config, state] = await Promise.all([loadConfig(), loadState()]);
 
-  // If TUI updated state recently, just output from its data — don't re-poll
+  // Auto-clear: strip ⚡ from the window the user is currently viewing.
+  // Runs BEFORE the tuiRecent check so it works even while the TUI is active.
+  // Cost: ~6ms (two lightweight tmux queries), negligible vs 5s status-interval.
+  let activeWindow: string | undefined;
+  let activeSession: string | undefined;
+  try {
+    const client = (await Bun.$`tmux list-clients -F '#{client_name}'`.quiet().text()).trim().split("\n")[0];
+    if (client) {
+      const info = (await Bun.$`tmux display-message -c ${client} -p '#{window_index}:#{session_name}:#{window_name}'`.quiet().text()).trim();
+      const parts = info.split(":");
+      activeWindow = parts[0];
+      activeSession = parts[1];
+      const activeWindowName = parts[2];
+
+      // Always strip ⚡ from active window name (catches orphans)
+      if (activeWindowName?.startsWith("⚡")) {
+        await renameWindow(activeSession!, parseInt(activeWindow!, 10), activeWindowName.slice("⚡".length));
+      }
+    }
+  } catch {
+    // Not in tmux context
+  }
+
+  // If TUI updated state recently, just output from its data — don't re-poll.
+  // Don't save state here to avoid race with TUI's 3s writes — TUI will
+  // clear attention on its own within one cycle.
   const tuiRecent = state.lastUpdatedBy === "tui" && (Date.now() - state.lastUpdatedAt) < 10_000;
   if (tuiRecent) {
     const aggregate = computeAggregate(state);
@@ -102,8 +127,15 @@ async function main(): Promise<void> {
   // Carry over existing attention flags from state
   const needsAttention = new Set<string>();
   const attentionTypes = new Map<string, "blocked" | "turnComplete">();
+  // Build a quick lookup of current statuses
+  const currentStatusMap = new Map(sessions.map((s) => [s.tmuxPane!.paneId, s.status]));
   for (const [key, s] of Object.entries(state.sessions)) {
     if (s.needsAttention) {
+      const currentStatus = currentStatusMap.get(key);
+      // Clear stale attention: if session went back to running, user already interacted
+      if (currentStatus === "running") continue;
+      // Clear if pane no longer exists
+      if (!currentStatus) continue;
       needsAttention.add(key);
       if (s.attentionType) attentionTypes.set(key, s.attentionType);
     }
@@ -116,33 +148,16 @@ async function main(): Promise<void> {
     attentionTypes.set(event.sessionKey, event.classification as "blocked" | "turnComplete");
   }
 
-  // Clean attention for panes that no longer exist
-  const activePanes = new Set(sessions.map((s) => s.tmuxPane!.paneId));
-  for (const key of needsAttention) {
-    if (!activePanes.has(key)) {
-      needsAttention.delete(key);
-      attentionTypes.delete(key);
-    }
-  }
-
-  // Auto-clear attention when user is focused on an attention pane.
-  // Must use client-targeted display-message because #() status-right commands
-  // don't have an implicit client context.
-  try {
-    const client = (await Bun.$`tmux list-clients -F #{client_name}`.quiet().text()).trim().split("\n")[0];
-    if (client) {
-      const activePane = (await Bun.$`tmux display-message -c ${client} -p #{pane_id}`.quiet().text()).trim();
-      if (needsAttention.has(activePane)) {
-        needsAttention.delete(activePane);
-        attentionTypes.delete(activePane);
-        const session = sessions.find((s) => s.tmuxPane?.paneId === activePane);
-        if (session?.tmuxPane) {
-          await clearWindowAttentionPrefix(session.tmuxPane.sessionName, session.tmuxPane.windowIndex);
-        }
+  // Clear attention flags for panes in the active window
+  if (activeWindow) {
+    for (const session of sessions) {
+      if (!session.tmuxPane) continue;
+      const key = session.tmuxPane.paneId;
+      if (String(session.tmuxPane.windowIndex) === activeWindow) {
+        needsAttention.delete(key);
+        attentionTypes.delete(key);
       }
     }
-  } catch {
-    // Not in tmux context
   }
 
   // Dispatch notifications for transitions
@@ -150,8 +165,8 @@ async function main(): Promise<void> {
     await dispatchNotifications(notable, config);
   }
 
-  // Save state
-  const sessionStates = buildSessionStates(sessions, needsAttention, attentionTypes);
+  // Save state (pass previous states to preserve original transition timestamps)
+  const sessionStates = buildSessionStates(sessions, needsAttention, attentionTypes, state.sessions);
   const newState = { lastUpdatedBy: "monitor" as const, lastUpdatedAt: Date.now(), sessions: sessionStates };
   await saveState(newState);
 

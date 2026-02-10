@@ -51,12 +51,14 @@ export function buildSessionStates(
   sessions: Session[],
   needsAttention: Set<string>,
   attentionTypes: Map<string, "blocked" | "turnComplete">,
+  previousStates?: Record<string, SessionNotificationState>,
 ): Record<string, SessionNotificationState> {
   const states: Record<string, SessionNotificationState> = {};
 
   for (const session of sessions) {
     if (!session.tmuxPane) continue;
     const key = session.tmuxPane.paneId;
+    const prev = previousStates?.[key];
     states[key] = {
       status: session.status,
       needsAttention: needsAttention.has(key),
@@ -65,7 +67,10 @@ export function buildSessionStates(
       tmuxWindow: session.tmuxPane.windowIndex,
       tmuxPane: session.tmuxPane.paneId,
       windowName: session.name || session.tmuxPane.windowName,
-      lastTransition: needsAttention.has(key) ? Date.now() : undefined,
+      // Preserve original transition time; only set when newly added to attention
+      lastTransition: needsAttention.has(key)
+        ? (prev?.needsAttention ? prev.lastTransition : Date.now())
+        : undefined,
     };
   }
 

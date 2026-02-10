@@ -1,6 +1,6 @@
 import type { NotificationConfig, Session, TransitionEvent } from "../types";
 import type { SessionStatus } from "./status";
-import { renameWindow, getWindowName, sendBell, displayMessage } from "./tmux";
+import { renameWindow, getWindowName } from "./tmux";
 
 const ATTENTION_PREFIX = "⚡";
 
@@ -50,9 +50,9 @@ export function classifyTransition(
 }
 
 /**
- * Dispatch notifications for transition events across all 3 tiers.
- * Tier 1 (status widget) is handled externally via writeStatusWidget.
- * Tier 2 (window prefix) and Tier 3 (bell) are dispatched here.
+ * Dispatch notifications for transition events.
+ * Tier 1 (status widget) is handled externally via state.
+ * Tier 2 (window ⚡ prefix) is dispatched here.
  */
 export async function dispatchNotifications(
   events: TransitionEvent[],
@@ -75,26 +75,6 @@ export async function dispatchNotifications(
         );
       }
     }
-
-    // Tier 3: Bell (all transitions by default, or just blocked if configured)
-    if (config.bell) {
-      const shouldBell =
-        config.bellOn === "all" || event.classification === "blocked";
-      if (shouldBell) {
-        await sendBell(session.tmuxPane.paneId);
-      }
-    }
-  }
-
-  // Tier 4: tmux display-message showing which session(s) transitioned
-  const notable = events.filter((e) => e.classification !== "none");
-  if (notable.length > 0) {
-    const parts = notable.map((e) => {
-      const name = e.session.name || e.session.tmuxPane?.windowName || "session";
-      const what = e.classification === "blocked" ? "needs approval" : "finished";
-      return `${name} ${what}`;
-    });
-    await displayMessage(`⚡ ${parts.join(", ")}`);
   }
 }
 

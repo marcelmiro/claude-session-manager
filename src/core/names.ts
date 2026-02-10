@@ -1,46 +1,16 @@
 import { homedir } from "os";
 
 export interface NameCache {
-  version: 1;
-  names: Record<string, string>;
+  version: 2;
+  names: Record<string, string>;     // sessionId → name
+  sources: Record<string, string>;   // sessionId → summary/prompt used for naming
 }
 
 const CACHE_PATH = `${homedir()}/.config/csm/names.json`;
 
-const STRIP_PREFIXES = [
-  "implement the following plan", "implement the following",
-  "implement this plan", "follow this plan",
-  "i want you to", "i need you to", "i'd like you to",
-  "can you", "could you", "please", "i want to", "i need to",
-  "i'd like to", "let's", "help me", "go ahead and",
-];
-
-const STOP_WORDS = new Set([
-  "a", "an", "the", "is", "are", "was", "were", "be", "been",
-  "to", "of", "in", "for", "on", "with", "at", "by", "from",
-  "it", "its", "this", "that", "my", "me", "i", "and", "or",
-  "but", "so", "if", "as", "do", "does", "did", "will", "would",
-  "should", "could", "can", "have", "has", "had", "not", "no",
-  "all", "some", "any", "each", "every", "into", "up", "out",
-  "just", "also", "very", "really", "quite", "about", "here",
-  "there", "then", "than", "now", "how", "what", "which",
-  "implement", "following", "need", "want", "make", "look",
-  "check", "investigate", "think", "consider", "ensure", "try",
-  "using", "use", "like", "know", "get", "take", "give",
-]);
-
-// Lighter stop words for summaries (already concise — only filter articles/prepositions)
-const SUMMARY_STOP_WORDS = new Set([
-  "a", "an", "the", "to", "of", "in", "for", "on", "with", "at", "by", "from",
-  "and", "or", "but", "is", "are", "was", "were",
-]);
-
-// Words that are too generic to form a useful name on their own
-const GENERIC_NAME_WORDS = new Set([
-  "implement", "plan", "task", "feature", "fix", "update", "change",
-  "add", "create", "build", "new", "this", "that", "following",
-  "do", "run", "execute", "complete", "follow", "make",
-]);
+let isGenerating = false;
+const pendingQueue: Array<{ sessionId: string; firstPrompt: string; summary: string }> = [];
+const failedIds = new Set<string>();
 
 /**
  * Extract a meaningful title from structured prompts like:
@@ -68,65 +38,6 @@ export function extractPlanTitle(prompt: string): string {
   title = title.replace(/\s+Plan\s*$/i, "");
 
   return title.trim();
-}
-
-/**
- * Convert a curated summary to a kebab-case name.
- * Uses lighter stop word filtering since summaries are already concise.
- */
-export function generateNameFromSummary(summary: string): string {
-  if (!summary || summary.length > 100) return "";
-
-  // Skip generic summaries
-  const lower = summary.toLowerCase().trim();
-  if (lower === "no prompt" || lower === "" || lower.startsWith("no ")) return "";
-
-  // Remove punctuation and extra whitespace
-  const text = summary.replace(/[^\w\s-]/g, " ").replace(/\s+/g, " ").trim().toLowerCase();
-
-  // Split into words, filter light stop words, take first 4 meaningful words
-  const words = text.split(" ")
-    .filter((w) => w.length > 1 && !SUMMARY_STOP_WORDS.has(w))
-    .slice(0, 4);
-
-  if (words.length === 0) return "";
-
-  // If every word is generic filler ("implement plan"), fall through to other signals
-  if (words.every((w) => GENERIC_NAME_WORDS.has(w))) return "";
-
-  return words.join("-");
-}
-
-/**
- * Programmatic name generation: strip prefixes, remove punctuation,
- * filter stop words, take first 2-3 meaningful words, kebab-case.
- */
-export function generateNameFromPrompt(prompt: string): string {
-  if (!prompt) return "";
-
-  let text = prompt.toLowerCase().trim();
-
-  // Strip role-playing/persona preambles: "as the company's CTO and chief product officer, ..."
-  text = text.replace(/^as\s+[^,.]+[,.]\s*/, "");
-
-  // Strip common conversational prefixes
-  for (const prefix of STRIP_PREFIXES) {
-    if (text.startsWith(prefix + " ")) {
-      text = text.slice(prefix.length).trim();
-    }
-  }
-
-  // Remove punctuation and extra whitespace
-  text = text.replace(/[^\w\s-]/g, " ").replace(/\s+/g, " ").trim();
-
-  // Split into words, filter stop words, take first 3 meaningful words
-  const words = text.split(" ")
-    .filter((w) => w.length > 1 && !STOP_WORDS.has(w))
-    .slice(0, 3);
-
-  if (words.length === 0) return "";
-
-  return words.join("-");
 }
 
 /**
@@ -164,11 +75,15 @@ export async function loadNameCache(): Promise<NameCache> {
   try {
     const raw = await Bun.file(CACHE_PATH).text();
     const parsed = JSON.parse(raw);
-    if (parsed.version === 1 && parsed.names) return parsed;
+    if (parsed.version === 2 && parsed.names) return parsed;
+    // Migrate from v1: carry over names, sources unknown
+    if (parsed.version === 1 && parsed.names) {
+      return { version: 2, names: parsed.names, sources: {} };
+    }
   } catch {
     // No cache or malformed
   }
-  return { version: 1, names: {} };
+  return { version: 2, names: {}, sources: {} };
 }
 
 export async function saveNameCache(cache: NameCache): Promise<void> {
@@ -182,27 +97,63 @@ export async function saveNameCache(cache: NameCache): Promise<void> {
 }
 
 /**
- * Get session name using multi-signal priority chain:
- * 1. Cache (existing AI-generated name)
- * 2. summary (from sessions-index.json — concise, topic-focused)
- * 3. Plan title (extracted from "# Plan: Title" in firstPrompt)
- * 4. firstPrompt (current behavior, with better prefix/stop word handling)
+ * Get session name from cache. Returns empty string if not cached.
+ * Window stays as-is (e.g. "claude") until AI naming completes.
  */
-export function getSessionName(sessionId: string, firstPrompt: string, summary: string, cache: NameCache): string {
-  if (cache.names[sessionId]) return cache.names[sessionId];
+export function getSessionName(sessionId: string, cache: NameCache): string {
+  return cache.names[sessionId] || "";
+}
 
-  // Use summary if it's a real summary (not just echoing firstPrompt)
-  if (summary && summary !== firstPrompt) {
-    const name = generateNameFromSummary(summary);
-    if (name) return name;
+/**
+ * Enqueue a session for AI naming.
+ * Re-queues if the summary has changed since last naming (session reuse).
+ */
+export function enqueueAutoName(sessionId: string, firstPrompt: string, summary: string, cache: NameCache): void {
+  if (!firstPrompt && !summary) return;
+  if (pendingQueue.some((item) => item.sessionId === sessionId)) return;
+
+  const currentSource = summary || firstPrompt;
+  const cachedName = cache.names[sessionId];
+  const cachedSource = cache.sources[sessionId];
+
+  if (cachedName) {
+    // Already named — check if summary changed
+    if (cachedSource === currentSource) return; // Still fresh
+    // Summary changed — invalidate and re-queue
+    delete cache.names[sessionId];
+    delete cache.sources[sessionId];
+    failedIds.delete(sessionId);
+  } else {
+    if (failedIds.has(sessionId)) return;
   }
 
-  // Try extracting a plan title from structured prompts
-  const planTitle = extractPlanTitle(firstPrompt);
-  if (planTitle) {
-    const name = generateNameFromPrompt(planTitle);
-    if (name) return name;
-  }
+  pendingQueue.push({ sessionId, firstPrompt, summary });
+}
 
-  return generateNameFromPrompt(firstPrompt);
+export function processAutoNameQueue(cache: NameCache): void {
+  if (isGenerating) return;
+  // Skip items already cached (may have been named manually since enqueue)
+  while (pendingQueue.length > 0 && cache.names[pendingQueue[0].sessionId]) {
+    pendingQueue.shift();
+  }
+  const item = pendingQueue.shift();
+  if (!item) return;
+  isGenerating = true;
+  generateAIName(item.firstPrompt, item.summary).then(async (name) => {
+    if (name) {
+      cache.names[item.sessionId] = name;
+      cache.sources[item.sessionId] = item.summary || item.firstPrompt;
+      await saveNameCache(cache);
+    } else {
+      failedIds.add(item.sessionId);
+    }
+    isGenerating = false;
+  }).catch(() => {
+    failedIds.add(item.sessionId);
+    isGenerating = false;
+  });
+}
+
+export function clearAutoNameFailure(sessionId: string): void {
+  failedIds.delete(sessionId);
 }
