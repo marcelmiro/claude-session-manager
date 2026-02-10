@@ -1,3 +1,53 @@
 #!/usr/bin/env bun
-import "../src/index";
+export {};
 
+function help() {
+  console.log(`
+  \x1b[1mcsm\x1b[0m — Claude Session Manager
+
+  \x1b[1mUsage:\x1b[0m  csm [command]
+
+  \x1b[1mCommands:\x1b[0m
+    \x1b[36m(none)\x1b[0m              Open the full TUI
+    \x1b[36mnext\x1b[0m                Switch to next attention session (oldest first)
+    \x1b[36mreset\x1b[0m               Reset all window names and clear attention state
+    \x1b[36mstatus\x1b[0m              Tmux status-right widget (⚡3 🔄2)
+    \x1b[36mlist\x1b[0m                Print sessions with status, repo, and context %
+    \x1b[36mswitch <name>\x1b[0m       Fuzzy-match a session by name and switch to it
+
+  \x1b[1mOptions:\x1b[0m
+    \x1b[36m-h, --help\x1b[0m          Show this help message
+`.trimEnd());
+}
+
+const cmd = process.argv[2];
+
+switch (cmd) {
+  case undefined:
+    await import("../src/index");
+    break;
+  case "-h":
+  case "--help":
+  case "help":
+    help();
+    break;
+  case "next":
+    await import("../src/cli").then((m) => m.next());
+    break;
+  case "reset":
+    await import("../src/cli").then((m) => m.reset());
+    break;
+  case "status":
+    await import("../src/status-widget");
+    break;
+  case "list":
+    await import("../src/cli").then((m) => m.list());
+    break;
+  case "switch":
+    await import("../src/cli").then((m) => m.switchTo(process.argv[3]));
+    break;
+  default:
+    console.error(`Unknown command: ${cmd}`);
+    help();
+    process.exit(1);
+}
