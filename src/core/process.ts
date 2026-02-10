@@ -45,10 +45,16 @@ export async function findClaudeProcesses(opts?: { skipSessionIds?: boolean }): 
       // Skip entries with no associated TTY
       if (tty === "??") continue;
 
+      // Extract session ID from --resume/-r flag if present (fast, no lsof needed)
+      const resumeMatch = command.match(
+        /(?:--resume|-r)[\s=]+([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/,
+      );
+
       results.push({
         pid: parseInt(pidStr, 10),
         tty,
         command,
+        sessionId: resumeMatch?.[1],
       });
     }
 
@@ -56,7 +62,8 @@ export async function findClaudeProcesses(opts?: { skipSessionIds?: boolean }): 
     if (!opts?.skipSessionIds && results.length > 0) {
       const pidSessionMap = await resolveSessionIds(results.map((r) => r.pid));
       for (const proc of results) {
-        proc.sessionId = pidSessionMap.get(proc.pid);
+        const lsofId = pidSessionMap.get(proc.pid);
+        if (lsofId) proc.sessionId = lsofId;
       }
     }
 
@@ -68,7 +75,11 @@ export async function findClaudeProcesses(opts?: { skipSessionIds?: boolean }): 
 
 /**
  * Use lsof to find which session ID each Claude PID has open.
- * Claude processes keep an open handle to ~/.claude/tasks/{sessionId}/.
+ * Checks two paths: ~/.claude/tasks/{sessionId}/ (lock/state dir)
+ * and ~/.claude/projects/{project}/{sessionId}.jsonl (session log).
+ * Note: many Claude processes don't keep these handles open,
+ * so this is best-effort — other resolution methods (command-line
+ * --resume flag, window name reverse lookup) supplement lsof.
  */
 export async function resolveSessionIds(pids: number[]): Promise<Map<number, string>> {
   const map = new Map<number, string>();
@@ -76,11 +87,15 @@ export async function resolveSessionIds(pids: number[]): Promise<Map<number, str
     const pidArg = pids.join(",");
     const output = await Bun.$`/usr/sbin/lsof -p ${pidArg}`.quiet().nothrow().text();
 
-    // Match lines containing .claude/tasks/{uuid}
-    const taskDirRegex = /\.claude\/tasks\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/;
+    const UUID = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
+    // Primary: .claude/tasks/{uuid} directory handle
+    const taskDirRegex = new RegExp(`\\.claude/tasks/(${UUID})`);
+    // Fallback: .claude/projects/*/{uuid}.jsonl file handle
+    const jsonlFileRegex = new RegExp(`\\.claude/projects/[^/]+/(${UUID})\\.jsonl`);
 
     for (const line of output.split("\n")) {
-      const match = line.match(taskDirRegex);
+      let match = line.match(taskDirRegex);
+      if (!match) match = line.match(jsonlFileRegex);
       if (!match) continue;
 
       // Extract PID from the line (second whitespace-delimited field)

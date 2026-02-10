@@ -21,7 +21,7 @@ const paneSessionCache = new Map<string, string>();
  * Phase A: Active sessions from tmux panes (source of truth)
  * Phase B: Idle sessions from index files (secondary, filtered)
  */
-export async function discoverSessions(opts?: { skipArchivedSummaries?: boolean; skipSessionIds?: boolean }): Promise<Session[]> {
+export async function discoverSessions(opts?: { skipArchivedSummaries?: boolean; skipSessionIds?: boolean; nameMap?: Record<string, string> }): Promise<Session[]> {
   const home = homedir();
   const projectsDir = `${home}/.claude/projects`;
 
@@ -64,7 +64,7 @@ export async function discoverSessions(opts?: { skipArchivedSummaries?: boolean;
   }
 
   // Enrich active sessions that still couldn't resolve a session ID
-  await enrichUnmatchedSessions(activeSessions, projectsDir);
+  await enrichUnmatchedSessions(activeSessions, projectsDir, opts?.nameMap);
 
   // Clean stale cache entries for panes that no longer exist
   const activePaneIds = new Set(claudePanesWithProc.map(({ pane }) => pane.paneId));
@@ -79,19 +79,42 @@ export async function discoverSessions(opts?: { skipArchivedSummaries?: boolean;
 }
 
 /**
- * For active sessions that couldn't resolve a session ID via lsof,
- * try to assign distinct index entries from the same project.
+ * For active sessions that couldn't resolve a session ID via lsof or
+ * command-line flags, try to match them using two strategies:
  *
- * Uses JSONL file mtime (not index timestamps) to identify which sessions
- * are actually active — active Claude processes continuously write to their
- * JSONL files, so recently-modified files correspond to running sessions.
+ * 1. Window name reverse lookup (reliable): If the tmux window was previously
+ *    named by CSM, look up the name in the name cache to find the session ID.
+ *    Only matches unique names (skips collisions within same repo).
+ *
+ * 2. JSONL mtime heuristic (1:1 only): When exactly one unmatched session
+ *    exists per repo, assign the most recently modified JSONL. With multiple
+ *    sessions, this is unreliable (tmux pane order doesn't correlate with
+ *    JSONL mtime order) so we skip it to avoid swapping metadata.
  */
-async function enrichUnmatchedSessions(sessions: Session[], projectsDir: string): Promise<void> {
+async function enrichUnmatchedSessions(
+  sessions: Session[],
+  projectsDir: string,
+  nameMap?: Record<string, string>,
+): Promise<void> {
   const unmatched = sessions.filter((s) => !s.id);
   if (unmatched.length === 0) return;
 
   // Collect session IDs already claimed by matched sessions
   const claimedIds = new Set(sessions.filter((s) => s.id).map((s) => s.id));
+
+  // Build reverse name lookup: windowName → sessionId
+  // (from CSM's name cache — names were set by AI naming in a previous cycle)
+  const reverseNameMap = new Map<string, string>();
+  if (nameMap) {
+    for (const [sessionId, name] of Object.entries(nameMap)) {
+      // If two sessions share a name, mark it as ambiguous (skip during matching)
+      if (reverseNameMap.has(name)) {
+        reverseNameMap.set(name, ""); // empty = ambiguous
+      } else {
+        reverseNameMap.set(name, sessionId);
+      }
+    }
+  }
 
   // Group unmatched sessions by repoPath
   const byRepo = new Map<string, Session[]>();
@@ -108,6 +131,7 @@ async function enrichUnmatchedSessions(sessions: Session[], projectsDir: string)
     try {
       const encodedPath = repoPath.replace(/\//g, "-");
       const projectDir = `${projectsDir}/${encodedPath}`;
+      const repoName = repoPath.split("/").filter(Boolean).pop() ?? "";
 
       // Read the index once for summary lookup
       let index: SessionIndex | null = null;
@@ -134,43 +158,102 @@ async function enrichUnmatchedSessions(sessions: Session[], projectsDir: string)
         }
       }
 
-      // Sort by mtime desc — most recently written JSONL files first
       candidates.sort((a, b) => b.mtime - a.mtime);
+      const candidateSet = new Set(candidates.map((c) => c.sessionId));
 
-      // Assign one per unmatched session
-      for (let i = 0; i < repoSessions.length && i < candidates.length; i++) {
-        const { sessionId, mtime } = candidates[i];
-        const session = repoSessions[i];
-
-        // Use JSONL file mtime as authoritative last-activity time
-        session.modified = new Date(mtime);
-
-        // Enrich from index if available
-        const entry = index?.entries.find((e) => e.sessionId === sessionId);
-        if (entry) {
-          session.id = entry.sessionId;
-          session.messageCount = entry.messageCount;
-          session.summary = (entry.summary || entry.firstPrompt || "").replace(/\s+/g, " ").trim();
-          session.firstPrompt = entry.firstPrompt || "";
-          session.contextPercent = estimateContextPercent(entry.messageCount);
-        } else {
-          // No index entry — read first prompt from JSONL
-          session.id = sessionId;
-          const prompt = await getFirstUserPrompt(`${projectDir}/${sessionId}.jsonl`);
-          session.summary = prompt;
-          session.firstPrompt = prompt;
+      // Strategy 1: Window name reverse lookup
+      // Match tmux window names against the name cache to find session IDs.
+      // Skip default names ("claude", repo name) and names that appear on
+      // multiple unmatched panes in this repo (ambiguous).
+      if (reverseNameMap.size > 0) {
+        // Count window name occurrences among unmatched panes in this repo
+        // to detect collisions (e.g., two panes both named "you-recently-implemented")
+        const nameCount = new Map<string, number>();
+        for (const session of repoSessions) {
+          const wn = normalizeWindowName(session.tmuxPane?.windowName, repoName);
+          if (wn) nameCount.set(wn, (nameCount.get(wn) ?? 0) + 1);
         }
 
+        for (const session of repoSessions) {
+          if (session.id) continue; // already matched
+
+          const windowName = normalizeWindowName(session.tmuxPane?.windowName, repoName);
+          if (!windowName) continue;
+
+          // Skip if multiple unmatched panes share this window name (ambiguous)
+          if ((nameCount.get(windowName) ?? 0) > 1) continue;
+
+          const sessionId = reverseNameMap.get(windowName);
+          if (!sessionId || claimedIds.has(sessionId)) continue;
+
+          // Verify this session ID has a JSONL candidate in this project
+          if (!candidateSet.has(sessionId)) continue;
+
+          const candidate = candidates.find((c) => c.sessionId === sessionId);
+          await enrichSession(session, sessionId, candidate?.mtime, index, projectDir);
+          claimedIds.add(sessionId);
+
+          // Cache window-name matches — these are reliable (CSM set the name)
+          if (session.tmuxPane) {
+            paneSessionCache.set(session.tmuxPane.paneId, sessionId);
+          }
+        }
+      }
+
+      // Strategy 2: JSONL mtime heuristic (only for 1:1 case)
+      // After window name matching, check if exactly one unmatched session remains
+      const stillUnmatched = repoSessions.filter((s) => !s.id);
+      const unclaimed = candidates.filter((c) => !claimedIds.has(c.sessionId));
+
+      if (stillUnmatched.length === 1 && unclaimed.length >= 1) {
+        const { sessionId, mtime } = unclaimed[0];
+        const session = stillUnmatched[0];
+
+        await enrichSession(session, sessionId, mtime, index, projectDir);
         claimedIds.add(sessionId);
 
-        // Cache so this pane keeps its assignment across refreshes
-        if (session.tmuxPane) {
-          paneSessionCache.set(session.tmuxPane.paneId, sessionId);
-        }
+        // NOTE: We intentionally do NOT cache mtime-heuristic assignments in
+        // paneSessionCache. Only lsof-confirmed and window-name-confirmed
+        // mappings should be cached, to prevent wrong mappings from persisting.
       }
     } catch {
       // Skip this repo
     }
+  }
+}
+
+/** Normalize a tmux window name for matching: strip ⚡ prefix, skip defaults */
+function normalizeWindowName(windowName: string | undefined, repoName: string): string | null {
+  if (!windowName) return null;
+  let name = windowName;
+  // Strip attention prefix
+  if (name.startsWith("⚡")) name = name.slice("⚡".length);
+  // Skip default/generic names
+  if (name === "claude" || name === repoName || name === "zsh" || name === "bash") return null;
+  return name;
+}
+
+/** Populate a session object with metadata from index/JSONL */
+async function enrichSession(
+  session: Session,
+  sessionId: string,
+  mtime: number | undefined,
+  index: SessionIndex | null,
+  projectDir: string,
+): Promise<void> {
+  session.id = sessionId;
+  if (mtime) session.modified = new Date(mtime);
+
+  const entry = index?.entries.find((e) => e.sessionId === sessionId);
+  if (entry) {
+    session.messageCount = entry.messageCount;
+    session.summary = (entry.summary || entry.firstPrompt || "").replace(/\s+/g, " ").trim();
+    session.firstPrompt = entry.firstPrompt || "";
+    session.contextPercent = estimateContextPercent(entry.messageCount);
+  } else {
+    const prompt = await getFirstUserPrompt(`${projectDir}/${sessionId}.jsonl`);
+    session.summary = prompt;
+    session.firstPrompt = prompt;
   }
 }
 
