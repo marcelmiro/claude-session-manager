@@ -9,8 +9,6 @@ import { listPanes, capturePane } from "./tmux";
 import { findClaudeProcesses } from "./process";
 import { detectStatus, estimateContextPercent, type StatusResult } from "./status";
 
-const PRIORITY_REPOS = ["throxy"];
-
 // Persistent cache: paneId → sessionId, survives across refresh cycles.
 // Populated by lsof (confirmed) or JSONL mtime heuristic (best-guess).
 // Once set, prevents re-running the expensive heuristic every 3s.
@@ -534,7 +532,7 @@ async function getGitBranch(projectPath: string): Promise<string> {
  * Group sessions by repo name, sorted alphabetically.
  * Sessions within each group are sorted by status priority, then by modified desc.
  */
-export function groupSessions(sessions: Session[]): RepoGroup[] {
+export function groupSessions(sessions: Session[], priorityRepos: string[]): RepoGroup[] {
   const statusPriority: Record<Session["status"], number> = {
     waiting: 0,
     running: 1,
@@ -578,8 +576,8 @@ export function groupSessions(sessions: Session[]): RepoGroup[] {
 
   // Sort groups: priority repos first (in array order), then alphabetical
   groups.sort((a, b) => {
-    const aPriority = PRIORITY_REPOS.indexOf(a.name.toLowerCase());
-    const bPriority = PRIORITY_REPOS.indexOf(b.name.toLowerCase());
+    const aPriority = priorityRepos.indexOf(a.name.toLowerCase());
+    const bPriority = priorityRepos.indexOf(b.name.toLowerCase());
     if (aPriority !== -1 && bPriority !== -1) return aPriority - bPriority;
     if (aPriority !== -1) return -1;
     if (bPriority !== -1) return 1;

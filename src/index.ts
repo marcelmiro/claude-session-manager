@@ -123,7 +123,7 @@ async function refresh(opts?: { skipArchivedSummaries?: boolean; skipSessionIds?
     }
     processAutoNameQueue(nameCache);
 
-    const groups = groupSessions(sessions);
+    const groups = groupSessions(sessions, notifConfig.priorityRepos ?? []);
 
     // Detect transitions and update attention tracking
     const transitions = detectTransitions(previousStatuses, sessions);
@@ -478,7 +478,7 @@ screen.key(["n"], async () => {
   const sessionRepos = getUniqueRepos(rows);
 
   // Discover repos (merge session repos + config paths)
-  const repos = await discoverRepos(sessionRepos, notifConfig.repoPaths ?? []);
+  const repos = await discoverRepos(sessionRepos, notifConfig.repoPaths ?? [], notifConfig.priorityRepos ?? []);
 
   if (repos.length === 0) {
     flashStatusMessage(`{${C.dim}-fg}No repos found{/${C.dim}-fg}`);

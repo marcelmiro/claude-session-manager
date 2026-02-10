@@ -13,6 +13,7 @@ const DEFAULT_CONFIG: CsmConfig = {
   statusWidget: true,
   windowPrefix: true,
   repoPaths: ["~/Documents"],
+  priorityRepos: ["throxy"],
 };
 
 export async function loadConfig(): Promise<CsmConfig> {

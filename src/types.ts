@@ -155,5 +155,6 @@ export type WizardAction =
 export interface CsmConfig {
   statusWidget: boolean;
   windowPrefix: boolean;
-  repoPaths?: string[];      // dirs to scan 1-level deep for git repos
+  repoPaths?: string[];       // dirs to scan 1-level deep for git repos
+  priorityRepos?: string[];   // repo names pinned at top of list (lowercase)
 }

@@ -1,15 +1,14 @@
 import { homedir } from "os";
 import type { WizardRepo, WizardBranch } from "../types";
 
-const PRIORITY_REPOS = ["throxy"];
-
 /**
  * Discover git repos from session display rows + configured paths.
- * Dedup by path, sort by PRIORITY_REPOS then alphabetical.
+ * Dedup by path, sort by priorityRepos then alphabetical.
  */
 export async function discoverRepos(
   sessionRepos: Array<{ name: string; path: string }>,
   repoPaths: string[],
+  priorityRepos: string[],
 ): Promise<WizardRepo[]> {
   const seen = new Map<string, { name: string; path: string }>();
 
@@ -49,8 +48,8 @@ export async function discoverRepos(
 
   // Sort: priority repos first, then alphabetical
   repos.sort((a, b) => {
-    const ap = PRIORITY_REPOS.indexOf(a.name.toLowerCase());
-    const bp = PRIORITY_REPOS.indexOf(b.name.toLowerCase());
+    const ap = priorityRepos.indexOf(a.name.toLowerCase());
+    const bp = priorityRepos.indexOf(b.name.toLowerCase());
     if (ap !== -1 && bp !== -1) return ap - bp;
     if (ap !== -1) return -1;
     if (bp !== -1) return 1;
