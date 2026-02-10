@@ -77,10 +77,6 @@ export interface NotificationConfig {
   statusWidget: boolean;
   /** Enable window name ⚡ prefix (Tier 2) */
   windowPrefix: boolean;
-  /** Enable terminal bell (Tier 3) */
-  bell: boolean;
-  /** Which transitions trigger bell (Tier 3) */
-  bellOn: "blocked" | "all";
 }
 
 export interface SessionNotificationState {
@@ -114,4 +110,50 @@ export interface TransitionEvent {
   currentStatus: string;
   classification: "blocked" | "turnComplete" | "none";
   session: Session;
+}
+
+// --- New Session Wizard types ---
+
+export interface WizardRepo {
+  name: string;           // last path component
+  path: string;           // absolute repo path
+  currentBranch: string;  // checked-out branch
+}
+
+export interface WizardBranch {
+  name: string;        // local name (remotes/origin/ stripped)
+  isRemote: boolean;   // remote-only branch
+  isCurrent: boolean;  // repo's current branch
+  fullRef: string;     // original ref
+}
+
+export type WizardStep = "repo" | "branch" | "worktree";
+
+export interface WizardState {
+  step: WizardStep;
+  repos: WizardRepo[];
+  repoIndex: number;
+  selectedRepo: WizardRepo | null;
+  branches: WizardBranch[];
+  filteredBranches: WizardBranch[];
+  branchIndex: number;
+  branchFilter: string;
+  branchFilterActive: boolean;
+  selectedBranch: WizardBranch | null;
+  worktreeIndex: number;       // 0 = no worktree, 1 = create
+  worktreePath: string;        // computed: ../repo.branch
+}
+
+export type WizardAction =
+  | { type: "noop" }
+  | { type: "render" }
+  | { type: "preview" }
+  | { type: "cancel" }
+  | { type: "loadBranches" }
+  | { type: "launch"; repo: WizardRepo; branch: WizardBranch; worktree: boolean; worktreePath: string };
+
+export interface CsmConfig {
+  statusWidget: boolean;
+  windowPrefix: boolean;
+  repoPaths?: string[];      // dirs to scan 1-level deep for git repos
 }

@@ -13,6 +13,7 @@ export function renderStatusBar(box: Widgets.BoxElement, enterAction?: SessionSt
     `  {${C.peach}-fg}f{/${C.peach}-fg} {${C.dim}-fg}fork{/${C.dim}-fg}` +
     `  {${C.peach}-fg}s{/${C.peach}-fg} {${C.dim}-fg}name{/${C.dim}-fg}` +
     `  {${C.peach}-fg}u/d{/${C.peach}-fg} {${C.dim}-fg}scroll{/${C.dim}-fg}` +
+    `  {${C.peach}-fg}n{/${C.peach}-fg} {${C.dim}-fg}new{/${C.dim}-fg}` +
     `  {${C.peach}-fg}q{/${C.peach}-fg} {${C.dim}-fg}quit{/${C.dim}-fg}` +
     `  {${C.peach}-fg}a{/${C.peach}-fg} {${C.dim}-fg}${archiveLabel}{/${C.dim}-fg}`;
   box.setContent(content);

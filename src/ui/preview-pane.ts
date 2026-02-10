@@ -194,7 +194,7 @@ function convertLine(line: string, state: TermStyle): string {
  * Convert ANSI-colored terminal output into blessed tag markup.
  * Each output line is self-contained so slicing for bottom-alignment is safe.
  */
-function ansiToBlessedMarkup(text: string): string {
+export function ansiToBlessedMarkup(text: string): string {
   const cleaned = stripNonSgrAnsi(text);
   const lines = cleaned.split("\n");
   const state: TermStyle = { fg: null, bg: null, bold: false, italic: false };
