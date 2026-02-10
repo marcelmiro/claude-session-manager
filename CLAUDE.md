@@ -1,38 +1,66 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
-
 # CSM — Claude Session Manager
 
-Full-screen terminal TUI (blessed) for managing Claude Code sessions. Launched via `tmux display-popup`. Shows sessions grouped by repo with live status detection, preview pane, and vim navigation.
+Full-screen terminal TUI (blessed) for managing Claude Code sessions. Launched via `tmux display-popup`. Shows sessions grouped by repo with live status detection, ANSI preview pane, vim navigation, attention notifications, and AI naming.
 
 ## Commands
 
 ```sh
-bun run src/index.ts      # Run directly
-bun run start             # Same as above
+bun run start             # Run TUI
 bun run dev               # Watch mode (--watch)
+bun run status            # Lightweight tmux status-right widget
 bun test                  # Run tests (bun:test)
 ```
 
-Entry: `bin/csm.ts` → `src/index.ts`
+Entry: `bin/csm.ts` (CLI router) → `src/index.ts` (TUI) or `src/cli.ts` (subcommands)
+
+## CLI subcommands
+
+`bin/csm.ts` routes based on `process.argv[2]`. All subcommands except `status` live in `src/cli.ts`.
+
+| Command | Description | Output |
+|---------|-------------|--------|
+| `csm` | Open full TUI | blessed screen |
+| `csm next` | Switch to next attention session (oldest first) | tmux display-message |
+| `csm reset` | Reset all window names to "claude", clear ⚡ and attention state | tmux display-message |
+| `csm status` | Tmux status-right widget (`⚡3 🔄2`) | stdout |
+| `csm list` | Text-only session list with status/repo/context% | stdout |
+| `csm switch <name>` | Fuzzy-match session by name and switch to it | tmux display-message |
+| `csm --help` | Show available commands and usage | stdout |
+
+**Testing subcommands**: Use `bun run bin/csm.ts <cmd>` to test without installing globally. Example: `bun run bin/csm.ts list` prints active sessions to stdout — useful for verifying session discovery, status detection, and name resolution without launching the TUI.
+
+**`csm next` details**: Reads `state.json` attention flags, picks the session with the oldest `lastTransition` timestamp, clears its attention flag, strips ⚡ prefix, and calls `switchToPane()`.
+
+**`csm reset` details**: Lists all tmux windows, renames any with non-standard names (not in `claude|zsh|bash|dev|fish|sh`) back to "claude". Also clears all attention flags in `state.json`.
+
+**`csm switch` scoring**: exact=100, starts-with=80, contains=60, word-starts-with=40, subsequence=20. Matches against window names with ⚡ stripped.
 
 ## Architecture
 
 ```
 src/
-├── index.ts              # App entry: screen init, key bindings, refresh loop (3s)
-├── types.ts              # All shared types (Session, RepoGroup, DisplayRow, etc.)
+├── index.ts              # App entry: screen, keybindings, 3s refresh loop, state management
+├── cli.ts                # CLI subcommands: next, reset, list, switch (no blessed dependency)
+├── types.ts              # All shared types (Session, RepoGroup, DisplayRow discriminated union, etc.)
+├── status-widget.ts      # Lightweight poller for tmux status-right (⚡3 🔄2 format)
 ├── core/
-│   ├── sessions.ts       # Session discovery: scan ~/.claude/projects/*/sessions-index.json
-│   ├── tmux.ts           # tmux commands: list-panes, capture-pane, write switch target
-│   ├── process.ts        # Find claude processes via ps, map PID→TTY
-│   └── status.ts         # Detect status from pane capture, context % estimation, time formatting
+│   ├── sessions.ts       # Session discovery: index scan + pane/process correlation + archive detection
+│   ├── tmux.ts           # tmux wrappers: list-panes, capture-pane, switch, kill, rename, bell
+│   ├── process.ts        # Find claude processes via ps, PID→TTY mapping, lsof→sessionId resolution
+│   ├── status.ts         # Status detection from pane capture (spinner/prompt patterns), context %, time formatting
+│   ├── config.ts         # ~/.config/csm/config.json — notification settings + repoPaths
+│   ├── state.ts          # ~/.config/csm/state.json — shared TUI↔widget attention state
+│   ├── names.ts          # AI naming (claude -p), heuristic fallback, name cache
+│   ├── git.ts            # Git operations: repo discovery, branch listing, checkout, worktree creation
+│   └── notifications.ts  # Transition detection (running→waiting/ready), 4-tier alerts
 └── ui/
     ├── layout.ts          # blessed screen + 3-region layout (list 70%, preview 30%, status bar)
-    ├── session-list.ts    # Build display rows, render with blessed tags, j/k navigation
-    ├── preview-pane.ts    # Live tmux capture for active, last assistant message for idle
-    ├── status-bar.ts      # Key hint bar at bottom
+    ├── session-list.ts    # Build display rows, render with blessed tags, navigation logic
+    ├── preview-pane.ts    # ANSI→blessed conversion, chrome stripping, bottom-aligned preview
+    ├── wizard.ts          # New Session wizard: inline step-through UI (repo → branch → worktree → launch)
+    ├── status-bar.ts      # Key hint bar (contextual: "switch" vs "resume")
     └── colors.ts          # Vesper palette constants + color helpers
 ```
 
@@ -40,40 +68,104 @@ src/
 
 `discoverSessions()` → scan index files + `listPanes()` + `findClaudeProcesses()` in parallel → correlate by TTY → `capturePane()` for status detection → `groupSessions()` → `buildDisplayRows()` → `renderSessionList()`
 
+Two-phase discovery: Phase A = active tmux panes (fast), Phase B = archived from index files (>3h old, no active pane). lsof resolves session UUIDs but is skipped on first render for speed (~1-3s cold start), filled in on 3s refresh.
+
 ### Session matching
 
-Claude process TTYs (from `ps`) are matched against tmux pane TTYs. `ps` reports `ttys001`, tmux reports `/dev/ttys001` — normalized by stripping `/dev/` prefix.
+Claude process TTYs (from `ps`) matched against tmux pane TTYs. `ps` reports `ttys001`, tmux reports `/dev/ttys001` — normalized by stripping `/dev/` prefix. `paneSessionCache` persists paneId→sessionId across refreshes.
 
 ### Switch mechanism
 
-On Enter: writes `sessionName:windowIndex:paneId` to `/tmp/csm-switch`, then exits. A wrapper script reads this file and runs `tmux select-window`/`select-pane`.
+Active: writes `sessionName:windowIndex:paneId` to `/tmp/csm-switch`, exits. Wrapper script does `tmux select-window`/`select-pane`.
+Archived: resumes via `claude -r {id}` (or `--fork` with `f` key) in new tmux window.
+
+## Features
+
+### Keybindings
+
+| Key | Action |
+|-----|--------|
+| `j`/`k` | Move up/down (skips headers) |
+| `J`/`K` | Jump to next/prev repo group |
+| `Enter` | Switch (active) or resume (archived) |
+| `n` | New session wizard (repo → branch → worktree → launch) |
+| `f` | Fork session (`--fork` in new window) |
+| `x` | Kill pane (double-tap to confirm) |
+| `s` | Generate AI name (claude -p, cached) |
+| `r` | Force refresh |
+| `u`/`d` | Scroll preview pane ±6 lines |
+| `a` | Toggle archived sessions visibility |
+| `q`/`Esc` | Quit |
+
+### Session statuses
+
+| Status | Dot | Detection |
+|--------|-----|-----------|
+| waiting | ⏸ | Confirmation prompts, y/n, tool approval |
+| running | ⦿ | Spinner chars (braille, unicode dots) |
+| ready | ● | ❯ prompt visible |
+| idle | ○ | No claude process on pane |
+| archived | ○ | >3h old, no active pane |
+
+Sort order: waiting → running → ready → idle → archived. Priority repos pinned at top.
+
+### Attention & notifications
+
+4-tier system on status transitions (running→waiting = "blocked", running→ready = "turnComplete"):
+1. Status widget update (tmux status-right)
+2. Window prefix: ⚡ added to tmux window name
+3. Terminal bell: `\a` written to pane tty
+4. Display-message: brief tmux status bar message
+
+Auto-clears when user focuses the attention pane. Config in `~/.config/csm/config.json`.
+
+### Status widget (`bun run status`)
+
+Lightweight poller for `tmux status-right`. Reuses TUI state if <10s old, else quick-discovers active panes only (~50ms). Output: `⚡3 🔄2`. Shares state via `~/.config/csm/state.json`.
+
+### Preview pane
+
+- Active: live ANSI capture with SGR→blessed tag conversion, chrome stripping (prompt/status line removed), bottom-aligned
+- Archived: last assistant message from JSONL tail-read
+- Collapsed archive: summary table of hidden sessions
+
+### New Session wizard (`n` key)
+
+Inline step-through UI that replaces the session list (no modal). Steps: repo → branch → worktree? → launch.
+
+- **Repo step**: j/k navigate repos discovered from active sessions + `repoPaths` config dirs. Single repo auto-skips
+- **Branch step**: j/k navigate, `/` activates type-to-filter mode (Esc clears). Preview pane shows `git log` for highlighted branch
+- **Worktree step**: Only shown when selected branch != current. Options: "No worktree" (checkout in-place) or "Create worktree at ../repo.branch"
+- **Launch**: Opens `tmux new-window -c {dir} claude` in main session, exits TUI
+
+Refresh loop paused during wizard. Esc pops back one step (or cancels from first step). Git errors flash as status messages.
+
+Config `repoPaths` (default `["~/Documents"]`): directories scanned 1-level deep for git repos to include alongside session repos.
+
+### AI naming (`names.ts`)
+
+Priority: cache → summary → plan title → first prompt. AI via `claude -p` subprocess. Heuristic fallback: strip prefixes, filter stop words, kebab-case. Cache at `~/.config/csm/names.json`.
 
 ## Conventions
 
-- **Runtime**: Bun only — use `Bun.$` for shell commands, `Bun.file()` for file I/O, `Bun.Glob` for file scanning
-- **UI framework**: blessed with `tags: true` for inline color markup (`{#FFC799-fg}text{/#FFC799-fg}`)
-- **Types**: all in `src/types.ts`, imported where needed. `DisplayRow` is a discriminated union (`type: "repo-header" | "separator" | "session"`)
-- **Error handling**: all shell/IO ops wrapped in try/catch returning empty defaults (empty array, empty string, 0). Never crash the TUI
-- **No external deps** beyond `blessed` — all tmux/git/process detection via shell commands
+- **Runtime**: Bun only — `Bun.$` for shell, `Bun.file()` for IO, `Bun.Glob` for scanning
+- **UI**: blessed with `tags: true` for inline color (`{#FFC799-fg}text{/#FFC799-fg}`)
+- **Types**: all in `src/types.ts`. `DisplayRow` = `"repo-header" | "separator" | "session" | "session-detail" | "archive-collapsed"`
+- **Error handling**: all shell/IO in try/catch returning empty defaults. Never crash the TUI
+- **No external deps** beyond `blessed`
 
 ## Vesper Color Palette
 
 ```
-C.bg      #101010   terminal default (not forced)
-C.fg      #FFFFFF   primary text
-C.muted   #A0A0A0   secondary text, timestamps
-C.dim     #505050   borders, separators, idle rows
-C.surface #1C1C1C   selected row background
-C.peach   #FFC799   selection cursor, repo headers, input status, key hints
-C.mint    #99FFE4   running status, healthy context %, lines modified
-C.red     #FF8080   high context %
+bg=#101010  fg=#FFFFFF  muted=#A0A0A0  dim=#505050
+surface=#1C1C1C  peach=#FFC799  mint=#99FFE4  red=#FF8080
 ```
 
-Status colors: input=peach, running=mint, idle=dim. Context %: <50=mint, 50-79=peach, 80+=red.
+Status: waiting/ready=peach, running=mint, idle=dim. Context %: <50=mint, 50-79=peach, 80+=red.
 
 ## Key references
 
-- `PLAN.md` — full MVP spec with UI mockups, column layout, row styling rules
-- `ideas.txt` — backlog of post-MVP features (worktrees, AI naming, notifications, etc.)
-- Session data: `~/.claude/projects/*/sessions-index.json` (JSON with `entries[]` of `SessionIndexEntry`)
-- Session logs: `~/.claude/projects/*/{sessionId}.jsonl` (JSONL with `type: "assistant"` messages)
+- `ideas.txt` — feature backlog (worktrees, search, Cursor integration, etc.)
+- Session data: `~/.claude/projects/*/sessions-index.json`
+- Session logs: `~/.claude/projects/*/{sessionId}.jsonl`
+- Config/state: `~/.config/csm/{config,state,names}.json`
