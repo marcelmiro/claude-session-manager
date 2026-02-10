@@ -92,22 +92,6 @@ export async function killPane(paneId: string): Promise<void> {
   }
 }
 
-/**
- * Send a bell character to trigger visual-bell / dock bounce.
- * Writes BEL directly to the pane's tty device, which works from any context
- * (background process, popup, or TUI).
- */
-export async function sendBell(paneId: string): Promise<void> {
-  try {
-    // Get the pane's tty device path
-    const tty = (await Bun.$`tmux display-message -t ${paneId} -p '#{pane_tty}'`.quiet().text()).trim();
-    if (tty) {
-      await Bun.$`printf '\a' > ${tty}`.quiet();
-    }
-  } catch {
-    // pane may not exist
-  }
-}
 
 /**
  * Get the current window name for a tmux session:window.
