@@ -4,13 +4,16 @@ import { buildDisplayRows, renderSessionList, moveSelection, moveToGroup, getSel
 import { updatePreview } from "./ui/preview-pane";
 import { discoverSessions, groupSessions } from "./core/sessions";
 import { switchToPane, getMainSession, killPane, renameWindow } from "./core/tmux";
-import { loadNameCache, getSessionName, generateAIName, saveNameCache, type NameCache } from "./core/names";
+import { loadNameCache, getSessionName, generateAIName, saveNameCache, enqueueAutoName, processAutoNameQueue, clearAutoNameFailure, type NameCache } from "./core/names";
 import { loadConfig } from "./core/config";
 import { saveState, buildSessionStates } from "./core/state";
 import { detectTransitions, dispatchNotifications, clearWindowAttentionPrefix } from "./core/notifications";
+import { discoverRepos, listBranches, checkoutBranch, trackAndCheckout, createWorktree } from "./core/git";
+import { initWizard, renderWizard, renderWizardPreview, renderWizardStatusBar, handleWizardKey } from "./ui/wizard";
 import { C } from "./ui/colors";
-import type { DisplayRow, Session, NotificationConfig } from "./types";
+import type { DisplayRow, Session, CsmConfig, WizardState, WizardRepo } from "./types";
 import type { SessionStatus } from "./core/status";
+import { resolve } from "path";
 
 const { screen, listBox, previewBox, statusBar } = createLayout();
 
@@ -22,8 +25,15 @@ let flashTimer: ReturnType<typeof setTimeout> | null = null;
 let isRefreshing = false;
 let previewGeneration = 0;
 let showArchived = false;
-let nameCache: NameCache = { version: 1, names: {} };
-let notifConfig: NotificationConfig = { statusWidget: true, windowPrefix: true, bell: true, bellOn: "all" };
+let nameCache: NameCache = { version: 2, names: {}, sources: {} };
+let notifConfig: CsmConfig = { statusWidget: true, windowPrefix: true, repoPaths: [] };
+
+// Wizard state (null = not in wizard mode)
+let wizardState: WizardState | null = null;
+// Flag: true while keypress handler is processing a wizard key this tick.
+// Prevents screen.key() handlers (which fire after keypress) from acting
+// on a key the wizard already consumed (e.g. Escape = cancel, not quit).
+let wizardHandledKey = false;
 
 // Attention type tracking: what kind of transition triggered attention
 const attentionTypes = new Map<string, "blocked" | "turnComplete">();
@@ -37,17 +47,19 @@ const previousStatuses = new Map<string, SessionStatus>();
 const needsAttention = new Set<string>();
 
 function updateStatusBar() {
+  if (flashTimer) return; // Don't overwrite active flash messages
   renderStatusBar(statusBar, getSelectedSession()?.status, showArchived);
 }
 
-function flashStatusMessage(msg: string) {
+function flashStatusMessage(msg: string, duration = 2000) {
   if (flashTimer) clearTimeout(flashTimer);
   statusBar.setContent(`  ${msg}`);
   screen.render();
   flashTimer = setTimeout(() => {
+    flashTimer = null;
     updateStatusBar();
     screen.render();
-  }, 2000);
+  }, duration);
 }
 
 function getSelectedRow(): DisplayRow | null {
@@ -79,18 +91,37 @@ async function refresh(opts?: { skipArchivedSummaries?: boolean; skipSessionIds?
   if (isRefreshing) return;
   isRefreshing = true;
   try {
-    const sessions = await discoverSessions(opts);
+    // Only pass nameMap (for window name reverse lookup) when lsof has had a
+    // chance to run. On first render (skipSessionIds=true), lsof is skipped, so
+    // claimedIds would be empty — wrong window names from previous bugs could
+    // cause incorrect matches. After first render, lsof populates claimedIds,
+    // preventing wrong window names from overriding correct lsof mappings.
+    const sessions = await discoverSessions({
+      ...opts,
+      nameMap: opts?.skipSessionIds ? undefined : nameCache.names,
+    });
 
-    // Assign names from cache or programmatic generation
+    // Assign names from cache (AI-generated only, no heuristic fallback)
     for (const session of sessions) {
-      session.name = getSessionName(session.id, session.firstPrompt, session.summary, nameCache);
+      session.name = getSessionName(session.id, nameCache);
 
-      // Rename tmux windows still named "claude" to the AI-generated name
-      if (session.name && session.tmuxPane?.windowName === "claude") {
-        const { sessionName, windowIndex } = session.tmuxPane;
-        renameWindow(sessionName, windowIndex, session.name);
+      // Sync tmux window name with cached name (preserving ⚡ attention prefix)
+      if (session.name && session.tmuxPane) {
+        const stripped = session.tmuxPane.windowName.replace(/^⚡/, "");
+        if (stripped !== session.name) {
+          const prefix = session.tmuxPane.windowName.startsWith("⚡") ? "⚡" : "";
+          renameWindow(session.tmuxPane.sessionName, session.tmuxPane.windowIndex, `${prefix}${session.name}`);
+        }
       }
     }
+
+    // Enqueue active sessions for auto AI naming
+    for (const session of sessions) {
+      if (session.id && session.tmuxPane && session.status !== "archived") {
+        enqueueAutoName(session.id, session.firstPrompt, session.summary, nameCache);
+      }
+    }
+    processAutoNameQueue(nameCache);
 
     const groups = groupSessions(sessions);
 
@@ -102,6 +133,15 @@ async function refresh(opts?: { skipArchivedSummaries?: boolean; skipSessionIds?
       const key = session.tmuxPane?.paneId ?? session.id;
       currentKeys.add(key);
       previousStatuses.set(key, session.status);
+
+      // Clear stale attention: if session went back to running, user already interacted
+      if (session.status === "running" && needsAttention.has(key)) {
+        needsAttention.delete(key);
+        attentionTypes.delete(key);
+        if (session.tmuxPane) {
+          clearWindowAttentionPrefix(session.tmuxPane.sessionName, session.tmuxPane.windowIndex);
+        }
+      }
     }
 
     // Mark attention from transitions
@@ -121,7 +161,7 @@ async function refresh(opts?: { skipArchivedSummaries?: boolean; skipSessionIds?
       }
     }
 
-    // Dispatch notifications (Tier 2 window prefix + Tier 3 bell)
+    // Dispatch notifications (Tier 2 window ⚡ prefix)
     if (transitions.some((e) => e.classification !== "none")) {
       await dispatchNotifications(
         transitions.filter((e) => e.classification !== "none"),
@@ -218,6 +258,9 @@ async function handleSelect(direction: 1 | -1) {
     const key = session.tmuxPane?.paneId ?? session.id;
     needsAttention.delete(key);
     attentionTypes.delete(key);
+    if (session.tmuxPane) {
+      clearWindowAttentionPrefix(session.tmuxPane.sessionName, session.tmuxPane.windowIndex);
+    }
   }
 
   renderSessionList(listBox, rows, selectedIndex, needsAttention);
@@ -238,6 +281,9 @@ async function handleGroupSelect(direction: 1 | -1) {
     const key = session.tmuxPane?.paneId ?? session.id;
     needsAttention.delete(key);
     attentionTypes.delete(key);
+    if (session.tmuxPane) {
+      clearWindowAttentionPrefix(session.tmuxPane.sessionName, session.tmuxPane.windowIndex);
+    }
   }
 
   renderSessionList(listBox, rows, selectedIndex, needsAttention);
@@ -359,16 +405,17 @@ function cleanup() {
   screen.destroy();
 }
 
-// Key bindings
-screen.key(["j", "down"], () => handleSelect(1));
-screen.key(["k", "up"], () => handleSelect(-1));
-screen.key(["S-j"], () => handleGroupSelect(1));
-screen.key(["S-k"], () => handleGroupSelect(-1));
-screen.key(["enter"], () => handleEnterContextual());
-screen.key(["r"], () => refresh());
-screen.key(["x"], () => handleKill());
-screen.key(["f"], () => handleFork());
+// Key bindings (guarded: no-op when wizard is active)
+screen.key(["j", "down"], () => { if (wizardState) return; handleSelect(1); });
+screen.key(["k", "up"], () => { if (wizardState) return; handleSelect(-1); });
+screen.key(["S-j"], () => { if (wizardState) return; handleGroupSelect(1); });
+screen.key(["S-k"], () => { if (wizardState) return; handleGroupSelect(-1); });
+screen.key(["enter"], () => { if (wizardState || wizardHandledKey) return; handleEnterContextual(); });
+screen.key(["r"], () => { if (wizardState) return; refresh(); });
+screen.key(["x"], () => { if (wizardState) return; handleKill(); });
+screen.key(["f"], () => { if (wizardState) return; handleFork(); });
 screen.key(["s"], () => {
+  if (wizardState) return;
   const session = getSelectedSession();
   if (!session || !session.firstPrompt) {
     flashStatusMessage(`{${C.dim}-fg}No prompt to generate name from{/${C.dim}-fg}`);
@@ -379,15 +426,15 @@ screen.key(["s"], () => {
     return;
   }
   flashStatusMessage(`{${C.muted}-fg}Generating name…{/${C.muted}-fg}`);
+  clearAutoNameFailure(session.id);
   const sessionId = session.id;
-  const pane = session.tmuxPane;
-  generateAIName(session.firstPrompt, session.summary).then(async (name) => {
+  const sessionSummary = session.summary;
+  const sessionFirstPrompt = session.firstPrompt;
+  generateAIName(sessionFirstPrompt, sessionSummary).then(async (name) => {
     if (name) {
       nameCache.names[sessionId] = name;
+      nameCache.sources[sessionId] = sessionSummary || sessionFirstPrompt;
       await saveNameCache(nameCache);
-      if (pane?.windowName === "claude") {
-        await renameWindow(pane.sessionName, pane.windowIndex, name);
-      }
       await refresh();
     } else {
       flashStatusMessage(`{${C.dim}-fg}Name generation failed{/${C.dim}-fg}`);
@@ -395,21 +442,200 @@ screen.key(["s"], () => {
   });
 });
 screen.key(["a"], () => {
+  if (wizardState) return;
   showArchived = !showArchived;
   refresh();
 });
 screen.key(["u"], () => {
-  previewBox.scroll(-3);
+  if (wizardState) return;
+  previewBox.scroll(-6);
   screen.render();
 });
 screen.key(["d"], () => {
-  previewBox.scroll(3);
+  if (wizardState) return;
+  previewBox.scroll(6);
   screen.render();
 });
-screen.key(["q", "escape"], () => {
+screen.key(["q"], () => {
+  if (wizardState || wizardHandledKey) return;
   cleanup();
   process.exit(0);
 });
+screen.key(["escape"], () => {
+  if (wizardState || wizardHandledKey) return;
+  cleanup();
+  process.exit(0);
+});
+
+// New Session wizard (`n` key)
+screen.key(["n"], async () => {
+  if (wizardState) return;
+
+  // Pause refresh loop
+  if (refreshTimer) { clearInterval(refreshTimer); refreshTimer = null; }
+
+  // Collect repos from display rows
+  const sessionRepos = getUniqueRepos(rows);
+
+  // Discover repos (merge session repos + config paths)
+  const repos = await discoverRepos(sessionRepos, notifConfig.repoPaths ?? []);
+
+  if (repos.length === 0) {
+    flashStatusMessage(`{${C.dim}-fg}No repos found{/${C.dim}-fg}`);
+    refreshTimer = setInterval(refresh, 3000);
+    return;
+  }
+
+  // Preselect repo from current selection
+  const selectedRow = getSelectedRow();
+  let preselectedRepoPath: string | undefined;
+  if (selectedRow?.type === "repo-header") {
+    preselectedRepoPath = selectedRow.path;
+  } else if (selectedRow?.type === "session") {
+    preselectedRepoPath = selectedRow.session.repoPath;
+  }
+
+  wizardState = initWizard(repos, preselectedRepoPath);
+
+  if (!wizardState) {
+    flashStatusMessage(`{${C.dim}-fg}No repos found{/${C.dim}-fg}`);
+    refreshTimer = setInterval(refresh, 3000);
+    return;
+  }
+
+  // If auto-skipped to branch step, load branches
+  if (wizardState.step === "branch" && wizardState.selectedRepo) {
+    const branches = await listBranches(wizardState.selectedRepo.path);
+    wizardState.branches = branches;
+    wizardState.filteredBranches = branches;
+  }
+
+  renderWizard(listBox, wizardState);
+  renderWizardStatusBar(statusBar, wizardState);
+  await renderWizardPreview(previewBox, wizardState);
+  screen.render();
+});
+
+// Wizard keypress handler (intercepts all keys when wizard is active)
+screen.on("keypress", async (_ch: string, key: any) => {
+  if (!wizardState || !key) return;
+
+  const keyName = key.full || key.name || "";
+  const ch = _ch || "";
+
+  const action = handleWizardKey(wizardState, keyName, ch);
+  if (action.type !== "noop") {
+    wizardHandledKey = true;
+    queueMicrotask(() => { wizardHandledKey = false; });
+  }
+
+  switch (action.type) {
+    case "noop":
+      break;
+    case "render":
+      renderWizard(listBox, wizardState);
+      renderWizardStatusBar(statusBar, wizardState);
+      await renderWizardPreview(previewBox, wizardState);
+      screen.render();
+      break;
+    case "preview":
+      renderWizard(listBox, wizardState);
+      renderWizardStatusBar(statusBar, wizardState);
+      await renderWizardPreview(previewBox, wizardState);
+      screen.render();
+      break;
+    case "cancel":
+      wizardState = null;
+      refreshTimer = setInterval(refresh, 3000);
+      await refresh();
+      break;
+    case "loadBranches": {
+      const branches = await listBranches(wizardState.selectedRepo!.path);
+      wizardState.branches = branches;
+      wizardState.filteredBranches = branches;
+      renderWizard(listBox, wizardState);
+      renderWizardStatusBar(statusBar, wizardState);
+      await renderWizardPreview(previewBox, wizardState);
+      screen.render();
+      break;
+    }
+    case "launch":
+      wizardState = null; // Prevent re-entry from duplicate keypress events (\r + \n)
+      await handleWizardLaunch(action.repo, action.branch, action.worktree, action.worktreePath);
+      break;
+  }
+});
+
+/** Extract unique repos from display rows */
+function getUniqueRepos(displayRows: DisplayRow[]): Array<{ name: string; path: string }> {
+  const seen = new Map<string, { name: string; path: string }>();
+  for (const row of displayRows) {
+    if (row.type === "repo-header" && !seen.has(row.path)) {
+      seen.set(row.path, { name: row.name, path: row.path });
+    }
+  }
+  return [...seen.values()];
+}
+
+/** Handle wizard launch: checkout/worktree + open new tmux window with claude */
+async function handleWizardLaunch(
+  repo: WizardRepo,
+  branch: { name: string; isRemote: boolean; isCurrent: boolean },
+  useWorktree: boolean,
+  worktreePath: string,
+): Promise<void> {
+  let targetDir = repo.path;
+
+  if (useWorktree) {
+    const wtAbsPath = resolve(repo.path, worktreePath);
+    const result = await createWorktree(repo.path, wtAbsPath, branch.name, branch.isRemote);
+    if (!result.ok) {
+      wizardState = null;
+      refreshTimer = setInterval(refresh, 3000);
+      flashStatusMessage(`{${C.red}-fg}${result.error ?? "Worktree creation failed"}{/${C.red}-fg}`, 4000);
+      await refresh();
+      return;
+    }
+    targetDir = wtAbsPath;
+  } else if (!branch.isCurrent) {
+    // Need to checkout a different branch
+    let result: { ok: boolean; error?: string };
+    if (branch.isRemote) {
+      result = await trackAndCheckout(repo.path, branch.name);
+    } else {
+      result = await checkoutBranch(repo.path, branch.name);
+    }
+    if (!result.ok) {
+      wizardState = null;
+      refreshTimer = setInterval(refresh, 3000);
+      flashStatusMessage(`{${C.red}-fg}${result.error ?? "Checkout failed"}{/${C.red}-fg}`, 4000);
+      await refresh();
+      return;
+    }
+  }
+
+  const targetSession = await getMainSession();
+  if (!targetSession) {
+    wizardState = null;
+    refreshTimer = setInterval(refresh, 3000);
+    flashStatusMessage(`{${C.red}-fg}No tmux session found{/${C.red}-fg}`, 4000);
+    await refresh();
+    return;
+  }
+
+  cleanup();
+  try {
+    // Create window with a shell (so exiting claude doesn't close the window),
+    // then send the claude command via send-keys
+    const paneId = (await Bun.$`tmux new-window -t ${targetSession} -n "claude" -c ${targetDir} -P -F '#{pane_id}'`.quiet().text()).trim();
+    if (paneId) {
+      await Bun.$`tmux send-keys -t ${paneId} claude Enter`.quiet();
+    }
+  } catch {
+    // ignore
+  }
+  process.exit(0);
+}
 
 // Render loading state immediately so the TUI appears instantly
 listBox.setContent(
