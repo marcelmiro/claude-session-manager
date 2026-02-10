@@ -6,9 +6,9 @@ import type { PaneInfo } from "../types.ts";
  */
 export async function getMainSession(): Promise<string | null> {
   try {
-    const output = await Bun.$`tmux list-sessions -F #{session_name}`.quiet().text();
+    const output = await Bun.$`tmux list-sessions -F '#{session_name}'`.quiet().text();
     const sessions = output.trim().split("\n").filter(Boolean);
-    const current = (await Bun.$`tmux display-message -p #S`.quiet().text()).trim();
+    const current = (await Bun.$`tmux display-message -p '#S'`.quiet().text()).trim();
     return sessions.find((s) => s !== current) ?? sessions[0] ?? null;
   } catch {
     return null;
@@ -72,7 +72,10 @@ export async function renameWindow(
   name: string,
 ): Promise<void> {
   try {
-    await Bun.$`tmux rename-window -t ${sessionName}:${windowIndex} ${name}`.quiet();
+    // Use Bun.spawnSync instead of Bun.$ to avoid a Bun shell bug where
+    // multiple interpolated variables with Unicode chars (like ⚡) cause
+    // internal variable names to leak into arguments.
+    Bun.spawnSync(["tmux", "rename-window", "-t", `${sessionName}:${windowIndex}`, name]);
   } catch {
     // window may have closed
   }
@@ -97,7 +100,7 @@ export async function killPane(paneId: string): Promise<void> {
 export async function sendBell(paneId: string): Promise<void> {
   try {
     // Get the pane's tty device path
-    const tty = (await Bun.$`tmux display-message -t ${paneId} -p #{pane_tty}`.quiet().text()).trim();
+    const tty = (await Bun.$`tmux display-message -t ${paneId} -p '#{pane_tty}'`.quiet().text()).trim();
     if (tty) {
       await Bun.$`printf '\a' > ${tty}`.quiet();
     }
@@ -111,7 +114,7 @@ export async function sendBell(paneId: string): Promise<void> {
  */
 export async function getWindowName(sessionName: string, windowIndex: number): Promise<string> {
   try {
-    const output = await Bun.$`tmux display-message -t ${sessionName}:${windowIndex} -p #{window_name}`.quiet().text();
+    const output = await Bun.$`tmux display-message -t ${sessionName}:${windowIndex} -p '#{window_name}'`.quiet().text();
     return output.trim();
   } catch {
     return "";
@@ -126,7 +129,7 @@ export async function getWindowName(sessionName: string, windowIndex: number): P
 export async function displayMessage(message: string): Promise<void> {
   try {
     // Get the most recently active tmux client
-    const client = (await Bun.$`tmux list-clients -F #{client_name}`.quiet().text()).trim().split("\n")[0];
+    const client = (await Bun.$`tmux list-clients -F '#{client_name}'`.quiet().text()).trim().split("\n")[0];
     if (client) {
       await Bun.$`tmux display-message -c ${client} ${message}`.quiet();
     }
