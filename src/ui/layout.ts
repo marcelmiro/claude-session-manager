@@ -21,14 +21,13 @@ export function createLayout() {
     },
   });
 
-  // Session list — top region, flexible
+  // Session list — left region (70%)
   const listBox = blessed.box({
     parent: container,
     top: 0,
     left: 1,
-    right: 1,
-    // Leave room for preview (30% + 1 border line) and status bar (1 line)
-    height: "70%-2",
+    width: "50%-2",
+    bottom: 1,
     scrollable: true,
     alwaysScroll: true,
     scrollbar: { ch: " " },
@@ -38,13 +37,13 @@ export function createLayout() {
     },
   });
 
-  // Preview pane — bottom portion
+  // Preview pane — right sidebar (30%)
   const previewBox = blessed.box({
     parent: container,
-    top: "70%-1",
-    left: 0,
+    top: 0,
+    left: "50%-1",
     right: 0,
-    bottom: 2,
+    bottom: 1,
     border: { type: "line" },
     tags: true,
     scrollable: true,

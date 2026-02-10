@@ -16,24 +16,30 @@ export function contextColor(percent: number): string {
   return C.red;
 }
 
-export function statusColor(status: "input" | "running" | "idle"): string {
+export function statusColor(status: "running" | "waiting" | "ready" | "idle" | "archived"): string {
   switch (status) {
-    case "input":
-      return C.peach;
     case "running":
       return C.mint;
+    case "waiting":
+      return C.red;
+    case "ready":
+      return C.peach;
     case "idle":
+    case "archived":
       return C.dim;
   }
 }
 
-export function statusDot(status: "input" | "running" | "idle"): string {
+export function statusDot(status: "running" | "waiting" | "ready" | "idle" | "archived"): string {
   switch (status) {
-    case "input":
-      return "●";
+    case "waiting":
+      return "⏸";
     case "running":
-      return "◉";
+      return "⦿";
+    case "ready":
+      return "●";
     case "idle":
+    case "archived":
       return "○";
   }
 }
