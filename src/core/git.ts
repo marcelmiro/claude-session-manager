@@ -169,22 +169,20 @@ export async function trackAndCheckout(repoPath: string, localName: string): Pro
 }
 
 /**
- * Create a git worktree for a branch.
+ * Create a git worktree with a new branch.
+ * Runs: git worktree add <wtPath> -b <newBranch> <baseRef>
+ * baseRef = origin/<baseBranch> if remote, else <baseBranch>
  */
 export async function createWorktree(
   repoPath: string,
   wtPath: string,
-  branch: string,
+  newBranch: string,
+  baseBranch: string,
   isRemote: boolean,
 ): Promise<{ ok: boolean; error?: string }> {
   try {
-    if (isRemote) {
-      // Remote-only: create worktree with new local tracking branch
-      await Bun.$`git -C ${repoPath} worktree add ${wtPath} -b ${branch} origin/${branch}`.quiet();
-    } else {
-      // Local branch: create worktree
-      await Bun.$`git -C ${repoPath} worktree add ${wtPath} ${branch}`.quiet();
-    }
+    const baseRef = isRemote ? `origin/${baseBranch}` : baseBranch;
+    await Bun.$`git -C ${repoPath} worktree add ${wtPath} -b ${newBranch} ${baseRef}`.quiet();
     return { ok: true };
   } catch (e: any) {
     const msg = e?.stderr?.toString?.() || e?.message || "worktree creation failed";

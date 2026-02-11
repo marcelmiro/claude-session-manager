@@ -31,10 +31,12 @@ export function initWizard(
     filteredBranches: [],
     branchIndex: 0,
     branchFilter: "",
+    branchFilterCursor: 0,
     branchFilterActive: false,
     selectedBranch: null,
-    worktreeIndex: 0,
-    worktreePath: "",
+    worktreeName: "",
+    worktreeNameCursor: 0,
+    enterDebounce: false,
   };
 
   // Auto-skip repo step if only one repo
@@ -86,7 +88,7 @@ function getSelectedLine(state: WizardState): number {
   if (state.step === "branch") {
     return headerLines + 1 + state.branchIndex; // +1 for always-visible filter bar
   }
-  if (state.step === "worktree") return headerLines + state.worktreeIndex;
+  if (state.step === "worktree") return headerLines + 2; // instruction + blank + input line
   return -1;
 }
 
@@ -99,6 +101,11 @@ function renderBreadcrumb(state: WizardState): string {
     parts.push(`{${C.dim}-fg}>{/${C.dim}-fg} {${C.fg}-fg}${state.selectedBranch.name}{/${C.fg}-fg}`);
   }
   return `  ${parts.join(" ")}`;
+}
+
+/** Compute worktree directory path from repo name + branch name. Sanitizes / → - for flat sibling dirs. */
+export function worktreeDirName(repoName: string, branchName: string): string {
+  return `../${repoName}-${branchName.replace(/\//g, "-")}`;
 }
 
 function abbreviatePath(path: string): string {
@@ -137,7 +144,7 @@ function renderRepoStep(lines: string[], listBox: Widgets.BoxElement, state: Wiz
 
 function renderBranchStep(lines: string[], _listBox: Widgets.BoxElement, state: WizardState): void {
   // Filter bar (always visible — type to search)
-  lines.push(`  {${C.peach}-fg}/{/${C.peach}-fg} ${state.branchFilter}█`);
+  lines.push(`  {${C.peach}-fg}/{/${C.peach}-fg} ${renderTextWithCursor(state.branchFilter, state.branchFilterCursor)}`);
 
   const branches = state.filteredBranches;
 
@@ -178,19 +185,27 @@ function renderBranchStep(lines: string[], _listBox: Widgets.BoxElement, state: 
 }
 
 function renderWorktreeStep(lines: string[], state: WizardState): void {
-  const options = [
-    "No worktree (checkout branch in repo directory)",
-    `Create worktree at ${state.worktreePath}`,
-  ];
+  const repo = state.selectedRepo!;
+  const branch = state.selectedBranch!;
 
-  for (let i = 0; i < options.length; i++) {
-    const isSelected = i === state.worktreeIndex;
-    const cursor = isSelected ? `{${C.peach}-fg}▸{/${C.peach}-fg}` : " ";
+  lines.push(`  {${C.muted}-fg}Worktree branch name {${C.dim}-fg}(Enter to skip){/${C.dim}-fg}:{/${C.muted}-fg}`);
+  lines.push("");
+  lines.push(`{${C.surface}-bg}  {${C.peach}-fg}>{/${C.peach}-fg} ${renderTextWithCursor(state.worktreeName, state.worktreeNameCursor)}{/${C.surface}-bg}`);
 
-    if (isSelected) {
-      lines.push(`{${C.surface}-bg} ${cursor} {${C.fg}-fg}${options[i]}{/${C.fg}-fg}{/${C.surface}-bg}`);
+  if (state.worktreeName) {
+    const wtPath = worktreeDirName(repo.name, state.worktreeName);
+    const baseRef = branch.isRemote ? `origin/${branch.name}` : branch.name;
+    lines.push("");
+    lines.push(`  {${C.dim}-fg}Path:{/${C.dim}-fg}    {${C.fg}-fg}${wtPath}{/${C.fg}-fg}`);
+    lines.push(`  {${C.dim}-fg}Command:{/${C.dim}-fg} {${C.mint}-fg}git worktree add ${wtPath} -b ${state.worktreeName} ${baseRef}{/${C.mint}-fg}`);
+  } else {
+    lines.push("");
+    if (branch.isCurrent) {
+      lines.push(`  {${C.dim}-fg}Will launch claude in ${repo.name}{/${C.dim}-fg}`);
+    } else if (branch.isRemote) {
+      lines.push(`  {${C.dim}-fg}Will checkout ${branch.name} from origin and launch claude{/${C.dim}-fg}`);
     } else {
-      lines.push(` ${cursor} {${C.muted}-fg}${options[i]}{/${C.muted}-fg}`);
+      lines.push(`  {${C.dim}-fg}Will checkout ${branch.name} and launch claude{/${C.dim}-fg}`);
     }
   }
 }
@@ -231,15 +246,18 @@ export async function renderWizardPreview(previewBox: Widgets.BoxElement, state:
       `{${C.muted}-fg}  Summary{/${C.muted}-fg}`,
       "",
       `  {${C.dim}-fg}Repo:{/${C.dim}-fg}   {${C.fg}-fg}${repo.name}{/${C.fg}-fg}`,
-      `  {${C.dim}-fg}Branch:{/${C.dim}-fg} {${C.fg}-fg}${branch.name}{/${C.fg}-fg}` +
+      `  {${C.dim}-fg}Base:{/${C.dim}-fg}   {${C.fg}-fg}${branch.name}{/${C.fg}-fg}` +
         (branch.isRemote ? ` {${C.dim}-fg}(remote){/${C.dim}-fg}` : ""),
     ];
 
-    if (state.worktreeIndex === 1) {
+    if (state.worktreeName) {
+      const wtPath = worktreeDirName(repo.name, state.worktreeName);
+      const baseRef = branch.isRemote ? `origin/${branch.name}` : branch.name;
       lines.push(
+        `  {${C.dim}-fg}Branch:{/${C.dim}-fg} {${C.fg}-fg}${state.worktreeName}{/${C.fg}-fg}`,
         "",
         `  {${C.dim}-fg}Command:{/${C.dim}-fg}`,
-        `  {${C.mint}-fg}git worktree add ${state.worktreePath} ${branch.isRemote ? `-b ${branch.name} origin/${branch.name}` : branch.name}{/${C.mint}-fg}`,
+        `  {${C.mint}-fg}git worktree add ${wtPath} -b ${state.worktreeName} ${baseRef}{/${C.mint}-fg}`,
       );
     } else if (!branch.isCurrent) {
       lines.push(
@@ -272,7 +290,7 @@ export function renderWizardStatusBar(statusBar: Widgets.BoxElement, state: Wiza
       `  {${C.peach}-fg}Esc{/${C.peach}-fg} {${C.dim}-fg}back{/${C.dim}-fg}`;
   } else if (state.step === "worktree") {
     content =
-      `{${C.peach}-fg}j/k{/${C.peach}-fg} {${C.dim}-fg}move{/${C.dim}-fg}` +
+      `{${C.peach}-fg}type{/${C.peach}-fg} {${C.dim}-fg}branch name{/${C.dim}-fg}` +
       `  {${C.peach}-fg}\u23CE{/${C.peach}-fg} {${C.dim}-fg}launch{/${C.dim}-fg}` +
       `  {${C.peach}-fg}Esc{/${C.peach}-fg} {${C.dim}-fg}back{/${C.dim}-fg}`;
   }
@@ -290,10 +308,112 @@ export function handleWizardKey(state: WizardState, keyName: string, ch: string)
     // Always use filter handler — branch step is searchable by default (fzf-style)
     return handleBranchFilterKey(state, keyName, ch);
   } else if (state.step === "worktree") {
-    return handleWorktreeKey(state, keyName);
+    return handleWorktreeKey(state, keyName, ch);
   }
 
   return { type: "noop" };
+}
+
+/**
+ * Centralized text input key handler. Returns new text, cursor, and whether the key was handled.
+ * Supports: backspace, delete, alt+backspace (word delete), ctrl+u (clear line),
+ * left/right, alt+left/right (word jump).
+ * Optional charFilter restricts which printable chars are accepted.
+ */
+function handleTextInputKey(
+  text: string,
+  cursor: number,
+  keyName: string,
+  ch: string,
+  charFilter?: RegExp,
+): { text: string; cursor: number; handled: boolean } {
+  switch (keyName) {
+    case "backspace": {
+      if (cursor === 0) return { text, cursor, handled: true };
+      return {
+        text: text.slice(0, cursor - 1) + text.slice(cursor),
+        cursor: cursor - 1,
+        handled: true,
+      };
+    }
+    case "delete": {
+      if (cursor >= text.length) return { text, cursor, handled: true };
+      return {
+        text: text.slice(0, cursor) + text.slice(cursor + 1),
+        cursor,
+        handled: true,
+      };
+    }
+    case "M-backspace": {
+      // Alt+Backspace: delete word backward
+      if (cursor === 0) return { text, cursor, handled: true };
+      const before = text.slice(0, cursor);
+      const stripped = before.replace(/[^a-zA-Z0-9]+$/, "");
+      const newBefore = stripped.replace(/[a-zA-Z0-9]+$/, "");
+      return {
+        text: newBefore + text.slice(cursor),
+        cursor: newBefore.length,
+        handled: true,
+      };
+    }
+    case "C-u": {
+      // Ctrl+U / Cmd+Delete: clear entire line
+      return { text: "", cursor: 0, handled: true };
+    }
+    case "left": {
+      return { text, cursor: Math.max(0, cursor - 1), handled: true };
+    }
+    case "right": {
+      return { text, cursor: Math.min(text.length, cursor + 1), handled: true };
+    }
+    case "M-left":
+    case "M-b": {
+      // Alt+Left: move word backward (M-b = macOS "Option as Esc+" sends ESC+b)
+      const before = text.slice(0, cursor);
+      const stripped = before.replace(/[^a-zA-Z0-9]+$/, "");
+      const wordStart = stripped.replace(/[a-zA-Z0-9]+$/, "");
+      return { text, cursor: wordStart.length, handled: true };
+    }
+    case "M-right":
+    case "M-f": {
+      // Alt+Right: move word forward (M-f = macOS "Option as Esc+" sends ESC+f)
+      const after = text.slice(cursor);
+      const skipSep = after.replace(/^[^a-zA-Z0-9]+/, "");
+      const skipWord = skipSep.replace(/^[a-zA-Z0-9]+/, "");
+      return { text, cursor: text.length - skipWord.length, handled: true };
+    }
+    case "home": {
+      // Cmd+Left sends Home in iTerm2
+      return { text, cursor: 0, handled: true };
+    }
+    case "end": {
+      // Cmd+Right sends End in iTerm2
+      return { text, cursor: text.length, handled: true };
+    }
+    default: {
+      // Printable character: insert at cursor
+      if (ch && ch.length === 1 && ch >= " ") {
+        if (charFilter && !charFilter.test(ch)) return { text, cursor, handled: false };
+        return {
+          text: text.slice(0, cursor) + ch + text.slice(cursor),
+          cursor: cursor + 1,
+          handled: true,
+        };
+      }
+      return { text, cursor, handled: false };
+    }
+  }
+}
+
+/** Render text with a block cursor at the given position using {inverse} tag. */
+function renderTextWithCursor(text: string, cursor: number): string {
+  if (cursor >= text.length) {
+    return text + "█";
+  }
+  const before = text.slice(0, cursor);
+  const charAtCursor = text[cursor];
+  const after = text.slice(cursor + 1);
+  return `${before}{inverse}${charAtCursor}{/inverse}${after}`;
 }
 
 function handleRepoKey(state: WizardState, keyName: string): WizardAction {
@@ -312,6 +432,7 @@ function handleRepoKey(state: WizardState, keyName: string): WizardAction {
       state.step = "branch";
       state.branchIndex = 0;
       state.branchFilter = "";
+      state.branchFilterCursor = 0;
       state.branchFilterActive = true;
       return { type: "loadBranches" };
     }
@@ -323,6 +444,7 @@ function handleRepoKey(state: WizardState, keyName: string): WizardAction {
 }
 
 function handleBranchFilterKey(state: WizardState, keyName: string, ch: string): WizardAction {
+  // Step-specific keys first
   switch (keyName) {
     case "escape":
       // Go back to repo step (or cancel if only one repo)
@@ -334,23 +456,9 @@ function handleBranchFilterKey(state: WizardState, keyName: string, ch: string):
       state.branches = [];
       state.filteredBranches = [];
       state.branchFilter = "";
+      state.branchFilterCursor = 0;
       state.branchFilterActive = false;
       return { type: "render" };
-    case "backspace": {
-      if (state.branchFilter.length === 0) return { type: "noop" };
-      state.branchFilter = state.branchFilter.slice(0, -1);
-      applyBranchFilter(state);
-      return { type: "preview" };
-    }
-    case "M-backspace": {
-      // Alt+Backspace: delete word backward
-      if (state.branchFilter.length === 0) return { type: "noop" };
-      // Standard terminal behavior: strip trailing separators, then strip trailing word
-      const stripped = state.branchFilter.replace(/[^a-zA-Z0-9]+$/, "");
-      state.branchFilter = stripped.replace(/[a-zA-Z0-9]+$/, "");
-      applyBranchFilter(state);
-      return { type: "preview" };
-    }
     case "up":
       if (state.filteredBranches.length > 0) {
         state.branchIndex = Math.max(state.branchIndex - 1, 0);
@@ -369,26 +477,31 @@ function handleBranchFilterKey(state: WizardState, keyName: string, ch: string):
       const branch = state.filteredBranches[state.branchIndex];
       state.selectedBranch = branch;
 
-      if (branch.isCurrent) {
-        const repo = state.selectedRepo!;
-        return { type: "launch", repo, branch, worktree: false, worktreePath: "" };
-      }
-
       state.step = "worktree";
-      state.worktreeIndex = 0;
-      const repo = state.selectedRepo!;
-      state.worktreePath = `../${repo.name}.${branch.name}`;
+      state.worktreeName = "";
+      state.worktreeNameCursor = 0;
+      state.enterDebounce = true;
       return { type: "render" };
     }
-    default:
-      // Printable character — add to filter (fzf-style: j/k type, arrow keys navigate)
-      if (ch && ch.length === 1 && ch >= " ") {
-        state.branchFilter += ch;
-        applyBranchFilter(state);
-        return { type: "preview" };
-      }
-      return { type: "noop" };
   }
+
+  // Centralized text input handling
+  const prevText = state.branchFilter;
+  const prevCursor = state.branchFilterCursor;
+  const result = handleTextInputKey(state.branchFilter, state.branchFilterCursor, keyName, ch);
+  if (result.handled) {
+    state.branchFilter = result.text;
+    state.branchFilterCursor = result.cursor;
+    if (result.text !== prevText) {
+      applyBranchFilter(state);
+    }
+    if (result.text !== prevText || result.cursor !== prevCursor) {
+      return { type: "preview" };
+    }
+    return { type: "noop" };
+  }
+
+  return { type: "noop" };
 }
 
 function applyBranchFilter(state: WizardState): void {
@@ -418,33 +531,45 @@ function scoreBranchMatch(branch: WizardBranch, filter: string): number {
   return 0;
 }
 
-function handleWorktreeKey(state: WizardState, keyName: string): WizardAction {
+function handleWorktreeKey(state: WizardState, keyName: string, ch: string): WizardAction {
+  // Step-specific keys first
   switch (keyName) {
-    case "j":
-    case "down":
-      state.worktreeIndex = Math.min(state.worktreeIndex + 1, 1);
-      return { type: "render" };
-    case "k":
-    case "up":
-      state.worktreeIndex = Math.max(state.worktreeIndex - 1, 0);
-      return { type: "render" };
     case "enter":
     case "return": {
+      // Enter fires twice (\r + \n) — ignore the one that arrives right after step transition
+      if (state.enterDebounce) {
+        state.enterDebounce = false;
+        return { type: "noop" };
+      }
       const repo = state.selectedRepo!;
       const branch = state.selectedBranch!;
-      const useWorktree = state.worktreeIndex === 1;
-      return { type: "launch", repo, branch, worktree: useWorktree, worktreePath: state.worktreePath };
+      return { type: "launch", repo, branch, worktreeName: state.worktreeName };
     }
     case "escape":
       // Go back to branch step with filter active
       state.step = "branch";
       state.selectedBranch = null;
-      state.worktreeIndex = 0;
+      state.worktreeName = "";
+      state.worktreeNameCursor = 0;
       state.branchFilterActive = true;
       state.branchFilter = "";
+      state.branchFilterCursor = 0;
       state.filteredBranches = state.branches;
       return { type: "preview" };
-    default:
-      return { type: "noop" };
   }
+
+  // Centralized text input handling (only valid git branch chars)
+  const prevText = state.worktreeName;
+  const prevCursor = state.worktreeNameCursor;
+  const result = handleTextInputKey(state.worktreeName, state.worktreeNameCursor, keyName, ch, /[a-zA-Z0-9._\-\/]/);
+  if (result.handled) {
+    state.worktreeName = result.text;
+    state.worktreeNameCursor = result.cursor;
+    if (result.text !== prevText || result.cursor !== prevCursor) {
+      return { type: "render" };
+    }
+    return { type: "noop" };
+  }
+
+  return { type: "noop" };
 }

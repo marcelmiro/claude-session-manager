@@ -138,10 +138,12 @@ export interface WizardState {
   filteredBranches: WizardBranch[];
   branchIndex: number;
   branchFilter: string;
+  branchFilterCursor: number;
   branchFilterActive: boolean;
   selectedBranch: WizardBranch | null;
-  worktreeIndex: number;       // 0 = no worktree, 1 = create
-  worktreePath: string;        // computed: ../repo.branch
+  worktreeName: string;        // text input: new branch name for worktree (empty = no worktree)
+  worktreeNameCursor: number;
+  enterDebounce: boolean;      // true = ignore next Enter (prevents double-fire on step transition)
 }
 
 export type WizardAction =
@@ -150,7 +152,7 @@ export type WizardAction =
   | { type: "preview" }
   | { type: "cancel" }
   | { type: "loadBranches" }
-  | { type: "launch"; repo: WizardRepo; branch: WizardBranch; worktree: boolean; worktreePath: string };
+  | { type: "launch"; repo: WizardRepo; branch: WizardBranch; worktreeName: string };
 
 export interface CsmConfig {
   statusWidget: boolean;

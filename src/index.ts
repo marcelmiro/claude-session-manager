@@ -9,7 +9,7 @@ import { loadConfig } from "./core/config";
 import { saveState, buildSessionStates } from "./core/state";
 import { detectTransitions, dispatchNotifications, clearWindowAttentionPrefix } from "./core/notifications";
 import { discoverRepos, listBranches, checkoutBranch, trackAndCheckout, createWorktree } from "./core/git";
-import { initWizard, renderWizard, renderWizardPreview, renderWizardStatusBar, handleWizardKey } from "./ui/wizard";
+import { initWizard, renderWizard, renderWizardPreview, renderWizardStatusBar, handleWizardKey, worktreeDirName } from "./ui/wizard";
 import { C } from "./ui/colors";
 import type { DisplayRow, Session, CsmConfig, WizardState, WizardRepo } from "./types";
 import type { SessionStatus } from "./core/status";
@@ -561,7 +561,7 @@ screen.on("keypress", async (_ch: string, key: any) => {
     }
     case "launch":
       wizardState = null; // Prevent re-entry from duplicate keypress events (\r + \n)
-      await handleWizardLaunch(action.repo, action.branch, action.worktree, action.worktreePath);
+      await handleWizardLaunch(action.repo, action.branch, action.worktreeName);
       break;
   }
 });
@@ -581,14 +581,14 @@ function getUniqueRepos(displayRows: DisplayRow[]): Array<{ name: string; path: 
 async function handleWizardLaunch(
   repo: WizardRepo,
   branch: { name: string; isRemote: boolean; isCurrent: boolean },
-  useWorktree: boolean,
-  worktreePath: string,
+  worktreeName: string,
 ): Promise<void> {
   let targetDir = repo.path;
 
-  if (useWorktree) {
-    const wtAbsPath = resolve(repo.path, worktreePath);
-    const result = await createWorktree(repo.path, wtAbsPath, branch.name, branch.isRemote);
+  if (worktreeName) {
+    const wtPath = worktreeDirName(repo.name, worktreeName);
+    const wtAbsPath = resolve(repo.path, wtPath);
+    const result = await createWorktree(repo.path, wtAbsPath, worktreeName, branch.name, branch.isRemote);
     if (!result.ok) {
       wizardState = null;
       refreshTimer = setInterval(refresh, 3000);
