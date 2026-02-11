@@ -4,6 +4,10 @@
 
 Full-screen terminal TUI (blessed) for managing Claude Code sessions. Launched via `tmux display-popup`. Shows sessions grouped by repo with live status detection, ANSI preview pane, vim navigation, attention notifications, and AI naming.
 
+## Environment
+
+macOS (ARM) with Ghostty terminal, Oh My Zsh, and tmux.
+
 ## Commands
 
 ```sh
@@ -111,11 +115,9 @@ Sort order: waiting → running → ready → idle → archived. Priority repos 
 
 ### Attention & notifications
 
-4-tier system on status transitions (running→waiting = "blocked", running→ready = "turnComplete"):
+2-tier system on status transitions (running→waiting = "blocked", running→ready = "turnComplete"):
 1. Status widget update (tmux status-right)
 2. Window prefix: ⚡ added to tmux window name
-3. Terminal bell: `\a` written to pane tty
-4. Display-message: brief tmux status bar message
 
 Auto-clears when user focuses the attention pane. Config in `~/.config/csm/config.json`.
 
