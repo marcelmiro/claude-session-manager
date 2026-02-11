@@ -154,7 +154,13 @@ export async function checkoutBranch(repoPath: string, branch: string): Promise<
  */
 export async function trackAndCheckout(repoPath: string, localName: string): Promise<{ ok: boolean; error?: string }> {
   try {
-    await Bun.$`git -C ${repoPath} checkout -b ${localName} --track origin/${localName}`.quiet();
+    // Check if a local branch with this name already exists
+    const localExists = await Bun.$`git -C ${repoPath} show-ref --verify --quiet refs/heads/${localName}`.quiet().then(() => true, () => false);
+    if (localExists) {
+      await Bun.$`git -C ${repoPath} checkout ${localName}`.quiet();
+    } else {
+      await Bun.$`git -C ${repoPath} checkout -b ${localName} --track origin/${localName}`.quiet();
+    }
     return { ok: true };
   } catch (e: any) {
     const msg = e?.stderr?.toString?.() || e?.message || "track+checkout failed";
