@@ -7,7 +7,7 @@ import { switchToPane, getMainSession, killPane, renameWindow } from "./core/tmu
 import { loadNameCache, getSessionName, generateAIName, saveNameCache, enqueueAutoName, processAutoNameQueue, clearAutoNameFailure, type NameCache } from "./core/names";
 import { loadConfig } from "./core/config";
 import { loadState, saveState, buildSessionStates } from "./core/state";
-import { detectTransitions, dispatchNotifications, clearWindowAttentionPrefix } from "./core/notifications";
+import { detectTransitions, dispatchNotifications, clearWindowAttentionPrefix, stripAllPrefixes, desiredPrefix } from "./core/notifications";
 import { discoverRepos, listBranches, checkoutBranch, trackAndCheckout, createWorktree } from "./core/git";
 import { initWizard, renderWizard, renderWizardPreview, renderWizardStatusBar, handleWizardKey, worktreeDirName } from "./ui/wizard";
 import { C } from "./ui/colors";
@@ -154,24 +154,32 @@ async function refresh(opts?: { skipArchivedSummaries?: boolean; skipSessionIds?
 
     for (const [_, windowGroup] of windowSessions) {
       const first = windowGroup[0].tmuxPane!;
-      const currentPrefix = first.windowName.startsWith("⚡") ? "⚡" : "";
+      const hasAttention = windowGroup.some(s => s.tmuxPane && needsAttention.has(s.tmuxPane.paneId));
+      const hasRunning = windowGroup.some(s => s.status === "running");
+      const prefix = desiredPrefix(hasAttention, hasRunning);
 
+      let targetBase: string | undefined;
       if (windowGroup.length === 1) {
-        // Single Claude pane: sync AI name as before
+        // Single Claude pane: sync AI name
         const session = windowGroup[0];
-        if (session.name) {
-          const stripped = first.windowName.replace(/^⚡/, "");
-          if (stripped !== session.name) {
-            renameWindow(first.sessionName, first.windowIndex, `${currentPrefix}${session.name}`);
-          }
-        }
+        if (session.name) targetBase = session.name;
       } else {
         // Multi-pane window: use "claude/{repo}" if same repo, else "claude"
         const repos = new Set(windowGroup.map(s => s.repo));
-        const targetName = repos.size === 1 ? `claude/${[...repos][0]}` : "claude";
-        const stripped = first.windowName.replace(/^⚡/, "");
-        if (stripped !== targetName) {
-          renameWindow(first.sessionName, first.windowIndex, `${currentPrefix}${targetName}`);
+        targetBase = repos.size === 1 ? `claude/${[...repos][0]}` : "claude";
+      }
+
+      if (targetBase) {
+        const desired = `${prefix}${targetBase}`;
+        if (first.windowName !== desired) {
+          renameWindow(first.sessionName, first.windowIndex, desired);
+        }
+      } else {
+        // No AI name yet — still sync prefix on existing base name
+        const baseName = stripAllPrefixes(first.windowName);
+        const desired = `${prefix}${baseName}`;
+        if (first.windowName !== desired) {
+          renameWindow(first.sessionName, first.windowIndex, desired);
         }
       }
     }
@@ -604,7 +612,7 @@ screen.key(["n"], async () => {
   if (selectedRow?.type === "repo-header") {
     preselectedRepoPath = selectedRow.path;
   } else if (selectedRow?.type === "session") {
-    preselectedRepoPath = selectedRow.session.repoPath;
+    preselectedRepoPath = selectedRow.session.baseRepoPath;
   }
 
   wizardState = initWizard(repos, preselectedRepoPath);

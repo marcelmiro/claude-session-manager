@@ -9,10 +9,36 @@
 import { listPanes, capturePane, renameWindow } from "./core/tmux";
 import { findClaudeProcesses } from "./core/process";
 import { detectStatus, type SessionStatus } from "./core/status";
-import { loadConfig } from "./core/config";
+import { loadConfig, PATHS } from "./core/config";
 import { loadState, saveState, computeAggregate, buildSessionStates } from "./core/state";
-import { detectTransitions, dispatchNotifications } from "./core/notifications";
+import { detectTransitions, dispatchNotifications, ATTENTION_PREFIX, RUNNING_PREFIX, stripAllPrefixes, desiredPrefix } from "./core/notifications";
 import type { Session, AggregateStatus } from "./types";
+import { existsSync } from "fs";
+
+// ---------------------------------------------------------------------------
+// Debug logging — only active when ~/.config/csm/debug.log exists
+// ---------------------------------------------------------------------------
+
+const DEBUG_LOG_PATH = `${PATHS.dir}/debug.log`;
+let debugEnabled: boolean | null = null;
+
+async function debugLog(msg: string): Promise<void> {
+  if (debugEnabled === null) debugEnabled = existsSync(DEBUG_LOG_PATH);
+  if (!debugEnabled) return;
+  try {
+    const ts = new Date().toISOString().slice(11, 23); // HH:MM:SS.mmm
+    const line = `${ts} ${msg}\n`;
+    const file = Bun.file(DEBUG_LOG_PATH);
+    const existing = await file.exists() ? await file.text() : "";
+    // Auto-truncate: keep last 900 lines when over 1000
+    const lines = existing.split("\n");
+    const trimmed = lines.length > 1000 ? lines.slice(-900).join("\n") + "\n" : existing;
+    await Bun.write(DEBUG_LOG_PATH, trimmed + line);
+  } catch {
+    // Non-fatal — disable for rest of this run
+    debugEnabled = false;
+  }
+}
 
 /**
  * Quick-discover active Claude sessions. Much lighter than discoverSessions() —
@@ -50,6 +76,7 @@ async function quickDiscoverActive(): Promise<Session[]> {
         id: "",
         repo: "",
         repoPath: pane.currentPath,
+        baseRepoPath: pane.currentPath,
         branch: "",
         status: result.status,
         contextPercent: result.contextPercent ?? 0,
@@ -57,7 +84,7 @@ async function quickDiscoverActive(): Promise<Session[]> {
         summary: "",
         modified: new Date(),
         firstPrompt: "",
-        name: pane.windowName.replace(/^⚡/, ""),
+        name: stripAllPrefixes(pane.windowName),
         tmuxPane: {
           paneId: pane.paneId,
           windowIndex: pane.windowIndex,
@@ -99,7 +126,7 @@ async function main(): Promise<void> {
 
       // Strip ⚡ from active window — but only if no OTHER panes in the window
       // still need attention (pane-level awareness for split panes).
-      if (activeWindowName?.startsWith("⚡")) {
+      if (activeWindowName?.startsWith(ATTENTION_PREFIX)) {
         const otherPanesHaveAttention = Object.values(state.sessions).some(
           (s) =>
             s.needsAttention &&
@@ -108,7 +135,8 @@ async function main(): Promise<void> {
             String(s.tmuxWindow) === activeWindow,
         );
         if (!otherPanesHaveAttention) {
-          await renameWindow(activeSession!, parseInt(activeWindow!, 10), activeWindowName.slice("⚡".length));
+          await debugLog(`auto-clear ⚡ on active window ${activeSession}:${activeWindow} (${activeWindowName})`);
+          await renameWindow(activeSession!, parseInt(activeWindow!, 10), stripAllPrefixes(activeWindowName));
         }
       }
     }
@@ -121,6 +149,7 @@ async function main(): Promise<void> {
   // clear attention on its own within one cycle.
   const tuiRecent = state.lastUpdatedBy === "tui" && (Date.now() - state.lastUpdatedAt) < 10_000;
   if (tuiRecent) {
+    await debugLog(`freshState bail: TUI updated ${Date.now() - state.lastUpdatedAt}ms ago`);
     const aggregate = computeAggregate(state);
     process.stdout.write(formatWidget(aggregate));
     return;
@@ -128,6 +157,8 @@ async function main(): Promise<void> {
 
   // Quick poll active sessions
   const sessions = await quickDiscoverActive();
+  await debugLog(`discovered ${sessions.length} sessions: ${sessions.map((s) => `${s.tmuxPane!.paneId}=${s.status}`).join(", ") || "(none)"}`);
+
 
   // Rebuild previous statuses from saved state
   const previousStatuses = new Map<string, SessionStatus>();
@@ -137,6 +168,9 @@ async function main(): Promise<void> {
 
   // Detect transitions
   const transitions = detectTransitions(previousStatuses, sessions);
+  for (const t of transitions) {
+    await debugLog(`transition ${t.sessionKey}: ${t.previousStatus}→${t.currentStatus} (${t.classification})`);
+  }
 
   // Carry over existing attention flags from state
   const needsAttention = new Set<string>();
@@ -147,9 +181,16 @@ async function main(): Promise<void> {
     if (s.needsAttention) {
       const currentStatus = currentStatusMap.get(key);
       // Clear stale attention: if session went back to running, user already interacted
-      if (currentStatus === "running") continue;
+      if (currentStatus === "running") {
+        await debugLog(`carry-over ${key}: cleared (now running)`);
+        continue;
+      }
       // Clear if pane no longer exists
-      if (!currentStatus) continue;
+      if (!currentStatus) {
+        await debugLog(`carry-over ${key}: cleared (pane gone)`);
+        continue;
+      }
+      await debugLog(`carry-over ${key}: preserved (status=${currentStatus})`);
       needsAttention.add(key);
       if (s.attentionType) attentionTypes.set(key, s.attentionType);
     }
@@ -177,15 +218,47 @@ async function main(): Promise<void> {
     await dispatchNotifications(notableWithAttention, config);
   }
 
+  // Sync 🔄 running prefix on tmux window names.
+  // Group sessions by window, compute desired prefix, rename if stale.
+  const windowMap = new Map<string, { sessionName: string; windowIndex: number; windowName: string; hasAttention: boolean; hasRunning: boolean }>();
+  for (const session of sessions) {
+    if (!session.tmuxPane) continue;
+    const wKey = `${session.tmuxPane.sessionName}:${session.tmuxPane.windowIndex}`;
+    const existing = windowMap.get(wKey);
+    if (existing) {
+      if (needsAttention.has(session.tmuxPane.paneId)) existing.hasAttention = true;
+      if (session.status === "running") existing.hasRunning = true;
+    } else {
+      windowMap.set(wKey, {
+        sessionName: session.tmuxPane.sessionName,
+        windowIndex: session.tmuxPane.windowIndex,
+        windowName: session.tmuxPane.windowName,
+        hasAttention: needsAttention.has(session.tmuxPane.paneId),
+        hasRunning: session.status === "running",
+      });
+    }
+  }
+  for (const win of windowMap.values()) {
+    const prefix = desiredPrefix(win.hasAttention, win.hasRunning);
+    const baseName = stripAllPrefixes(win.windowName);
+    const desired = `${prefix}${baseName}`;
+    if (win.windowName !== desired) {
+      await debugLog(`prefix-sync ${win.sessionName}:${win.windowIndex}: "${win.windowName}" → "${desired}"`);
+      await renameWindow(win.sessionName, win.windowIndex, desired);
+    }
+  }
+
   // Save state — but first check if another process (csm next) modified state
   // since we loaded it. If so, don't overwrite their changes.
   const freshState = await loadState();
   if (freshState.lastUpdatedAt !== state.lastUpdatedAt) {
+    await debugLog(`freshState bail: state modified by another process during poll`);
     const aggregate = computeAggregate(freshState);
     process.stdout.write(formatWidget(aggregate));
     return;
   }
 
+  await debugLog(`saving: needsAttention={${[...needsAttention].join(", ")}}`);
   const sessionStates = buildSessionStates(sessions, needsAttention, attentionTypes, state.sessions);
   const newState = { lastUpdatedBy: "monitor" as const, lastUpdatedAt: Date.now(), sessions: sessionStates };
   await saveState(newState);

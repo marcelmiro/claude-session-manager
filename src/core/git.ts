@@ -1,6 +1,26 @@
 import { homedir } from "os";
 import type { WizardRepo, WizardBranch } from "../types";
 
+// Persistent cache: worktree path → base repo path (survives across refresh cycles)
+const baseRepoCache = new Map<string, string>();
+
+/**
+ * Resolve a worktree path to its base repo path.
+ * For non-worktree repos, returns the same path. Cached across refreshes.
+ */
+export async function getBaseRepoPath(repoPath: string): Promise<string> {
+  if (baseRepoCache.has(repoPath)) return baseRepoCache.get(repoPath)!;
+  try {
+    const gitCommonDir = (await Bun.$`git -C ${repoPath} rev-parse --path-format=absolute --git-common-dir`.quiet().text()).trim();
+    const basePath = gitCommonDir.replace(/\/\.git\/?$/, "");
+    baseRepoCache.set(repoPath, basePath);
+    return basePath;
+  } catch {
+    baseRepoCache.set(repoPath, repoPath);
+    return repoPath;
+  }
+}
+
 /**
  * Discover git repos from session display rows + configured paths.
  * Dedup by path, sort by priorityRepos then alphabetical.
@@ -12,9 +32,13 @@ export async function discoverRepos(
 ): Promise<WizardRepo[]> {
   const seen = new Map<string, { name: string; path: string }>();
 
-  // Add repos from current sessions
+  // Add repos from current sessions, deduping worktrees to their base repo
   for (const r of sessionRepos) {
-    if (!seen.has(r.path)) seen.set(r.path, r);
+    const basePath = baseRepoCache.get(r.path) ?? r.path;
+    if (!seen.has(basePath)) {
+      const baseName = basePath.split("/").filter(Boolean).pop() ?? r.name;
+      seen.set(basePath, { name: baseName, path: basePath });
+    }
   }
 
   // Scan configured repoPaths 1-level deep

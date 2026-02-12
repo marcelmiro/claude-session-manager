@@ -8,6 +8,8 @@ import type {
 import { listPanes, capturePane } from "./tmux";
 import { findClaudeProcesses } from "./process";
 import { detectStatus, estimateContextPercent, type StatusResult } from "./status";
+import { getBaseRepoPath } from "./git";
+import { stripAllPrefixes } from "./notifications";
 
 // Persistent cache: paneId → sessionId, survives across refresh cycles.
 // Populated by lsof (confirmed) or JSONL mtime heuristic (best-guess).
@@ -299,12 +301,10 @@ async function enrichUnmatchedSessions(
   }
 }
 
-/** Normalize a tmux window name for matching: strip ⚡ prefix, skip defaults */
+/** Normalize a tmux window name for matching: strip ⚡/🔄 prefix, skip defaults */
 function normalizeWindowName(windowName: string | undefined, repoName: string): string | null {
   if (!windowName) return null;
-  let name = windowName;
-  // Strip attention prefix
-  if (name.startsWith("⚡")) name = name.slice("⚡".length);
+  let name = stripAllPrefixes(windowName);
   // Skip default/generic names (including "claude/{repo}" multi-pane format)
   if (name === "claude" || name === repoName || name === "zsh" || name === "bash") return null;
   if (name.startsWith("claude/")) return null;
@@ -345,11 +345,10 @@ async function buildActiveSession(
   knownSessionId?: string,
 ): Promise<Session> {
   const repoPath = pane.currentPath;
-  const repo = repoPath.split("/").filter(Boolean).pop() ?? "unknown";
 
   // Run all enrichments in parallel — capture pane with escapes for reuse in preview
   let lastCapture = "";
-  const [statusResult, branch, activeInfo] = await Promise.all([
+  const [statusResult, branch, activeInfo, baseRepoPath] = await Promise.all([
     capturePane(pane.paneId, { escapes: true }).then(
       (captured) => {
         lastCapture = captured;
@@ -364,7 +363,10 @@ async function buildActiveSession(
     ),
     getGitBranch(repoPath),
     findActiveSessionInfo(projectsDir, repoPath, knownSessionId),
+    getBaseRepoPath(repoPath),
   ]);
+
+  const repo = baseRepoPath.split("/").filter(Boolean).pop() ?? "unknown";
 
   const contextPercent = statusResult.contextPercent
     ?? (activeInfo ? estimateContextPercent(activeInfo.messageCount) : 0);
@@ -373,6 +375,7 @@ async function buildActiveSession(
     id: knownSessionId ?? activeInfo?.sessionId ?? "",
     repo,
     repoPath,
+    baseRepoPath,
     branch,
     status: statusResult.status,
     contextPercent,
@@ -508,7 +511,9 @@ async function discoverArchivedSessions(
         const ageMs = Date.now() - modifiedMs;
         if (ageMs > threeHours) continue;
 
-        const repo = entry.projectPath.split("/").filter(Boolean).pop() ?? "unknown";
+        let baseRepoPath = entry.projectPath;
+        try { baseRepoPath = await getBaseRepoPath(entry.projectPath); } catch {}
+        const repo = baseRepoPath.split("/").filter(Boolean).pop() ?? "unknown";
 
         // For archived sessions, use index summary or fetch last assistant message
         let summary = (entry.summary || entry.firstPrompt || "").replace(/\s+/g, " ").trim();
@@ -534,6 +539,7 @@ async function discoverArchivedSessions(
           id: entry.sessionId,
           repo,
           repoPath: entry.projectPath,
+          baseRepoPath,
           branch,
           status: "archived",
           contextPercent,
@@ -576,7 +582,9 @@ async function discoverArchivedSessions(
           // Skip AI naming sessions created by `claude -p` in names.ts
           if (metadata.firstPrompt?.startsWith("Name this coding session in 2-4 words")) continue;
 
-          const repo = metadata.projectPath.split("/").filter(Boolean).pop() ?? "unknown";
+          let baseRepoPath = metadata.projectPath;
+          try { baseRepoPath = await getBaseRepoPath(metadata.projectPath); } catch {}
+          const repo = baseRepoPath.split("/").filter(Boolean).pop() ?? "unknown";
           const summary = metadata.lastAssistantMessage || metadata.firstPrompt || "";
           const contextPercent = estimateContextPercent(metadata.messageCount);
 
@@ -584,6 +592,7 @@ async function discoverArchivedSessions(
             id: sessionId,
             repo,
             repoPath: metadata.projectPath,
+            baseRepoPath,
             branch: metadata.gitBranch,
             status: "archived",
             contextPercent,
@@ -654,13 +663,17 @@ export function groupSessions(sessions: Session[], priorityRepos: string[]): Rep
     groupSessions.sort((a, b) => {
       const statusDiff = statusPriority[a.status] - statusPriority[b.status];
       if (statusDiff !== 0) return statusDiff;
+      // Non-worktrees before worktrees (same status)
+      const aWt = a.repoPath !== a.baseRepoPath ? 1 : 0;
+      const bWt = b.repoPath !== b.baseRepoPath ? 1 : 0;
+      if (aWt !== bWt) return aWt - bWt;
       const aKey = a.tmuxPane?.paneId ?? a.id;
       const bKey = b.tmuxPane?.paneId ?? b.id;
       return aKey.localeCompare(bKey);
     });
 
-    // Use the repoPath from the first session as the group path
-    const path = groupSessions[0].repoPath;
+    // Use the baseRepoPath from the first session as the group path
+    const path = groupSessions[0].baseRepoPath;
 
     groups.push({ name, path, sessions: groupSessions });
   }

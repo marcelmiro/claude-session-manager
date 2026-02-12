@@ -9,6 +9,7 @@ export interface Session {
   id: string;
   repo: string;
   repoPath: string;
+  baseRepoPath: string;
   branch: string;
   status: "running" | "waiting" | "ready" | "idle" | "archived";
   contextPercent: number;
