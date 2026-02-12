@@ -16,7 +16,48 @@ export async function getBaseRepoPath(repoPath: string): Promise<string> {
     baseRepoCache.set(repoPath, basePath);
     return basePath;
   } catch {
-    baseRepoCache.set(repoPath, repoPath);
+    // git failed — directory may be deleted (orphaned worktree).
+    // Try to find a sibling git repo whose name is a prefix of this directory.
+    // Worktrees are named "../reponame-branchname", so the repo name is a prefix.
+    const basePath = await inferBaseRepoFromSiblings(repoPath);
+    baseRepoCache.set(repoPath, basePath);
+    return basePath;
+  }
+}
+
+/**
+ * For deleted worktree directories, infer the base repo by scanning sibling
+ * directories. Worktrees are named `reponame-branchname`, so we look for
+ * existing git repos in the same parent whose name is a prefix of this dir.
+ * Picks the longest matching prefix to avoid false positives.
+ */
+async function inferBaseRepoFromSiblings(repoPath: string): Promise<string> {
+  try {
+    const parts = repoPath.split("/");
+    const dirName = parts.pop() ?? "";
+    const parentDir = parts.join("/");
+    if (!dirName || !parentDir) return repoPath;
+
+    const glob = new Bun.Glob("*");
+    let bestMatch = "";
+    let bestPath = "";
+
+    for await (const entry of glob.scan({ cwd: parentDir, onlyFiles: false })) {
+      // Skip self and entries that aren't a prefix
+      if (entry === dirName) continue;
+      if (!dirName.startsWith(entry + "-")) continue;
+
+      // Check if this sibling is a git repo
+      const candidatePath = `${parentDir}/${entry}`;
+      const hasGit = await Bun.file(`${candidatePath}/.git/HEAD`).exists();
+      if (hasGit && entry.length > bestMatch.length) {
+        bestMatch = entry;
+        bestPath = candidatePath;
+      }
+    }
+
+    return bestPath || repoPath;
+  } catch {
     return repoPath;
   }
 }
