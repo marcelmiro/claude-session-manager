@@ -2,7 +2,22 @@ import type { NotificationConfig, Session, TransitionEvent } from "../types";
 import type { SessionStatus } from "./status";
 import { renameWindow, getWindowName } from "./tmux";
 
-const ATTENTION_PREFIX = "⚡";
+export const ATTENTION_PREFIX = "⚡";
+export const RUNNING_PREFIX = "🔄";
+
+/** Strip both ⚡ and 🔄 prefixes from a window name */
+export function stripAllPrefixes(name: string): string {
+  if (name.startsWith(ATTENTION_PREFIX)) return name.slice(ATTENTION_PREFIX.length);
+  if (name.startsWith(RUNNING_PREFIX)) return name.slice(RUNNING_PREFIX.length);
+  return name;
+}
+
+/** Determine the desired prefix: ⚡ > 🔄 > "" */
+export function desiredPrefix(hasAttention: boolean, isRunning: boolean): string {
+  if (hasAttention) return ATTENTION_PREFIX;
+  if (isRunning) return RUNNING_PREFIX;
+  return "";
+}
 
 /**
  * Detect status transitions between refresh cycles.
@@ -68,10 +83,11 @@ export async function dispatchNotifications(
     if (config.windowPrefix) {
       const currentName = session.name || session.tmuxPane.windowName;
       if (!currentName.startsWith(ATTENTION_PREFIX)) {
+        const baseName = stripAllPrefixes(currentName);
         await renameWindow(
           session.tmuxPane.sessionName,
           session.tmuxPane.windowIndex,
-          `${ATTENTION_PREFIX}${currentName}`,
+          `${ATTENTION_PREFIX}${baseName}`,
         );
       }
     }
@@ -88,6 +104,6 @@ export async function clearWindowAttentionPrefix(
 ): Promise<void> {
   const currentName = await getWindowName(sessionName, windowIndex);
   if (currentName.startsWith(ATTENTION_PREFIX)) {
-    await renameWindow(sessionName, windowIndex, currentName.slice(ATTENTION_PREFIX.length));
+    await renameWindow(sessionName, windowIndex, stripAllPrefixes(currentName));
   }
 }

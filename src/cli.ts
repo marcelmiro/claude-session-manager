@@ -9,7 +9,7 @@
 
 import { loadState, saveState } from "./core/state";
 import { switchToPane, listPanes, renameWindow, capturePane, displayMessage } from "./core/tmux";
-import { clearWindowAttentionPrefix } from "./core/notifications";
+import { clearWindowAttentionPrefix, stripAllPrefixes, ATTENTION_PREFIX } from "./core/notifications";
 import { findClaudeProcesses } from "./core/process";
 import { detectStatus } from "./core/status";
 import { loadNameCache } from "./core/names";
@@ -62,17 +62,8 @@ export async function next(): Promise<void> {
       (a, b) => (a[1].lastTransition ?? Infinity) - (b[1].lastTransition ?? Infinity),
     );
 
-  if (attentionSessions.length === 0) {
-    await displayMessage("No sessions need attention");
-    // Still save — we may have cleared the active pane's attention above
-    state.lastUpdatedBy = "tui";
-    state.lastUpdatedAt = Date.now();
-    await saveState(state);
-    return;
-  }
-
-  // Validate candidates: check pane still exists and session still needs attention
-  let target: (typeof attentionSessions)[0] | null = null;
+  // Validate candidates from state: check pane still exists and session still needs attention
+  let target: { paneId: string; tmuxSession: string; tmuxWindow: number } | null = null;
   for (const candidate of attentionSessions) {
     const [_, s] = candidate;
     if (!s.tmuxSession || s.tmuxWindow === undefined || !s.tmuxPane) continue;
@@ -103,12 +94,40 @@ export async function next(): Promise<void> {
       continue;
     }
 
-    target = candidate;
+    target = { paneId: s.tmuxPane, tmuxSession: s.tmuxSession, tmuxWindow: s.tmuxWindow };
     break;
   }
 
+  // Fallback: if state had no valid candidates, scan tmux windows for ⚡ prefixes.
+  // This handles desync where the window shows ⚡ but state.json doesn't know about it.
   if (!target) {
-    // All candidates were stale — save cleanup and report
+    const panes = await listPanes();
+    const attentionPanes = panes.filter((p) => p.windowName.startsWith(ATTENTION_PREFIX));
+
+    for (const pane of attentionPanes) {
+      const captured = await capturePane(pane.paneId);
+      if (!captured) continue;
+
+      const plain = captured
+        .replace(/\x1b\[[0-9;?]*[\x40-\x7e]/g, "")
+        .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, "")
+        .replace(/\x1b[\x20-\x2f]*[\x30-\x7e]/g, "")
+        .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, "");
+      const result = detectStatus(plain, true);
+
+      if (result.status === "running" || result.status === "idle") {
+        // Not actually needing attention — strip the stale ⚡ prefix
+        await clearWindowAttentionPrefix(pane.sessionName, pane.windowIndex);
+        continue;
+      }
+
+      target = { paneId: pane.paneId, tmuxSession: pane.sessionName, tmuxWindow: pane.windowIndex };
+      break;
+    }
+  }
+
+  if (!target) {
+    // Neither state nor window scan found anything
     state.lastUpdatedBy = "tui";
     state.lastUpdatedAt = Date.now();
     await saveState(state);
@@ -116,13 +135,14 @@ export async function next(): Promise<void> {
     return;
   }
 
-  const [_, session] = target;
-
-  // Clear attention flag and save
+  // Clear attention flag in state (if it exists) and save
   // Use lastUpdatedBy="tui" so the status widget defers to our state
   // and doesn't overwrite our changes on its next poll
-  session.needsAttention = false;
-  session.attentionType = undefined;
+  const stateEntry = state.sessions[target.paneId];
+  if (stateEntry) {
+    stateEntry.needsAttention = false;
+    stateEntry.attentionType = undefined;
+  }
   state.lastUpdatedBy = "tui";
   state.lastUpdatedAt = Date.now();
   await saveState(state);
@@ -132,15 +152,15 @@ export async function next(): Promise<void> {
   const othersInWindow = Object.values(state.sessions).some(
     (s) =>
       s.needsAttention &&
-      s.tmuxSession === session.tmuxSession &&
-      s.tmuxWindow === session.tmuxWindow,
+      s.tmuxSession === target!.tmuxSession &&
+      s.tmuxWindow === target!.tmuxWindow,
   );
   if (!othersInWindow) {
-    await clearWindowAttentionPrefix(session.tmuxSession!, session.tmuxWindow!);
+    await clearWindowAttentionPrefix(target.tmuxSession, target.tmuxWindow);
   }
 
   // Switch to the pane
-  await switchToPane(session.tmuxPane!, session.tmuxSession!, session.tmuxWindow!);
+  await switchToPane(target.paneId, target.tmuxSession, target.tmuxWindow);
 
   // Jump itself is the confirmation — no toast needed.
 }
@@ -171,7 +191,7 @@ export async function reset(): Promise<void> {
       const name = line.slice(spaceIdx + 1);
       const [sessionName, windowIndex] = target.split(":");
 
-      const cleanName = name.replace(/^⚡/, "");
+      const cleanName = stripAllPrefixes(name);
 
       if (cleanName === sessionName) {
         // Window name matches tmux session name → reset to "claude"
@@ -181,8 +201,8 @@ export async function reset(): Promise<void> {
         // AI-generated or unknown name → reset to "claude"
         await renameWindow(sessionName, parseInt(windowIndex, 10), "claude");
         count++;
-      } else if (name.startsWith("⚡")) {
-        // Standard name with ⚡ prefix → just strip the prefix
+      } else if (name !== cleanName) {
+        // Standard name with prefix → just strip the prefix
         await renameWindow(sessionName, parseInt(windowIndex, 10), cleanName);
         count++;
       }
@@ -252,7 +272,7 @@ export async function list(): Promise<void> {
         .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, "");
       const result = detectStatus(plain, true);
 
-      const name = pane.windowName.replace(/^⚡/, "");
+      const name = stripAllPrefixes(pane.windowName);
       const repo = pane.currentPath.split("/").pop() || pane.currentPath;
 
       return {
@@ -260,7 +280,7 @@ export async function list(): Promise<void> {
         status: result.status,
         contextPercent: result.contextPercent,
         repo,
-        needsAttention: pane.windowName.startsWith("⚡"),
+        needsAttention: pane.windowName.startsWith(ATTENTION_PREFIX),
       };
     }),
   );
@@ -324,7 +344,7 @@ export async function switchTo(name?: string): Promise<void> {
   // Score each pane by best match across window name and cached name
   const scored = panes
     .map((pane) => {
-      const windowName = pane.windowName.replace(/^⚡/, "").toLowerCase();
+      const windowName = stripAllPrefixes(pane.windowName).toLowerCase();
       let score = fuzzyScore(windowName, needle);
 
       // Also try matching against the AI-generated name from the cache
@@ -349,12 +369,12 @@ export async function switchTo(name?: string): Promise<void> {
 
   const best = scored[0].pane;
 
-  // Clear ⚡ if present
-  if (best.windowName.startsWith("⚡")) {
+  // Clear ⚡ if present (keep 🔄 — session may still be running)
+  if (best.windowName.startsWith(ATTENTION_PREFIX)) {
     await renameWindow(
       best.sessionName,
       best.windowIndex,
-      best.windowName.slice("⚡".length),
+      best.windowName.slice(ATTENTION_PREFIX.length),
     );
   }
 
