@@ -82,20 +82,34 @@ async function main(): Promise<void> {
   // Auto-clear: strip ⚡ from the window the user is currently viewing.
   // Runs BEFORE the tuiRecent check so it works even while the TUI is active.
   // Cost: ~6ms (two lightweight tmux queries), negligible vs 5s status-interval.
+  let activePaneId: string | undefined;
   let activeWindow: string | undefined;
   let activeSession: string | undefined;
   try {
     const client = (await Bun.$`tmux list-clients -F '#{client_name}'`.quiet().text()).trim().split("\n")[0];
     if (client) {
-      const info = (await Bun.$`tmux display-message -c ${client} -p '#{window_index}:#{session_name}:#{window_name}'`.quiet().text()).trim();
-      const parts = info.split(":");
-      activeWindow = parts[0];
-      activeSession = parts[1];
-      const activeWindowName = parts[2];
+      const info = (await Bun.$`tmux display-message -c ${client} -p '#{pane_id}:#{window_index}:#{session_name}:#{window_name}'`.quiet().text()).trim();
+      const colonIdx1 = info.indexOf(":");
+      const colonIdx2 = info.indexOf(":", colonIdx1 + 1);
+      const colonIdx3 = info.indexOf(":", colonIdx2 + 1);
+      activePaneId = info.slice(0, colonIdx1);
+      activeWindow = info.slice(colonIdx1 + 1, colonIdx2);
+      activeSession = info.slice(colonIdx2 + 1, colonIdx3);
+      const activeWindowName = info.slice(colonIdx3 + 1);
 
-      // Always strip ⚡ from active window name (catches orphans)
+      // Strip ⚡ from active window — but only if no OTHER panes in the window
+      // still need attention (pane-level awareness for split panes).
       if (activeWindowName?.startsWith("⚡")) {
-        await renameWindow(activeSession!, parseInt(activeWindow!, 10), activeWindowName.slice("⚡".length));
+        const otherPanesHaveAttention = Object.values(state.sessions).some(
+          (s) =>
+            s.needsAttention &&
+            s.tmuxPane !== activePaneId &&
+            s.tmuxSession === activeSession &&
+            String(s.tmuxWindow) === activeWindow,
+        );
+        if (!otherPanesHaveAttention) {
+          await renameWindow(activeSession!, parseInt(activeWindow!, 10), activeWindowName.slice("⚡".length));
+        }
       }
     }
   } catch {
@@ -141,31 +155,37 @@ async function main(): Promise<void> {
     }
   }
 
-  // Add new attention from transitions
-  const notable = transitions.filter((e) => e.classification !== "none");
+  // Add new attention from transitions (exclude active pane — user is already looking at it,
+  // and flaky status detection can cause running↔ready oscillation that re-adds attention)
+  const notable = transitions.filter(
+    (e) => e.classification !== "none" && e.sessionKey !== activePaneId,
+  );
   for (const event of notable) {
     needsAttention.add(event.sessionKey);
     attentionTypes.set(event.sessionKey, event.classification as "blocked" | "turnComplete");
   }
 
-  // Clear attention flags for panes in the active window
-  if (activeWindow) {
-    for (const session of sessions) {
-      if (!session.tmuxPane) continue;
-      const key = session.tmuxPane.paneId;
-      if (String(session.tmuxPane.windowIndex) === activeWindow) {
-        needsAttention.delete(key);
-        attentionTypes.delete(key);
-      }
-    }
+  // Clear attention for the specific pane the user is focused on (not the whole window)
+  if (activePaneId) {
+    needsAttention.delete(activePaneId);
+    attentionTypes.delete(activePaneId);
   }
 
-  // Dispatch notifications for transitions
-  if (notable.length > 0) {
-    await dispatchNotifications(notable, config);
+  // Dispatch notifications only for sessions that still have attention
+  const notableWithAttention = notable.filter((e) => needsAttention.has(e.sessionKey));
+  if (notableWithAttention.length > 0) {
+    await dispatchNotifications(notableWithAttention, config);
   }
 
-  // Save state (pass previous states to preserve original transition timestamps)
+  // Save state — but first check if another process (csm next) modified state
+  // since we loaded it. If so, don't overwrite their changes.
+  const freshState = await loadState();
+  if (freshState.lastUpdatedAt !== state.lastUpdatedAt) {
+    const aggregate = computeAggregate(freshState);
+    process.stdout.write(formatWidget(aggregate));
+    return;
+  }
+
   const sessionStates = buildSessionStates(sessions, needsAttention, attentionTypes, state.sessions);
   const newState = { lastUpdatedBy: "monitor" as const, lastUpdatedAt: Date.now(), sessions: sessionStates };
   await saveState(newState);

@@ -9,8 +9,10 @@
 
 import { loadState, saveState } from "./core/state";
 import { switchToPane, listPanes, renameWindow, capturePane, displayMessage } from "./core/tmux";
+import { clearWindowAttentionPrefix } from "./core/notifications";
 import { findClaudeProcesses } from "./core/process";
 import { detectStatus } from "./core/status";
+import { loadNameCache } from "./core/names";
 
 // ---------------------------------------------------------------------------
 // csm next
@@ -19,9 +21,40 @@ import { detectStatus } from "./core/status";
 /**
  * Switch to the next session needing attention.
  * Picks the session that has been waiting the longest (oldest lastTransition).
+ * Validates each candidate is still alive and genuinely needs attention before switching.
  */
 export async function next(): Promise<void> {
   const state = await loadState();
+
+  // Clear attention for the pane the user is currently viewing.
+  // Without this, csm-next ping-pongs: switches away from pane A (still flagged)
+  // to pane B, then next call picks A again because its flag was never cleared.
+  try {
+    const client = (await Bun.$`tmux list-clients -F '#{client_name}'`.quiet().text()).trim().split("\n")[0];
+    if (client) {
+      const activePaneId = (await Bun.$`tmux display-message -c ${client} -p '#{pane_id}'`.quiet().text()).trim();
+      const activeSession = state.sessions[activePaneId];
+      if (activePaneId && activeSession?.needsAttention) {
+        activeSession.needsAttention = false;
+        activeSession.attentionType = undefined;
+        // Strip ⚡ from source window if no other panes in it still need attention
+        if (activeSession.tmuxSession !== undefined && activeSession.tmuxWindow !== undefined) {
+          const othersInSourceWindow = Object.values(state.sessions).some(
+            (s) =>
+              s.needsAttention &&
+              s.tmuxPane !== activePaneId &&
+              s.tmuxSession === activeSession.tmuxSession &&
+              s.tmuxWindow === activeSession.tmuxWindow,
+          );
+          if (!othersInSourceWindow) {
+            await clearWindowAttentionPrefix(activeSession.tmuxSession!, activeSession.tmuxWindow!);
+          }
+        }
+      }
+    }
+  } catch {
+    // Not in tmux context
+  }
 
   const attentionSessions = Object.entries(state.sessions)
     .filter(([_, s]) => s.needsAttention)
@@ -31,33 +64,83 @@ export async function next(): Promise<void> {
 
   if (attentionSessions.length === 0) {
     await displayMessage("No sessions need attention");
+    // Still save — we may have cleared the active pane's attention above
+    state.lastUpdatedBy = "tui";
+    state.lastUpdatedAt = Date.now();
+    await saveState(state);
     return;
   }
 
-  const [_, session] = attentionSessions[0];
+  // Validate candidates: check pane still exists and session still needs attention
+  let target: (typeof attentionSessions)[0] | null = null;
+  for (const candidate of attentionSessions) {
+    const [_, s] = candidate;
+    if (!s.tmuxSession || s.tmuxWindow === undefined || !s.tmuxPane) continue;
 
-  if (!session.tmuxSession || session.tmuxWindow === undefined || !session.tmuxPane) {
-    await displayMessage("Session missing tmux info");
+    // Capture pane to verify it exists and check current status
+    const captured = await capturePane(s.tmuxPane);
+    if (!captured) {
+      // Pane is dead — clear stale attention
+      s.needsAttention = false;
+      s.attentionType = undefined;
+      continue;
+    }
+
+    const plain = captured
+      .replace(/\x1b\[[0-9;?]*[\x40-\x7e]/g, "")
+      .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, "")
+      .replace(/\x1b[\x20-\x2f]*[\x30-\x7e]/g, "")
+      .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, "");
+    const result = detectStatus(plain, true);
+
+    if (result.status === "running" || result.status === "idle") {
+      // Session no longer needs attention — clear stale flag and ⚡ prefix
+      s.needsAttention = false;
+      s.attentionType = undefined;
+      if (s.tmuxSession !== undefined && s.tmuxWindow !== undefined) {
+        await clearWindowAttentionPrefix(s.tmuxSession!, s.tmuxWindow!);
+      }
+      continue;
+    }
+
+    target = candidate;
+    break;
+  }
+
+  if (!target) {
+    // All candidates were stale — save cleanup and report
+    state.lastUpdatedBy = "tui";
+    state.lastUpdatedAt = Date.now();
+    await saveState(state);
+    await displayMessage("No sessions need attention");
     return;
   }
+
+  const [_, session] = target;
 
   // Clear attention flag and save
+  // Use lastUpdatedBy="tui" so the status widget defers to our state
+  // and doesn't overwrite our changes on its next poll
   session.needsAttention = false;
   session.attentionType = undefined;
+  state.lastUpdatedBy = "tui";
   state.lastUpdatedAt = Date.now();
   await saveState(state);
 
-  // Strip ⚡ from window name
-  if (session.windowName?.startsWith("⚡")) {
-    await renameWindow(
-      session.tmuxSession,
-      session.tmuxWindow,
-      session.windowName.slice("⚡".length),
-    );
+  // Strip ⚡ from window name — but only if no other panes in this window still need attention.
+  // Uses clearWindowAttentionPrefix which reads the actual tmux window name (not stale state).
+  const othersInWindow = Object.values(state.sessions).some(
+    (s) =>
+      s.needsAttention &&
+      s.tmuxSession === session.tmuxSession &&
+      s.tmuxWindow === session.tmuxWindow,
+  );
+  if (!othersInWindow) {
+    await clearWindowAttentionPrefix(session.tmuxSession!, session.tmuxWindow!);
   }
 
   // Switch to the pane
-  await switchToPane(session.tmuxPane, session.tmuxSession, session.tmuxWindow);
+  await switchToPane(session.tmuxPane!, session.tmuxSession!, session.tmuxWindow!);
 
   // Jump itself is the confirmation — no toast needed.
 }
@@ -203,8 +286,20 @@ export async function list(): Promise<void> {
 // csm switch <name>
 // ---------------------------------------------------------------------------
 
+/** Score a candidate name against a search needle */
+function fuzzyScore(candidate: string, needle: string): number {
+  if (candidate === needle) return 100;
+  if (candidate.startsWith(needle)) return 80;
+  if (candidate.includes(needle)) return 60;
+  const words = candidate.split(/[-_\s]+/);
+  if (words.some((w) => w.startsWith(needle))) return 40;
+  if (isSubsequence(needle, candidate)) return 20;
+  return 0;
+}
+
 /**
  * Fuzzy-match a session by name and switch to it.
+ * Matches against both tmux window names and AI-generated names from the cache.
  */
 export async function switchTo(name?: string): Promise<void> {
   if (!name) {
@@ -212,22 +307,34 @@ export async function switchTo(name?: string): Promise<void> {
     process.exit(1);
   }
 
-  const panes = await listPanes();
+  const [panes, processes, nameCache] = await Promise.all([
+    listPanes(),
+    findClaudeProcesses({}),
+    loadNameCache(),
+  ]);
+
+  // Build TTY→sessionId map for cached name lookup
+  const ttyToSessionId = new Map<string, string>();
+  for (const proc of processes) {
+    if (proc.sessionId) ttyToSessionId.set(proc.tty, proc.sessionId);
+  }
+
   const needle = name.toLowerCase();
 
-  // Score each pane by name match quality
+  // Score each pane by best match across window name and cached name
   const scored = panes
     .map((pane) => {
       const windowName = pane.windowName.replace(/^⚡/, "").toLowerCase();
-      let score = 0;
+      let score = fuzzyScore(windowName, needle);
 
-      if (windowName === needle) score = 100;
-      else if (windowName.startsWith(needle)) score = 80;
-      else if (windowName.includes(needle)) score = 60;
-      else {
-        const words = windowName.split(/[-_\s]+/);
-        if (words.some((w) => w.startsWith(needle))) score = 40;
-        else if (isSubsequence(needle, windowName)) score = 20;
+      // Also try matching against the AI-generated name from the cache
+      const normalizedTty = pane.tty.replace(/^\/dev\//, "");
+      const sessionId = ttyToSessionId.get(normalizedTty);
+      if (sessionId) {
+        const cachedName = nameCache.names[sessionId]?.toLowerCase();
+        if (cachedName) {
+          score = Math.max(score, fuzzyScore(cachedName, needle));
+        }
       }
 
       return { pane, score };
