@@ -143,7 +143,7 @@ export interface WizardState {
   selectedBranch: WizardBranch | null;
   worktreeName: string;        // text input: new branch name for worktree (empty = no worktree)
   worktreeNameCursor: number;
-  enterDebounce: boolean;      // true = ignore next Enter (prevents double-fire on step transition)
+  enterDebounceUntil: number;  // timestamp (ms) — ignore Enter until this time (prevents double-fire on step transition)
 }
 
 export type WizardAction =
@@ -151,6 +151,7 @@ export type WizardAction =
   | { type: "render" }
   | { type: "preview" }
   | { type: "cancel" }
+  | { type: "quit" }
   | { type: "loadBranches" }
   | { type: "launch"; repo: WizardRepo; branch: WizardBranch; worktreeName: string };
 

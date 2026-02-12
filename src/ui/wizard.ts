@@ -36,7 +36,7 @@ export function initWizard(
     selectedBranch: null,
     worktreeName: "",
     worktreeNameCursor: 0,
-    enterDebounce: false,
+    enterDebounceUntil: 0,
   };
 
   // Auto-skip repo step if only one repo
@@ -438,6 +438,8 @@ function handleRepoKey(state: WizardState, keyName: string): WizardAction {
     }
     case "escape":
       return { type: "cancel" };
+    case "q":
+      return { type: "quit" };
     default:
       return { type: "noop" };
   }
@@ -480,7 +482,7 @@ function handleBranchFilterKey(state: WizardState, keyName: string, ch: string):
       state.step = "worktree";
       state.worktreeName = "";
       state.worktreeNameCursor = 0;
-      state.enterDebounce = true;
+      state.enterDebounceUntil = Date.now() + 100;
       return { type: "render" };
     }
   }
@@ -536,9 +538,8 @@ function handleWorktreeKey(state: WizardState, keyName: string, ch: string): Wiz
   switch (keyName) {
     case "enter":
     case "return": {
-      // Enter fires twice (\r + \n) — ignore the one that arrives right after step transition
-      if (state.enterDebounce) {
-        state.enterDebounce = false;
+      // Ignore Enter events that arrive within 100ms of step transition (prevents double-fire)
+      if (Date.now() < state.enterDebounceUntil) {
         return { type: "noop" };
       }
       const repo = state.selectedRepo!;

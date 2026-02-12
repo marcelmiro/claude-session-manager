@@ -11,7 +11,9 @@ export function renderStatusBar(box: Widgets.BoxElement, enterAction?: SessionSt
     `  {${C.peach}-fg}r{/${C.peach}-fg} {${C.dim}-fg}refresh{/${C.dim}-fg}` +
     `  {${C.peach}-fg}x{/${C.peach}-fg} {${C.dim}-fg}kill{/${C.dim}-fg}` +
     `  {${C.peach}-fg}f{/${C.peach}-fg} {${C.dim}-fg}fork{/${C.dim}-fg}` +
+    `  {${C.peach}-fg}c{/${C.peach}-fg} {${C.dim}-fg}cursor{/${C.dim}-fg}` +
     `  {${C.peach}-fg}s{/${C.peach}-fg} {${C.dim}-fg}name{/${C.dim}-fg}` +
+    `  {${C.peach}-fg}y{/${C.peach}-fg} {${C.dim}-fg}copy{/${C.dim}-fg}` +
     `  {${C.peach}-fg}u/d{/${C.peach}-fg} {${C.dim}-fg}scroll{/${C.dim}-fg}` +
     `  {${C.peach}-fg}n{/${C.peach}-fg} {${C.dim}-fg}new{/${C.dim}-fg}` +
     `  {${C.peach}-fg}q{/${C.peach}-fg} {${C.dim}-fg}quit{/${C.dim}-fg}` +

@@ -186,6 +186,9 @@ export async function createWorktree(
     return { ok: true };
   } catch (e: any) {
     const msg = e?.stderr?.toString?.() || e?.message || "worktree creation failed";
-    return { ok: false, error: msg.trim() };
+    // Strip git's "Preparing worktree..." progress line to surface the actual error
+    const error = msg.trim().split("\n").filter((l: string) => !l.startsWith("Preparing worktree")).join(" ").trim()
+      || msg.trim();
+    return { ok: false, error };
   }
 }
