@@ -2,27 +2,32 @@ CSM Ideas Backlog
 =================
 
 ## Actions & Workflows
-- c → open worktree folder in Cursor IDE (cursor {path})
 - d → launch dev server in worktree (configurable command per repo)
 - w → worktree manager sub-view (create/delete/list worktrees with session counts)
 - X → kill session + optionally delete worktree
 - / → filter/search sessions by repo, branch, or name
 - Tab → cycle sort mode (status / modified / repo / context)
+- Quick-send keystrokes to a session without switching (approve tool call from manager)
+- Bulk actions: select multiple sessions, kill/name/fork in batch
 
 ## Session Grouping & Display
 - Toggle grouping on/off
 - Session tagging / custom labels
-- Configurable columns (show/hide context, lines, etc.)
-- Show lines modified per session
+- Configurable columns (show/hide context, time, etc.)
+- Show lines modified / git diff stats per session
+- Ticket ID linking (open Linear/Jira ticket in browser from session)
+- Color-code ticket IDs by project/team
 
 ## Worktree Management
 - Safety checks before worktree deletion (uncommitted changes, running sessions)
 - Show session count per worktree
+- Auto-cleanup stale worktrees (no sessions, merged branch)
 
 ## Cleanup & Maintenance
 - Detect dead sessions (process gone, pane still open or closed)
 - Offer to clean up orphaned session files
 - Detect zombie tmux panes (no process, showing error/exit code)
+- Prune old entries from names.json cache
 
 ## Configuration
 - Configurable refresh interval
@@ -30,11 +35,14 @@ CSM Ideas Backlog
 - Repo allowlist/blocklist
 - Custom keybindings
 - Worktree path template
+- Configurable IDE command (not just Cursor)
 
 ## Quality of Life
-- Quick-send keystrokes to a session without switching (approve tool call from manager)
 - Session duration tracking (how long has this been running?)
 - Show model being used per session (opus vs sonnet)
 - Copy session ID to clipboard
 - Export session log to markdown
 - Multiple tmux session support (not just "default")
+- Notification sound / macOS notification center integration
+- Session pinning (pin important sessions to top regardless of status)
+- Preview pane search (/ within preview to find text)
