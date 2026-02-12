@@ -130,8 +130,8 @@ export function renderSessionList(
       const statusPadded = needsAttention
         ? `${dotStr} ${displayLabel.padEnd(10)}`
         : statusLabel.padEnd(12);
-      const ctxStr = `${session.contextPercent}%`.padStart(6);
-      const ctxClr = contextColor(session.contextPercent);
+      const ctxStr = session.status === "archived" ? "     —" : `${session.contextPercent}%`.padStart(6);
+      const ctxClr = session.status === "archived" ? C.dim : contextColor(session.contextPercent);
       const timeStr = formatTimeAgo(session.modified).padStart(5);
 
       if (isSelected) {

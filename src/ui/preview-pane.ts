@@ -3,7 +3,7 @@ import type { Widgets } from "blessed";
 import type { Session } from "../types";
 
 import { capturePane } from "../core/tmux";
-import { getLastAssistantMessage } from "../core/sessions";
+import { readSessionTail } from "../core/sessions";
 import { formatTimeAgo } from "../core/status";
 import { C } from "./colors";
 
@@ -269,6 +269,15 @@ function stripClaudeChrome(text: string): string {
   return lines.slice(0, cutIdx).join("\n");
 }
 
+// -- Plain text extraction (for clipboard copy) --
+
+/** Last preview content as plain text (no ANSI, no blessed tags) */
+let lastPlainText = "";
+
+export function getPreviewPlainText(): string {
+  return lastPlainText;
+}
+
 // -- Preview rendering --
 
 /** Trim blank lines from both ends and return only the last N lines */
@@ -310,11 +319,13 @@ export async function updatePreview(
         (truncSummary ? `  {${C.dim}-fg}${truncSummary}{/${C.dim}-fg}` : ""),
       );
     }
+    lastPlainText = "";
     box.setContent(lines.join("\n"));
     return;
   }
 
   if (session === null) {
+    lastPlainText = "";
     box.setContent("");
     return;
   }
@@ -344,20 +355,49 @@ export async function updatePreview(
     // Strip Claude Code UI chrome (input box, status line) before conversion
     const stripped = stripClaudeChrome(captured);
     const trimmed = stripped.replace(/\n\s*$/g, "");
+    lastPlainText = stripAllAnsi(trimmed);
     const markup = ansiToBlessedMarkup(trimmed);
     body = bottomAlignContent(markup, availableLines);
   } else {
-    // Idle session — show last assistant message
+    // Archived session — show first prompt + last assistant message with generous length
     const encodedPath = encodeProjectPath(session.repoPath);
     const sessionPath = `${homedir()}/.claude/projects/${encodedPath}/${session.id}.jsonl`;
-    const lastMessage = await getLastAssistantMessage(sessionPath);
+    const { lastMessage } = await readSessionTail(sessionPath, 2000);
 
+    const parts: string[] = [];
+
+    // Show first prompt if different from header summary
+    if (session.firstPrompt && session.firstPrompt !== session.summary) {
+      const escaped = session.firstPrompt
+        .replace(/\{/g, "{open}").replace(/\}/g, "{close}").replace(/\n/g, " ");
+      parts.push(`{${C.muted}-fg}${escaped}{/${C.muted}-fg}`);
+    }
+
+    // Show last assistant message (much longer for preview, avoiding duplication)
     if (lastMessage) {
       const escaped = lastMessage.replace(/\{/g, "{open}").replace(/\}/g, "{close}");
-      body = `{#A0A0A0-fg}{italic}${escaped}{/italic}{/#A0A0A0-fg}`;
-    } else {
-      body = `{#505050-fg}No recent output{/#505050-fg}`;
+      // Skip if it's just a short repeat of the summary already in the header
+      const isSummaryRepeat = session.summary && lastMessage.startsWith(session.summary.slice(0, 100));
+      if (!isSummaryRepeat || lastMessage.length > session.summary.length + 50) {
+        parts.push(`{#A0A0A0-fg}{italic}${escaped}{/italic}{/#A0A0A0-fg}`);
+      }
     }
+
+    if (parts.length > 0) {
+      body = parts.join("\n\n");
+    } else {
+      body = `{${C.dim}-fg}No recent output{/${C.dim}-fg}`;
+    }
+
+    // Store plain text for clipboard copy
+    const plainParts: string[] = [];
+    if (session.firstPrompt && session.firstPrompt !== session.summary) {
+      plainParts.push(session.firstPrompt);
+    }
+    if (lastMessage) {
+      plainParts.push(lastMessage);
+    }
+    lastPlainText = plainParts.join("\n\n");
   }
 
   const content = `${header}\n${body}`;

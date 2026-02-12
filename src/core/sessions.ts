@@ -19,7 +19,7 @@ const paneSessionCache = new Map<string, string>();
  * Phase A: Active sessions from tmux panes (source of truth)
  * Phase B: Idle sessions from index files (secondary, filtered)
  */
-export async function discoverSessions(opts?: { skipArchivedSummaries?: boolean; skipSessionIds?: boolean; nameMap?: Record<string, string> }): Promise<Session[]> {
+export async function discoverSessions(opts?: { skipArchivedSummaries?: boolean; skipSessionIds?: boolean; nameMap?: Record<string, string> }): Promise<{ sessions: Session[]; changedPaneIds: Set<string> }> {
   const home = homedir();
   const projectsDir = `${home}/.claude/projects`;
 
@@ -57,8 +57,16 @@ export async function discoverSessions(opts?: { skipArchivedSummaries?: boolean;
   const activeSessions = await Promise.all(activeSessionPromises);
 
   // Update cache: lsof-confirmed mappings override any heuristic guess
+  // Track panes where session ID changed (e.g. after /clear)
+  const changedPaneIds = new Set<string>();
   for (const { pane, sessionId } of claudePanesWithProc) {
-    if (sessionId) paneSessionCache.set(pane.paneId, sessionId);
+    if (sessionId) {
+      const cached = paneSessionCache.get(pane.paneId);
+      if (cached && cached !== sessionId) {
+        changedPaneIds.add(pane.paneId);
+      }
+      paneSessionCache.set(pane.paneId, sessionId);
+    }
   }
 
   // Enrich active sessions that still couldn't resolve a session ID
@@ -73,7 +81,7 @@ export async function discoverSessions(opts?: { skipArchivedSummaries?: boolean;
   // Phase B: Discover archived sessions from index files
   const archivedSessions = await discoverArchivedSessions(projectsDir, activeSessions, opts?.skipArchivedSummaries);
 
-  return [...activeSessions, ...archivedSessions];
+  return { sessions: [...activeSessions, ...archivedSessions], changedPaneIds };
 }
 
 /**
@@ -99,6 +107,14 @@ async function enrichUnmatchedSessions(
 
   // Collect session IDs already claimed by matched sessions
   const claimedIds = new Set(sessions.filter((s) => s.id).map((s) => s.id));
+
+  // Detect panes that share a tmux window (window name is unreliable for these)
+  const panesPerWindow = new Map<string, number>();
+  for (const session of sessions) {
+    if (!session.tmuxPane) continue;
+    const wKey = `${session.tmuxPane.sessionName}:${session.tmuxPane.windowIndex}`;
+    panesPerWindow.set(wKey, (panesPerWindow.get(wKey) ?? 0) + 1);
+  }
 
   // Build reverse name lookup: windowName → sessionId
   // (from CSM's name cache — names were set by AI naming in a previous cycle)
@@ -175,6 +191,12 @@ async function enrichUnmatchedSessions(
         for (const session of repoSessions) {
           if (session.id) continue; // already matched
 
+          // Skip panes in shared windows — window name is ambiguous (set to "claude/{repo}")
+          if (session.tmuxPane) {
+            const wKey = `${session.tmuxPane.sessionName}:${session.tmuxPane.windowIndex}`;
+            if ((panesPerWindow.get(wKey) ?? 0) > 1) continue;
+          }
+
           const windowName = normalizeWindowName(session.tmuxPane?.windowName, repoName);
           if (!windowName) continue;
 
@@ -198,8 +220,65 @@ async function enrichUnmatchedSessions(
         }
       }
 
-      // Strategy 2: JSONL mtime heuristic (only for 1:1 case)
-      // After window name matching, check if exactly one unmatched session remains
+      // Strategy 2: Content matching (pane capture vs JSONL user messages)
+      // Match visible pane content against recent user messages from JSONL
+      // candidates. User prompts are plain text displayed verbatim in the
+      // terminal, so they match reliably after whitespace normalization.
+      const unmatchedForContent = repoSessions.filter((s) => !s.id && s.lastCapture);
+      const unclaimedForContent = candidates.filter((c) => !claimedIds.has(c.sessionId));
+
+      if (unmatchedForContent.length > 0 && unclaimedForContent.length > 0) {
+        const candidateMessages = await Promise.all(
+          unclaimedForContent.map(async (c) => ({
+            ...c,
+            snippets: await extractRecentUserMessages(`${projectDir}/${c.sessionId}.jsonl`),
+          })),
+        );
+
+        // Normalize pane text: strip ANSI and collapse whitespace
+        const paneTexts = new Map<Session, string>();
+        for (const session of unmatchedForContent) {
+          const plain = stripAnsi(session.lastCapture!).replace(/\s+/g, " ");
+          paneTexts.set(session, plain);
+        }
+
+        // Score each (session, candidate) pair by counting matching snippets
+        const scores: Array<{ session: Session; candidateIdx: number; score: number }> = [];
+        for (const [session, paneText] of paneTexts) {
+          for (let ci = 0; ci < candidateMessages.length; ci++) {
+            let score = 0;
+            for (const snippet of candidateMessages[ci].snippets) {
+              if (paneText.includes(snippet)) score++;
+            }
+            if (score > 0) {
+              scores.push({ session, candidateIdx: ci, score });
+            }
+          }
+        }
+
+        // Greedy assignment: highest score first
+        scores.sort((a, b) => b.score - a.score);
+        const assignedSessions = new Set<Session>();
+        const assignedCandidates = new Set<number>();
+
+        for (const { session, candidateIdx } of scores) {
+          if (assignedSessions.has(session) || assignedCandidates.has(candidateIdx)) continue;
+          const { sessionId, mtime } = candidateMessages[candidateIdx];
+          await enrichSession(session, sessionId, mtime, index, projectDir);
+          claimedIds.add(sessionId);
+          assignedSessions.add(session);
+          assignedCandidates.add(candidateIdx);
+
+          // Cache content-matched assignments — conversation content is unique
+          if (session.tmuxPane) {
+            paneSessionCache.set(session.tmuxPane.paneId, sessionId);
+          }
+        }
+      }
+
+      // Strategy 3: JSONL mtime heuristic (only for 1:1 case)
+      // After content matching, if exactly one unmatched session remains,
+      // assign the most recently modified JSONL as a last resort.
       const stillUnmatched = repoSessions.filter((s) => !s.id);
       const unclaimed = candidates.filter((c) => !claimedIds.has(c.sessionId));
 
@@ -226,8 +305,9 @@ function normalizeWindowName(windowName: string | undefined, repoName: string): 
   let name = windowName;
   // Strip attention prefix
   if (name.startsWith("⚡")) name = name.slice("⚡".length);
-  // Skip default/generic names
+  // Skip default/generic names (including "claude/{repo}" multi-pane format)
   if (name === "claude" || name === repoName || name === "zsh" || name === "bash") return null;
+  if (name.startsWith("claude/")) return null;
   return name;
 }
 
@@ -417,6 +497,9 @@ async function discoverArchivedSessions(
 
         if (entry.isSidechain) continue;
 
+        // Skip AI naming sessions created by `claude -p` in names.ts
+        if (entry.firstPrompt?.startsWith("Name this coding session in 2-4 words")) continue;
+
         // Skip if this session is already active
         if (activeSessionIds.has(entry.sessionId)) continue;
 
@@ -429,14 +512,19 @@ async function discoverArchivedSessions(
 
         // For archived sessions, use index summary or fetch last assistant message
         let summary = (entry.summary || entry.firstPrompt || "").replace(/\s+/g, " ").trim();
+        let branch = entry.gitBranch || "";
         if (!skipSummaries && entry.fullPath) {
           try {
-            const lastMsg = await getLastAssistantMessage(entry.fullPath);
-            if (lastMsg) {
-              summary = lastMsg;
+            const tail = await readSessionTail(entry.fullPath);
+            if (tail.lastMessage) {
+              summary = tail.lastMessage;
+            }
+            // Resolve "HEAD" (detached) to actual branch from JSONL
+            if (tail.gitBranch && (!branch || branch === "HEAD")) {
+              branch = tail.gitBranch;
             }
           } catch {
-            // keep existing summary
+            // keep existing summary/branch
           }
         }
 
@@ -446,7 +534,7 @@ async function discoverArchivedSessions(
           id: entry.sessionId,
           repo,
           repoPath: entry.projectPath,
-          branch: entry.gitBranch || "",
+          branch,
           status: "archived",
           contextPercent,
           messageCount: entry.messageCount,
@@ -484,6 +572,9 @@ async function discoverArchivedSessions(
           // Parse the JSONL for metadata
           const metadata = await parseJsonlMetadata(path);
           if (!metadata) continue;
+
+          // Skip AI naming sessions created by `claude -p` in names.ts
+          if (metadata.firstPrompt?.startsWith("Name this coding session in 2-4 words")) continue;
 
           const repo = metadata.projectPath.split("/").filter(Boolean).pop() ?? "unknown";
           const summary = metadata.lastAssistantMessage || metadata.firstPrompt || "";
@@ -728,16 +819,21 @@ async function getFirstUserPrompt(sessionPath: string): Promise<string> {
   }
 }
 
+export interface SessionTailInfo {
+  lastMessage: string;
+  gitBranch: string;
+}
+
 /**
- * Read a JSONL session file and extract the last assistant message.
- * Only reads the last 32KB of the file to avoid loading multi-MB JSONL files.
- * Returns a truncated summary (first 200 chars) or empty string on failure.
+ * Read the tail of a JSONL session file and extract the last assistant message
+ * and most recent git branch. Only reads the last 32KB to avoid loading multi-MB files.
+ * @param maxMessageLength - truncate the last message to this length (default 200)
  */
-export async function getLastAssistantMessage(sessionPath: string): Promise<string> {
+export async function readSessionTail(sessionPath: string, maxMessageLength = 200): Promise<SessionTailInfo> {
   try {
     const file = Bun.file(sessionPath);
     const stat = await file.stat();
-    if (!stat) return "";
+    if (!stat) return { lastMessage: "", gitBranch: "" };
 
     const TAIL_SIZE = 32 * 1024;
     const offset = Math.max(0, stat.size - TAIL_SIZE);
@@ -747,17 +843,24 @@ export async function getLastAssistantMessage(sessionPath: string): Promise<stri
     // If we sliced mid-file, the first line is likely truncated — skip it
     const startIdx = offset > 0 ? 1 : 0;
 
-    // Walk backwards to find the last assistant message
+    let lastMessage = "";
+    let gitBranch = "";
+
+    // Walk backwards to find last assistant message and most recent non-HEAD branch
     for (let i = lines.length - 1; i >= startIdx; i--) {
       try {
         const parsed = JSON.parse(lines[i]);
-        if (parsed.type === "assistant") {
-          // Content may be a string or an array of content blocks
+
+        // Capture most recent non-HEAD gitBranch (HEAD = detached, not useful)
+        if (!gitBranch && parsed.gitBranch && parsed.gitBranch !== "HEAD") {
+          gitBranch = parsed.gitBranch;
+        }
+
+        if (!lastMessage && parsed.type === "assistant") {
           let text = "";
           if (typeof parsed.message?.content === "string") {
             text = parsed.message.content;
           } else if (Array.isArray(parsed.message?.content)) {
-            // Find the first text block
             const textBlock = parsed.message.content.find(
               (block: { type: string }) => block.type === "text",
             );
@@ -768,17 +871,86 @@ export async function getLastAssistantMessage(sessionPath: string): Promise<stri
 
           if (text) {
             const clean = text.replace(/\s+/g, " ").trim();
-            return clean.length > 200 ? clean.slice(0, 200) + "..." : clean;
+            lastMessage = clean.length > maxMessageLength ? clean.slice(0, maxMessageLength) + "..." : clean;
           }
         }
+
+        if (lastMessage && gitBranch) break;
       } catch {
-        // Skip malformed JSON lines
         continue;
       }
     }
 
-    return "";
+    return { lastMessage, gitBranch };
   } catch {
-    return "";
+    return { lastMessage: "", gitBranch: "" };
+  }
+}
+
+/** Convenience wrapper — returns just the last assistant message (200 char limit). */
+export async function getLastAssistantMessage(sessionPath: string): Promise<string> {
+  const { lastMessage } = await readSessionTail(sessionPath);
+  return lastMessage;
+}
+
+/** Strip ANSI escape sequences and control characters from terminal output. */
+function stripAnsi(text: string): string {
+  return text
+    .replace(/\x1b\[[0-9;?]*[\x40-\x7e]/g, "")
+    .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, "")
+    .replace(/\x1b[\x20-\x2f]*[\x30-\x7e]/g, "")
+    .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, "");
+}
+
+/**
+ * Extract recent user messages from a JSONL session file for content matching.
+ * Reads the last 32KB and walks backwards to find the last N user prompts.
+ * Returns whitespace-normalized snippets (first 100 chars each, min 20 chars).
+ */
+async function extractRecentUserMessages(sessionPath: string, count = 3): Promise<string[]> {
+  try {
+    const file = Bun.file(sessionPath);
+    const stat = await file.stat();
+    if (!stat) return [];
+
+    const TAIL_SIZE = 32 * 1024;
+    const offset = Math.max(0, stat.size - TAIL_SIZE);
+    const chunk = await file.slice(offset, stat.size).text();
+    const lines = chunk.trim().split("\n").filter(Boolean);
+    const startIdx = offset > 0 ? 1 : 0;
+
+    const snippets: string[] = [];
+
+    for (let i = lines.length - 1; i >= startIdx && snippets.length < count; i--) {
+      try {
+        const parsed = JSON.parse(lines[i]);
+        if (parsed.type !== "user") continue;
+
+        let text = "";
+        const content = parsed.message?.content;
+        if (typeof content === "string") {
+          text = content;
+        } else if (Array.isArray(content)) {
+          const textBlock = content.find(
+            (block: { type: string }) => block.type === "text",
+          );
+          if (textBlock?.text) text = textBlock.text;
+        }
+
+        // Skip system/meta messages, XML-prefixed content, and very short messages
+        if (!text || text.startsWith("[Request interrupted") || text.trimStart().startsWith("<")) continue;
+
+        const clean = text.replace(/\s+/g, " ").trim();
+        if (clean.length < 20) continue;
+
+        snippets.push(clean.length > 100 ? clean.slice(0, 100) : clean);
+      } catch {
+        continue;
+      }
+    }
+
+    return snippets;
+  } catch {
+    return [];
   }
 }
