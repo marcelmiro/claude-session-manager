@@ -1,7 +1,27 @@
 import type { Widgets } from "blessed";
-import type { RepoGroup, DisplayRow } from "../types";
-import { C, statusColor, statusDot, contextColor } from "./colors";
+import type { RepoGroup, DisplayRow, Session } from "../types";
+import { C, statusColor, statusDot } from "./colors";
 import { formatTimeAgo } from "../core/status";
+
+/** Extract a Linear/Jira-style ticket ID from a branch name (e.g. ENG-2687) */
+function extractTicketId(branch: string): string | null {
+  const match = branch.match(/(?:^|\/)([a-zA-Z]{2,6}-\d{2,})(?=-|\/|$)/i);
+  return match ? match[1].toUpperCase() : null;
+}
+
+/** Build a display label: ticket+name > ticket+suffix > name > branch */
+function buildSessionLabel(session: Session): string {
+  const ticket = extractTicketId(session.branch);
+  const name = session.name;
+  if (ticket && name) return `${ticket} \u00b7 ${name}`;
+  if (ticket) {
+    let suffix = session.branch.includes("/") ? session.branch.split("/").pop()! : session.branch;
+    suffix = suffix.replace(new RegExp(`^${ticket}-?`, "i"), "");
+    return suffix ? `${ticket} \u00b7 ${suffix}` : ticket;
+  }
+  if (name) return name;
+  return session.branch;
+}
 
 /**
  * Converts RepoGroup array into a flat list of DisplayRow items.
@@ -88,24 +108,18 @@ export function renderSessionList(
       const escaped = session.summary
         .replace(/\{/g, "{open}")
         .replace(/\}/g, "{close}");
-      // 4ch indent to align under branch text
+      // 4ch indent to align under label text
       const boxWidth = typeof box.width === "number" ? box.width : 60;
-
-      // Prepend name in peach if available
-      const nameTag = session.name
-        ? `{${C.peach}-fg}[${session.name}]{/${C.peach}-fg} `
-        : "";
-      const nameLen = session.name ? session.name.length + 3 : 0; // [name] + space
-      const maxLen = Math.max(10, boxWidth - 6 - nameLen);
-      const truncated = escaped.length > maxLen ? escaped.slice(0, maxLen - 1) + "…" : escaped;
+      const maxLen = Math.max(10, boxWidth - 6);
+      const truncated = escaped.length > maxLen ? escaped.slice(0, maxLen - 1) + "\u2026" : escaped;
 
       if (parentSelected) {
         lines.push(
-          `{${C.surface}-bg}    ${nameTag}{${C.muted}-fg}${truncated}{/${C.muted}-fg}{/${C.surface}-bg}`,
+          `{${C.surface}-bg}    {${C.muted}-fg}${truncated}{/${C.muted}-fg}{/${C.surface}-bg}`,
         );
       } else {
         lines.push(
-          `    ${nameTag}{${C.dim}-fg}${truncated}{/${C.dim}-fg}`,
+          `    {${C.dim}-fg}${truncated}{/${C.dim}-fg}`,
         );
       }
     } else if (row.type === "session") {
@@ -117,55 +131,51 @@ export function renderSessionList(
       const sessionKey = session.tmuxPane?.paneId ?? session.id;
       const needsAttention = attentionKeys?.has(sessionKey) ?? false;
 
-      // Column values
+      // Column layout: cursor(2) | label | gap(≥2) | dot status(10) | time(5) |
+      // Right block is fixed at 15 display cols. Label fills remaining space.
       const cursor = isSelected ? `{${C.peach}-fg}▸{/${C.peach}-fg} ` : "  ";
-      const branch = session.branch.length > 20
-        ? "…" + session.branch.slice(-19)
-        : session.branch.padEnd(20);
+      const boxWidth = typeof box.width === "number" ? box.width : 40;
+      const contentWidth = boxWidth - 3; // scrollbar + unicode wide-char safety
+
       const dot = statusDot(session.status);
       const sColor = statusColor(session.status);
       const dotStr = needsAttention ? `{blink}${dot}{/blink}` : dot;
-      const displayLabel = session.status === "ready" ? "input" : session.status;
-      const statusLabel = `${dotStr} ${displayLabel}`;
-      const statusPadded = needsAttention
-        ? `${dotStr} ${displayLabel.padEnd(10)}`
-        : statusLabel.padEnd(12);
-      const ctxStr = session.status === "archived" ? "     —" : `${session.contextPercent}%`.padStart(6);
-      const ctxClr = session.status === "archived" ? C.dim : contextColor(session.contextPercent);
+      const statusText = (session.status === "ready" ? "input" : session.status).padEnd(8);
       const timeStr = formatTimeAgo(session.modified).padStart(5);
 
+      const rawLabel = buildSessionLabel(session);
+      const labelMax = Math.max(8, contentWidth - 2 - 15 - 2);
+      const truncLabel = rawLabel.length > labelMax
+        ? rawLabel.slice(0, labelMax - 1) + "\u2026"
+        : rawLabel;
+      const gap = " ".repeat(Math.max(2, contentWidth - 2 - truncLabel.length - 15));
+
       if (isSelected) {
-        // Selected row: full brightness with background
         lines.push(
           `{${C.surface}-bg}` +
             cursor +
-            `{bold}{${C.fg}-fg}${branch}{/${C.fg}-fg}{/bold}` +
-            ` ` +
-            `{${sColor}-fg}${statusPadded}{/${sColor}-fg}` +
-            `{${ctxClr}-fg}${ctxStr}{/${ctxClr}-fg}` +
+            `{bold}{${C.fg}-fg}${truncLabel}{/${C.fg}-fg}{/bold}` +
+            gap +
+            `{${sColor}-fg}${dotStr} ${statusText}{/${sColor}-fg}` +
             `{${C.muted}-fg}${timeStr}{/${C.muted}-fg}` +
             `{/${C.surface}-bg}`,
         );
       } else if (isDimmed) {
-        // Idle unselected: entire row dimmed
         lines.push(
           `{${C.dim}-fg}` +
             "  " +
-            branch +
-            " " +
-            statusPadded +
-            ctxStr +
+            truncLabel +
+            gap +
+            `${dot} ${statusText}` +
             timeStr +
             `{/${C.dim}-fg}`,
         );
       } else {
-        // Normal unselected row
         lines.push(
           "  " +
-            `{${C.muted}-fg}${branch}{/${C.muted}-fg}` +
-            ` ` +
-            `{${sColor}-fg}${statusPadded}{/${sColor}-fg}` +
-            `{${ctxClr}-fg}${ctxStr}{/${ctxClr}-fg}` +
+            `{${C.muted}-fg}${truncLabel}{/${C.muted}-fg}` +
+            gap +
+            `{${sColor}-fg}${dotStr} ${statusText}{/${sColor}-fg}` +
             `{${C.muted}-fg}${timeStr}{/${C.muted}-fg}`,
         );
       }

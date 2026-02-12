@@ -10,12 +10,6 @@ export const C = {
   red: "#FF8080",
 } as const;
 
-export function contextColor(percent: number): string {
-  if (percent < 50) return C.mint;
-  if (percent < 80) return C.peach;
-  return C.red;
-}
-
 export function statusColor(status: "running" | "waiting" | "ready" | "idle" | "archived"): string {
   switch (status) {
     case "running":
