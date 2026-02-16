@@ -1,5 +1,25 @@
 import { homedir } from "os";
 
+const NAMING_LOCK = `${homedir()}/.config/csm/naming.lock`;
+
+export async function acquireNamingLock(): Promise<boolean> {
+  try {
+    const file = Bun.file(NAMING_LOCK);
+    if (await file.exists()) {
+      const { pid, ts } = JSON.parse(await file.text());
+      if (Date.now() - ts < 60_000) {
+        try { process.kill(pid, 0); return false; } catch {} // dead → stale
+      }
+    }
+    await Bun.write(NAMING_LOCK, JSON.stringify({ pid: process.pid, ts: Date.now() }));
+    return true;
+  } catch { return false; }
+}
+
+export async function releaseNamingLock(): Promise<void> {
+  try { const { unlink } = await import("fs/promises"); await unlink(NAMING_LOCK); } catch {}
+}
+
 export interface NameCache {
   version: 2;
   names: Record<string, string>;     // sessionId → name
@@ -7,10 +27,6 @@ export interface NameCache {
 }
 
 const CACHE_PATH = `${homedir()}/.config/csm/names.json`;
-
-let isGenerating = false;
-const pendingQueue: Array<{ sessionId: string; firstPrompt: string; summary: string }> = [];
-const failedIds = new Set<string>();
 
 /**
  * Extract a meaningful title from structured prompts like:
@@ -104,56 +120,3 @@ export function getSessionName(sessionId: string, cache: NameCache): string {
   return cache.names[sessionId] || "";
 }
 
-/**
- * Enqueue a session for AI naming.
- * Re-queues if the summary has changed since last naming (session reuse).
- */
-export function enqueueAutoName(sessionId: string, firstPrompt: string, summary: string, cache: NameCache): void {
-  if (!firstPrompt && !summary) return;
-  if (pendingQueue.some((item) => item.sessionId === sessionId)) return;
-
-  const currentSource = summary || firstPrompt;
-  const cachedName = cache.names[sessionId];
-  const cachedSource = cache.sources[sessionId];
-
-  if (cachedName) {
-    // Already named — check if summary changed
-    if (cachedSource === currentSource) return; // Still fresh
-    // Summary changed — invalidate and re-queue
-    delete cache.names[sessionId];
-    delete cache.sources[sessionId];
-    failedIds.delete(sessionId);
-  } else {
-    if (failedIds.has(sessionId)) return;
-  }
-
-  pendingQueue.push({ sessionId, firstPrompt, summary });
-}
-
-export function processAutoNameQueue(cache: NameCache): void {
-  if (isGenerating) return;
-  // Skip items already cached (may have been named manually since enqueue)
-  while (pendingQueue.length > 0 && cache.names[pendingQueue[0].sessionId]) {
-    pendingQueue.shift();
-  }
-  const item = pendingQueue.shift();
-  if (!item) return;
-  isGenerating = true;
-  generateAIName(item.firstPrompt, item.summary).then(async (name) => {
-    if (name) {
-      cache.names[item.sessionId] = name;
-      cache.sources[item.sessionId] = item.summary || item.firstPrompt;
-      await saveNameCache(cache);
-    } else {
-      failedIds.add(item.sessionId);
-    }
-    isGenerating = false;
-  }).catch(() => {
-    failedIds.add(item.sessionId);
-    isGenerating = false;
-  });
-}
-
-export function clearAutoNameFailure(sessionId: string): void {
-  failedIds.delete(sessionId);
-}

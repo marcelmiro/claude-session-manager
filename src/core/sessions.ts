@@ -10,26 +10,47 @@ import { findClaudeProcesses } from "./process";
 import { detectStatus, estimateContextPercent, type StatusResult } from "./status";
 import { getBaseRepoPath } from "./git";
 import { stripAllPrefixes } from "./notifications";
+import { processHookEvents } from "./state";
 
 // Persistent cache: paneId → sessionId, survives across refresh cycles.
-// Populated by lsof (confirmed) or JSONL mtime heuristic (best-guess).
+// Populated by hook events, --resume flag, or JSONL mtime heuristic (best-guess).
 // Once set, prevents re-running the expensive heuristic every 3s.
 const paneSessionCache = new Map<string, string>();
+
+/** Seed the in-memory pane→sessionId cache from persisted data (avoids lsof cold start). */
+export function seedPaneSessionCache(entries: Record<string, string>): void {
+  for (const [k, v] of Object.entries(entries)) {
+    paneSessionCache.set(k, v);
+  }
+}
+
+/** Export current cache contents for persistence. */
+export function exportPaneSessionCache(): Record<string, string> {
+  return Object.fromEntries(paneSessionCache);
+}
 
 /**
  * Discover all Claude Code sessions using a two-phase approach:
  * Phase A: Active sessions from tmux panes (source of truth)
  * Phase B: Idle sessions from index files (secondary, filtered)
  */
-export async function discoverSessions(opts?: { skipArchivedSummaries?: boolean; skipSessionIds?: boolean; nameMap?: Record<string, string> }): Promise<{ sessions: Session[]; changedPaneIds: Set<string> }> {
+export async function discoverSessions(opts?: { skipArchivedSummaries?: boolean; nameMap?: Record<string, string> }): Promise<{ sessions: Session[]; changedPaneIds: Set<string> }> {
   const home = homedir();
   const projectsDir = `${home}/.claude/projects`;
 
+  // Process hook events before discovery to pick up fresh pane→sessionId mappings
+  const paneSessionMap = Object.fromEntries(paneSessionCache);
+  const { changed: hookChanged, changedPaneIds: hookChangedPanes } = await processHookEvents(paneSessionMap);
+  if (hookChanged) {
+    for (const [k, v] of Object.entries(paneSessionMap)) {
+      paneSessionCache.set(k, v);
+    }
+  }
+
   // Phase A: Gather tmux panes and Claude processes in parallel
-  // skipSessionIds skips the expensive lsof call (1-3s cold start) for fast initial render
   const [panes, claudeProcesses] = await Promise.all([
     listPanes(),
-    findClaudeProcesses({ skipSessionIds: opts?.skipSessionIds }),
+    findClaudeProcesses(),
   ]);
 
   // Build a TTY→process map. ps reports "ttys001", tmux reports "/dev/ttys001".
@@ -58,9 +79,9 @@ export async function discoverSessions(opts?: { skipArchivedSummaries?: boolean;
   );
   const activeSessions = await Promise.all(activeSessionPromises);
 
-  // Update cache: lsof-confirmed mappings override any heuristic guess
   // Track panes where session ID changed (e.g. after /clear)
-  const changedPaneIds = new Set<string>();
+  // Start with hook-detected changes, then add --resume flag changes
+  const changedPaneIds = new Set<string>(hookChangedPanes);
   for (const { pane, sessionId } of claudePanesWithProc) {
     if (sessionId) {
       const cached = paneSessionCache.get(pane.paneId);
@@ -398,7 +419,7 @@ async function buildActiveSession(
  * Find session info from the index. If knownSessionId is provided (from lsof),
  * look it up directly. Otherwise fall back to the most recently modified JSONL.
  */
-async function findActiveSessionInfo(
+export async function findActiveSessionInfo(
   projectsDir: string,
   repoPath: string,
   knownSessionId?: string,
