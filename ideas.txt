@@ -37,6 +37,13 @@ CSM Ideas Backlog
 - Worktree path template
 - Configurable IDE command (not just Cursor)
 
+## Instant Prefix Updates via Claude Hooks
+- Use Claude Code hooks (UserPromptSubmit, Stop, Notification) to update ⚡/🔄 window prefixes instantly instead of waiting for poll cycle
+- UserPromptSubmit → add 🔄, Notification(permission_prompt) → add ⚡, Stop → add ⚡ or clear
+- Hook scripts are ~4 lines each (just tmux rename-window), no state.json interaction needed
+- Complements existing polling: hooks for speed, monitor for consistency (redundant renames are harmless)
+- `csm setup-hooks` subcommand to auto-write hook config into ~/.claude/settings.json
+
 ## Quality of Life
 - Session duration tracking (how long has this been running?)
 - Show model being used per session (opus vs sonnet)

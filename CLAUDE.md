@@ -13,7 +13,7 @@ macOS (ARM) with Ghostty terminal, Oh My Zsh, and tmux.
 ```sh
 bun run start             # Run TUI
 bun run dev               # Watch mode (--watch)
-bun run status            # Lightweight tmux status-right widget
+bun run status            # Lightweight tmux status-right monitor
 bun test                  # Run tests (bun:test)
 ```
 
@@ -25,12 +25,13 @@ Entry: `bin/csm.ts` (CLI router) → `src/index.ts` (TUI) or `src/cli.ts` (subco
 
 | Command | Description | Output |
 |---------|-------------|--------|
-| `csm` | Open full TUI | blessed screen |
+| `csm` | Open full TUI (`CSM_FOCUS_PANE` env var pre-selects a pane) | blessed screen |
 | `csm next` | Switch to next attention session (oldest first) | tmux display-message |
 | `csm reset` | Reset all window names to "claude", clear ⚡ and attention state | tmux display-message |
-| `csm status` | Tmux status-right widget (`⚡3 🔄2`) | stdout |
+| `csm status` | Tmux status-right monitor (`⚡3 🔄2`) | stdout |
 | `csm list` | Text-only session list with status/repo/context% | stdout |
 | `csm switch <name>` | Fuzzy-match session by name and switch to it | tmux display-message |
+| `csm setup` | Install SessionStart hook for session tracking | stdout |
 | `csm --help` | Show available commands and usage | stdout |
 
 **Testing subcommands**: Use `bun run bin/csm.ts <cmd>` to test without installing globally. Example: `bun run bin/csm.ts list` prints active sessions to stdout — useful for verifying session discovery, status detection, and name resolution without launching the TUI.
@@ -41,21 +42,25 @@ Entry: `bin/csm.ts` (CLI router) → `src/index.ts` (TUI) or `src/cli.ts` (subco
 
 **`csm switch` scoring**: exact=100, starts-with=80, contains=60, word-starts-with=40, subsequence=20. Matches against window names with ⚡/🔄 stripped.
 
+**Focus pane pre-selection**: Set `CSM_FOCUS_PANE=%42` (tmux pane ID) to pre-select that session on launch. Requires `run-shell` to expand the format string: `bind a run-shell 'tmux set-environment CSM_FOCUS_PANE "#{pane_id}"' \; display-popup -E -w 90% -h 85% csm`. Falls back to first session if pane not found.
+
+**`csm setup` details**: Installs a `SessionStart` hook into `~/.claude/settings.json` that writes pane→session ID mappings to `~/.config/csm/hook-events`. Creates `~/.config/csm/hooks/session-start.sh`. Safe to run multiple times (idempotent). Preserves existing hooks and settings.
+
 ## Architecture
 
 ```
 src/
 ├── index.ts              # App entry: screen, keybindings, 3s refresh loop, state management, prefix sync
-├── cli.ts                # CLI subcommands: next, reset, list, switch (no blessed dependency)
+├── cli.ts                # CLI subcommands: next, reset, list, switch, setup (no blessed dependency)
 ├── types.ts              # All shared types (Session, RepoGroup, DisplayRow discriminated union, etc.)
-├── status-widget.ts      # Lightweight poller for tmux status-right (⚡3 🔄2), prefix sync, debug logging
+├── monitor.ts            # Lightweight poller for tmux status-right (⚡3 🔄2), prefix sync, debug logging
 ├── core/
 │   ├── sessions.ts       # Session discovery: index scan + pane/process correlation + archive detection + worktree grouping
 │   ├── tmux.ts           # tmux wrappers: list-panes, capture-pane, switch, kill, rename, bell
-│   ├── process.ts        # Find claude processes via ps, PID→TTY mapping, lsof→sessionId resolution
+│   ├── process.ts        # Find claude processes via ps, PID→TTY mapping
 │   ├── status.ts         # Status detection from pane capture (spinner/prompt patterns), context %, time formatting
 │   ├── config.ts         # ~/.config/csm/config.json — notification settings + repoPaths
-│   ├── state.ts          # ~/.config/csm/state.json — shared TUI↔widget attention state
+│   ├── state.ts          # ~/.config/csm/state.json — shared TUI↔monitor attention state
 │   ├── names.ts          # AI naming (claude -p), heuristic fallback, name cache
 │   ├── git.ts            # Git operations: repo discovery, branch listing, checkout, worktree creation, base repo resolution
 │   └── notifications.ts  # Transition detection, prefix management (⚡/🔄), dispatch
@@ -72,7 +77,7 @@ src/
 
 `discoverSessions()` → scan index files + `listPanes()` + `findClaudeProcesses()` in parallel → correlate by TTY → `capturePane()` for status detection → `getBaseRepoPath()` for worktree resolution → `groupSessions()` → `buildDisplayRows()` → `renderSessionList()`
 
-Two-phase discovery: Phase A = active tmux panes (fast), Phase B = archived from index files (>3h old, no active pane). lsof resolves session UUIDs but is skipped on first render for speed (~1-3s cold start), filled in on 3s refresh.
+Two-phase discovery: Phase A = active tmux panes (fast), Phase B = archived from index files (>3h old, no active pane). Session UUIDs resolved via Claude Code's `SessionStart` hook (writes paneId→sessionId to `~/.config/csm/hook-events`). Run `csm setup` to install the hook.
 
 ### Worktree-aware repo grouping
 
@@ -80,7 +85,7 @@ Sessions in git worktrees group under their base repo via `getBaseRepoPath()` (u
 
 ### Multi-pane window support
 
-Windows with multiple Claude panes are named `claude/{repo}` (same repo) or `claude` (mixed). Attention prefix (⚡) only cleared from a window when no other panes in that window still need attention. State synced with external changes from `csm next` and the status widget on each refresh cycle.
+Windows with multiple Claude panes are named `claude/{repo}` (same repo) or `claude` (mixed). Attention prefix (⚡) only cleared from a window when no other panes in that window still need attention. State synced with external changes from `csm next` and the monitor on each refresh cycle.
 
 ### Session matching
 
@@ -130,16 +135,16 @@ Session rows display "TICKET · name" labels extracted from branch names (Linear
 ### Attention & notifications
 
 2-tier system on status transitions (running→waiting = "blocked", running→ready = "turnComplete"):
-1. Status widget update (tmux status-right)
+1. Status monitor update (tmux status-right)
 2. Window prefix: ⚡ added to tmux window name
 
-Window prefix priority: ⚡ (needs attention) > 🔄 (running) > none. Both TUI and status widget sync prefixes on each cycle. `stripAllPrefixes()` and `desiredPrefix()` in `notifications.ts` centralize prefix logic.
+Window prefix priority: ⚡ (needs attention) > 🔄 (running) > none. Monitor syncs prefixes on each cycle. `stripAllPrefixes()` and `desiredPrefix()` in `notifications.ts` centralize prefix logic.
 
 Auto-clears when user focuses the attention pane. Config in `~/.config/csm/config.json`.
 
-### Status widget (`bun run status`)
+### Monitor (`bun run status`)
 
-Lightweight poller for `tmux status-right`. Reuses TUI state if <10s old, else quick-discovers active panes only (~50ms). Output: `⚡3 🔄2`. Shares state via `~/.config/csm/state.json`. Also syncs ⚡/🔄 prefixes on window names. Opt-in debug logging to `~/.config/csm/debug.log` (auto-truncating, enabled by file existence).
+Lightweight poller for `tmux status-right` and sole authority for window naming. Quick-discovers active panes only (~50ms). Output: `⚡3 🔄2`. Shares state via `~/.config/csm/state.json`. Syncs ⚡/🔄 prefixes and AI names on window names. Opt-in debug logging to `~/.config/csm/debug.log` (auto-truncating, enabled by file existence).
 
 ### Preview pane
 
@@ -191,4 +196,6 @@ TUI refuses to run without a TTY (`process.stdout.isTTY` check) to prevent orpha
 - Session data: `~/.claude/projects/*/sessions-index.json`
 - Session logs: `~/.claude/projects/*/{sessionId}.jsonl`
 - Config/state: `~/.config/csm/{config,state,names}.json`
-- Debug log: `~/.config/csm/debug.log` (widget debug, create file to enable)
+- Hook events: `~/.config/csm/hook-events` (SessionStart hook writes pane→session mappings)
+- Hook script: `~/.config/csm/hooks/session-start.sh` (installed by `csm setup`)
+- Debug log: `~/.config/csm/debug.log` (monitor debug, create file to enable)
