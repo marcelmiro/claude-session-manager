@@ -9,7 +9,7 @@
 
 import { loadState, saveState } from "./core/state";
 import { switchToPane, listPanes, renameWindow, capturePane, displayMessage } from "./core/tmux";
-import { clearWindowAttentionPrefix, stripAllPrefixes, ATTENTION_PREFIX } from "./core/notifications";
+import { syncWindowPrefix, stripAllPrefixes, ATTENTION_PREFIX } from "./core/notifications";
 import { findClaudeProcesses } from "./core/process";
 import { detectStatus } from "./core/status";
 import { loadNameCache } from "./core/names";
@@ -29,26 +29,27 @@ export async function next(): Promise<void> {
   // Clear attention for the pane the user is currently viewing.
   // Without this, csm-next ping-pongs: switches away from pane A (still flagged)
   // to pane B, then next call picks A again because its flag was never cleared.
+  let activePaneId: string | undefined;
   try {
     const client = (await Bun.$`tmux list-clients -F '#{client_name}'`.quiet().text()).trim().split("\n")[0];
     if (client) {
-      const activePaneId = (await Bun.$`tmux display-message -c ${client} -p '#{pane_id}'`.quiet().text()).trim();
+      activePaneId = (await Bun.$`tmux display-message -c ${client} -p '#{pane_id}'`.quiet().text()).trim();
       const activeSession = state.sessions[activePaneId];
       if (activePaneId && activeSession?.needsAttention) {
         activeSession.needsAttention = false;
         activeSession.attentionType = undefined;
-        // Strip ⚡ from source window if no other panes in it still need attention
+        // Sync prefix on source window — may restore 🔄 if other panes are running
         if (activeSession.tmuxSession !== undefined && activeSession.tmuxWindow !== undefined) {
-          const othersInSourceWindow = Object.values(state.sessions).some(
+          const othersInSourceWindow = Object.values(state.sessions).filter(
             (s) =>
-              s.needsAttention &&
               s.tmuxPane !== activePaneId &&
               s.tmuxSession === activeSession.tmuxSession &&
-              s.tmuxWindow === activeSession.tmuxWindow,
+              String(s.tmuxWindow) === String(activeSession.tmuxWindow),
           );
-          if (!othersInSourceWindow) {
-            await clearWindowAttentionPrefix(activeSession.tmuxSession!, activeSession.tmuxWindow!);
-          }
+          const hasAttention = othersInSourceWindow.some(s => s.needsAttention);
+          const hasRunning = activeSession.status === "running" ||
+            othersInSourceWindow.some(s => s.status === "running");
+          await syncWindowPrefix(activeSession.tmuxSession!, activeSession.tmuxWindow!, hasAttention, hasRunning);
         }
       }
     }
@@ -85,11 +86,17 @@ export async function next(): Promise<void> {
     const result = detectStatus(plain, true);
 
     if (result.status === "running" || result.status === "idle") {
-      // Session no longer needs attention — clear stale flag and ⚡ prefix
+      // Session no longer needs attention — clear stale flag, sync prefix
       s.needsAttention = false;
       s.attentionType = undefined;
       if (s.tmuxSession !== undefined && s.tmuxWindow !== undefined) {
-        await clearWindowAttentionPrefix(s.tmuxSession!, s.tmuxWindow!);
+        const others = Object.values(state.sessions).filter(
+          (o) => o.tmuxPane !== s.tmuxPane &&
+            o.tmuxSession === s.tmuxSession && String(o.tmuxWindow) === String(s.tmuxWindow),
+        );
+        await syncWindowPrefix(s.tmuxSession!, s.tmuxWindow!,
+          others.some(o => o.needsAttention),
+          result.status === "running" || others.some(o => o.status === "running"));
       }
       continue;
     }
@@ -102,7 +109,8 @@ export async function next(): Promise<void> {
   // This handles desync where the window shows ⚡ but state.json doesn't know about it.
   if (!target) {
     const panes = await listPanes();
-    const attentionPanes = panes.filter((p) => p.windowName.startsWith(ATTENTION_PREFIX));
+    const attentionPanes = panes.filter((p) =>
+      p.windowName.startsWith(ATTENTION_PREFIX) && p.paneId !== activePaneId);
 
     for (const pane of attentionPanes) {
       const captured = await capturePane(pane.paneId);
@@ -116,8 +124,8 @@ export async function next(): Promise<void> {
       const result = detectStatus(plain, true);
 
       if (result.status === "running" || result.status === "idle") {
-        // Not actually needing attention — strip the stale ⚡ prefix
-        await clearWindowAttentionPrefix(pane.sessionName, pane.windowIndex);
+        // Not actually needing attention — sync prefix (may restore 🔄)
+        await syncWindowPrefix(pane.sessionName, pane.windowIndex, false, result.status === "running");
         continue;
       }
 
@@ -136,7 +144,7 @@ export async function next(): Promise<void> {
   }
 
   // Clear attention flag in state (if it exists) and save
-  // Use lastUpdatedBy="tui" so the status widget defers to our state
+  // Use lastUpdatedBy="tui" so the monitor defers to our state
   // and doesn't overwrite our changes on its next poll
   const stateEntry = state.sessions[target.paneId];
   if (stateEntry) {
@@ -147,17 +155,16 @@ export async function next(): Promise<void> {
   state.lastUpdatedAt = Date.now();
   await saveState(state);
 
-  // Strip ⚡ from window name — but only if no other panes in this window still need attention.
-  // Uses clearWindowAttentionPrefix which reads the actual tmux window name (not stale state).
-  const othersInWindow = Object.values(state.sessions).some(
+  // Sync prefix on target window — may restore 🔄 if other panes are running
+  const othersInWindow = Object.values(state.sessions).filter(
     (s) =>
-      s.needsAttention &&
+      s.tmuxPane !== target!.paneId &&
       s.tmuxSession === target!.tmuxSession &&
-      s.tmuxWindow === target!.tmuxWindow,
+      String(s.tmuxWindow) === String(target!.tmuxWindow),
   );
-  if (!othersInWindow) {
-    await clearWindowAttentionPrefix(target.tmuxSession, target.tmuxWindow);
-  }
+  await syncWindowPrefix(target.tmuxSession, target.tmuxWindow,
+    othersInWindow.some(s => s.needsAttention),
+    othersInWindow.some(s => s.status === "running"));
 
   // Switch to the pane
   await switchToPane(target.paneId, target.tmuxSession, target.tmuxWindow);
@@ -247,7 +254,7 @@ const STATUS_ICONS: Record<string, string> = {
 export async function list(): Promise<void> {
   const [panes, processes] = await Promise.all([
     listPanes(),
-    findClaudeProcesses({ skipSessionIds: true }),
+    findClaudeProcesses(),
   ]);
 
   const claudeTtys = new Set(processes.map((p) => p.tty));
@@ -327,10 +334,11 @@ export async function switchTo(name?: string): Promise<void> {
     process.exit(1);
   }
 
-  const [panes, processes, nameCache] = await Promise.all([
+  const [panes, processes, nameCache, state] = await Promise.all([
     listPanes(),
-    findClaudeProcesses({}),
+    findClaudeProcesses(),
     loadNameCache(),
+    loadState(),
   ]);
 
   // Build TTY→sessionId map for cached name lookup
@@ -369,14 +377,13 @@ export async function switchTo(name?: string): Promise<void> {
 
   const best = scored[0].pane;
 
-  // Clear ⚡ if present (keep 🔄 — session may still be running)
-  if (best.windowName.startsWith(ATTENTION_PREFIX)) {
-    await renameWindow(
-      best.sessionName,
-      best.windowIndex,
-      best.windowName.slice(ATTENTION_PREFIX.length),
-    );
-  }
+  // Sync prefix: clear ⚡ for this pane, but preserve 🔄 if other panes are running
+  const windowPanes = Object.values(state.sessions).filter(
+    (s) => s.tmuxSession === best.sessionName && String(s.tmuxWindow) === String(best.windowIndex),
+  );
+  await syncWindowPrefix(best.sessionName, best.windowIndex,
+    windowPanes.some(s => s.needsAttention && s.tmuxPane !== best.paneId),
+    windowPanes.some(s => s.status === "running"));
 
   await switchToPane(best.paneId, best.sessionName, best.windowIndex);
 }
@@ -387,4 +394,96 @@ function isSubsequence(sub: string, str: string): boolean {
     if (str[i] === sub[j]) j++;
   }
   return j === sub.length;
+}
+
+// ---------------------------------------------------------------------------
+// csm setup
+// ---------------------------------------------------------------------------
+
+const HOOK_VERSION = 2;
+const HOOK_SCRIPT = `#!/bin/bash
+# CSM_HOOK_VERSION=${HOOK_VERSION}
+INPUT=$(cat)
+SESSION_ID=$(echo "$INPUT" | grep -o '"session_id":"[^"]*"' | head -1 | cut -d'"' -f4)
+# $TMUX_PANE may not be inherited by hook subprocesses — fall back to tmux query
+PANE_ID=\${TMUX_PANE:-$(tmux display-message -p '#{pane_id}' 2>/dev/null)}
+if [ -n "$SESSION_ID" ] && [ -n "$PANE_ID" ]; then
+  mkdir -p ~/.config/csm
+  printf '%s %s\\n' "$PANE_ID" "$SESSION_ID" >> ~/.config/csm/hook-events
+fi
+`;
+
+/** Read the CSM_HOOK_VERSION from the installed hook script. Returns 0 if missing or unreadable. */
+async function getInstalledHookVersion(hookPath: string): Promise<number> {
+  try {
+    const content = await Bun.file(hookPath).text();
+    const match = content.match(/^# CSM_HOOK_VERSION=(\d+)/m);
+    return match ? parseInt(match[1], 10) : 0;
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * Install the SessionStart hook into ~/.claude/settings.json and create the hook script.
+ * Safe to run multiple times — reinstalls script if outdated, skips if current.
+ */
+export async function setup(): Promise<void> {
+  const { homedir } = await import("os");
+  const home = homedir();
+  const settingsPath = `${home}/.claude/settings.json`;
+  const hookDir = `${home}/.config/csm/hooks`;
+  const hookPath = `${hookDir}/session-start.sh`;
+  const hookMarker = "csm/hooks/session-start";
+
+  // Load existing settings (or start fresh)
+  let settings: Record<string, any> = {};
+  try {
+    settings = JSON.parse(await Bun.file(settingsPath).text());
+  } catch {
+    // No settings file or malformed — start fresh
+  }
+
+  if (!settings.hooks) settings.hooks = {};
+  if (!Array.isArray(settings.hooks.SessionStart)) settings.hooks.SessionStart = [];
+
+  // Check if hook is already registered in settings
+  const alreadyInstalled = settings.hooks.SessionStart.some(
+    (entry: any) => Array.isArray(entry.hooks) &&
+      entry.hooks.some((h: any) => typeof h.command === "string" && h.command.includes(hookMarker)),
+  );
+
+  // Check installed script version
+  const installedVersion = await getInstalledHookVersion(hookPath);
+  const scriptOutdated = installedVersion < HOOK_VERSION;
+
+  if (alreadyInstalled && !scriptOutdated) {
+    console.log("CSM hooks already configured.");
+    return;
+  }
+
+  // Write the hook script
+  await Bun.$`mkdir -p ${hookDir}`.quiet();
+  await Bun.write(hookPath, HOOK_SCRIPT);
+  await Bun.$`chmod +x ${hookPath}`.quiet();
+
+  if (!alreadyInstalled) {
+    // Add hook entry to settings (omit matcher to match all SessionStart events)
+    settings.hooks.SessionStart.push({
+      hooks: [{ type: "command", command: hookPath }],
+    });
+
+    // Write back settings
+    await Bun.$`mkdir -p ${home}/.claude`.quiet();
+    await Bun.write(settingsPath, JSON.stringify(settings, null, 2) + "\n");
+  }
+
+  if (scriptOutdated && installedVersion > 0) {
+    console.log("CSM SessionStart hook updated.");
+  } else {
+    console.log("CSM SessionStart hook installed.");
+  }
+  console.log(`  Hook script: ${hookPath}`);
+  console.log(`  Settings: ${settingsPath}`);
+  console.log("\nNew Claude Code sessions will now be automatically tracked.");
 }

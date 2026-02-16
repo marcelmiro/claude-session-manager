@@ -2,18 +2,19 @@ import { createLayout } from "./ui/layout";
 import { renderStatusBar } from "./ui/status-bar";
 import { buildDisplayRows, renderSessionList, moveSelection, moveToGroup, getSelectableIndices } from "./ui/session-list";
 import { updatePreview, getPreviewPlainText } from "./ui/preview-pane";
-import { discoverSessions, groupSessions } from "./core/sessions";
-import { switchToPane, getMainSession, killPane, renameWindow } from "./core/tmux";
-import { loadNameCache, getSessionName, generateAIName, saveNameCache, enqueueAutoName, processAutoNameQueue, clearAutoNameFailure, type NameCache } from "./core/names";
+import { discoverSessions, groupSessions, seedPaneSessionCache } from "./core/sessions";
+import { switchToPane, getMainSession, killPane } from "./core/tmux";
+import { loadNameCache, getSessionName, generateAIName, saveNameCache, type NameCache } from "./core/names";
 import { loadConfig } from "./core/config";
-import { loadState, saveState, buildSessionStates } from "./core/state";
-import { detectTransitions, dispatchNotifications, clearWindowAttentionPrefix, stripAllPrefixes, desiredPrefix } from "./core/notifications";
-import { discoverRepos, listBranches, checkoutBranch, trackAndCheckout, createWorktree } from "./core/git";
+import { loadState, saveState, loadPaneSessions } from "./core/state";
+import { syncWindowPrefix, stripAllPrefixes } from "./core/notifications";
+import { discoverRepos, listBranches } from "./core/git";
 import { initWizard, renderWizard, renderWizardPreview, renderWizardStatusBar, handleWizardKey, worktreeDirName } from "./ui/wizard";
 import { C } from "./ui/colors";
 import type { DisplayRow, Session, CsmConfig, WizardState, WizardRepo } from "./types";
-import type { SessionStatus } from "./core/status";
 import { resolve } from "path";
+import { existsSync, readFileSync } from "fs";
+import { homedir } from "os";
 
 // Guard: refuse to run without a proper terminal.
 // Prevents orphaned background processes (e.g. from bun --watch after terminal closes)
@@ -21,6 +22,10 @@ import { resolve } from "path";
 if (!process.stdout.isTTY) {
   process.exit(0);
 }
+
+const focusPaneId = process.env.CSM_FOCUS_PANE?.match(/^%\d+$/)
+  ? process.env.CSM_FOCUS_PANE
+  : null;
 
 const { screen, listBox, previewBox, statusBar } = createLayout();
 
@@ -34,7 +39,7 @@ let isRefreshing = false;
 let previewGeneration = 0;
 let showArchived = false;
 let nameCache: NameCache = { version: 2, names: {}, sources: {} };
-let notifConfig: CsmConfig = { statusWidget: true, windowPrefix: true, repoPaths: [] };
+let notifConfig: CsmConfig = { statusMonitor: true, windowPrefix: true, repoPaths: [] };
 
 // Wizard state (null = not in wizard mode)
 let wizardState: WizardState | null = null;
@@ -51,20 +56,25 @@ const attentionTypes = new Map<string, "blocked" | "turnComplete">();
 let pendingKillPaneId: string | null = null;
 let killConfirmTimer: ReturnType<typeof setTimeout> | null = null;
 
-// Attention tracking: detect running→input transitions
-const previousStatuses = new Map<string, SessionStatus>();
+// Attention state — populated from monitor's state.json each refresh
 const needsAttention = new Set<string>();
+// Persists across refreshes. Entries cleaned up when monitor clears the attention.
+const localDismissals = new Set<string>();
 
-/** Check if other panes in the same window still need attention */
-function otherPanesNeedAttention(session: Session, allSessions: Session[]): boolean {
-  if (!session.tmuxPane) return false;
+/** Get attention + running flags for OTHER panes in the same window */
+function getWindowFlags(session: Session, sessions: Session[]): { hasAttention: boolean; hasRunning: boolean } {
+  if (!session.tmuxPane) return { hasAttention: false, hasRunning: false };
   const wKey = `${session.tmuxPane.sessionName}:${session.tmuxPane.windowIndex}`;
-  return allSessions.some(s =>
-    s.tmuxPane &&
-    `${s.tmuxPane.sessionName}:${s.tmuxPane.windowIndex}` === wKey &&
-    s.tmuxPane.paneId !== session.tmuxPane!.paneId &&
-    needsAttention.has(s.tmuxPane.paneId),
-  );
+  let hasAttention = false;
+  let hasRunning = false;
+  for (const s of sessions) {
+    if (!s.tmuxPane) continue;
+    if (`${s.tmuxPane.sessionName}:${s.tmuxPane.windowIndex}` !== wKey) continue;
+    if (s.tmuxPane.paneId === session.tmuxPane.paneId) continue;
+    if (needsAttention.has(s.tmuxPane.paneId)) hasAttention = true;
+    if (s.status === "running") hasRunning = true;
+  }
+  return { hasAttention, hasRunning };
 }
 
 function updateStatusBar() {
@@ -109,19 +119,14 @@ async function safeUpdatePreview(
   return gen === previewGeneration;
 }
 
-async function refresh(opts?: { skipArchivedSummaries?: boolean; skipSessionIds?: boolean }) {
+async function refresh(opts?: { skipArchivedSummaries?: boolean }) {
   if (isRefreshing) return;
   if (wizardState) return; // Don't overwrite wizard UI with session list
   isRefreshing = true;
   try {
-    // Only pass nameMap (for window name reverse lookup) when lsof has had a
-    // chance to run. On first render (skipSessionIds=true), lsof is skipped, so
-    // claimedIds would be empty — wrong window names from previous bugs could
-    // cause incorrect matches. After first render, lsof populates claimedIds,
-    // preventing wrong window names from overriding correct lsof mappings.
     const { sessions, changedPaneIds } = await discoverSessions({
       ...opts,
-      nameMap: opts?.skipSessionIds ? undefined : nameCache.names,
+      nameMap: nameCache.names,
     });
     allSessions = sessions;
 
@@ -129,134 +134,38 @@ async function refresh(opts?: { skipArchivedSummaries?: boolean; skipSessionIds?
     if (changedPaneIds.size > 0) {
       for (const session of sessions) {
         if (session.tmuxPane && changedPaneIds.has(session.tmuxPane.paneId)) {
-          renameWindow(session.tmuxPane.sessionName, session.tmuxPane.windowIndex, "claude");
-          previousStatuses.delete(session.tmuxPane.paneId);
           needsAttention.delete(session.tmuxPane.paneId);
           attentionTypes.delete(session.tmuxPane.paneId);
         }
       }
     }
 
+    // Reload name cache from disk (monitor may have generated new names)
+    nameCache = await loadNameCache();
+
     // Assign names from cache (AI-generated only, no heuristic fallback)
     for (const session of sessions) {
       session.name = getSessionName(session.id, nameCache);
     }
 
-    // Sync tmux window names — group by window to handle multi-pane windows
-    const windowSessions = new Map<string, Session[]>();
-    for (const session of sessions) {
-      if (!session.tmuxPane) continue;
-      const wKey = `${session.tmuxPane.sessionName}:${session.tmuxPane.windowIndex}`;
-      const list = windowSessions.get(wKey);
-      if (list) list.push(session);
-      else windowSessions.set(wKey, [session]);
-    }
-
-    for (const [_, windowGroup] of windowSessions) {
-      const first = windowGroup[0].tmuxPane!;
-      const hasAttention = windowGroup.some(s => s.tmuxPane && needsAttention.has(s.tmuxPane.paneId));
-      const hasRunning = windowGroup.some(s => s.status === "running");
-      const prefix = desiredPrefix(hasAttention, hasRunning);
-
-      let targetBase: string | undefined;
-      if (windowGroup.length === 1) {
-        // Single Claude pane: sync AI name
-        const session = windowGroup[0];
-        if (session.name) targetBase = session.name;
-      } else {
-        // Multi-pane window: use "claude/{repo}" if same repo, else "claude"
-        const repos = new Set(windowGroup.map(s => s.repo));
-        targetBase = repos.size === 1 ? `claude/${[...repos][0]}` : "claude";
-      }
-
-      if (targetBase) {
-        const desired = `${prefix}${targetBase}`;
-        if (first.windowName !== desired) {
-          renameWindow(first.sessionName, first.windowIndex, desired);
-        }
-      } else {
-        // No AI name yet — still sync prefix on existing base name
-        const baseName = stripAllPrefixes(first.windowName);
-        const desired = `${prefix}${baseName}`;
-        if (first.windowName !== desired) {
-          renameWindow(first.sessionName, first.windowIndex, desired);
-        }
-      }
-    }
-
-    // Enqueue active sessions for auto AI naming
-    for (const session of sessions) {
-      if (session.id && session.tmuxPane && session.status !== "archived") {
-        enqueueAutoName(session.id, session.firstPrompt, session.summary, nameCache);
-      }
-    }
-    processAutoNameQueue(nameCache);
-
     const groups = groupSessions(sessions, notifConfig.priorityRepos ?? []);
 
-    // Detect transitions and update attention tracking
-    const transitions = detectTransitions(previousStatuses, sessions);
-
-    const currentKeys = new Set<string>();
-    for (const session of sessions) {
-      const key = session.tmuxPane?.paneId ?? session.id;
-      currentKeys.add(key);
-      previousStatuses.set(key, session.status);
-
-      // Clear stale attention: if session went back to running, user already interacted
-      if (session.status === "running" && needsAttention.has(key)) {
-        needsAttention.delete(key);
-        attentionTypes.delete(key);
-        if (session.tmuxPane && !otherPanesNeedAttention(session, sessions)) {
-          clearWindowAttentionPrefix(session.tmuxPane.sessionName, session.tmuxPane.windowIndex);
-        }
+    // Read attention from monitor's state.json
+    const monitorState = await loadState();
+    needsAttention.clear();
+    attentionTypes.clear();
+    for (const [key, s] of Object.entries(monitorState.sessions)) {
+      if (s.needsAttention && !localDismissals.has(key)) {
+        needsAttention.add(key);
+        if (s.attentionType) attentionTypes.set(key, s.attentionType);
       }
     }
-
-    // Mark attention from transitions (track new keys so file sync doesn't clobber them)
-    const newAttentionKeys = new Set<string>();
-    for (const event of transitions) {
-      if (event.classification !== "none") {
-        needsAttention.add(event.sessionKey);
-        attentionTypes.set(event.sessionKey, event.classification);
-        newAttentionKeys.add(event.sessionKey);
+    // Clean up dismissed entries the monitor already cleared
+    for (const key of localDismissals) {
+      if (!monitorState.sessions[key]?.needsAttention) {
+        localDismissals.delete(key);
       }
     }
-
-    // Clean up stale keys
-    for (const key of previousStatuses.keys()) {
-      if (!currentKeys.has(key)) {
-        previousStatuses.delete(key);
-        needsAttention.delete(key);
-        attentionTypes.delete(key);
-      }
-    }
-
-    // Dispatch notifications (Tier 2 window ⚡ prefix)
-    if (transitions.some((e) => e.classification !== "none")) {
-      await dispatchNotifications(
-        transitions.filter((e) => e.classification !== "none"),
-        notifConfig,
-      );
-    }
-
-    // Sync with external state changes before saving.
-    // If csm-next or the status widget cleared attention for a session,
-    // respect that clearing instead of blindly overwriting with our in-memory set.
-    // This prevents stale/orphaned TUI processes from re-adding cleared attention.
-    // Skip keys added THIS cycle — their old file state is stale, not an external clear.
-    const fileState = await loadState();
-    for (const [key, s] of Object.entries(fileState.sessions)) {
-      if (!s.needsAttention && needsAttention.has(key) && !newAttentionKeys.has(key)) {
-        needsAttention.delete(key);
-        attentionTypes.delete(key);
-      }
-    }
-
-    // Write shared state (async, non-blocking) — csm-status reads this
-    const sessionStates = buildSessionStates(sessions, needsAttention, attentionTypes);
-    const sharedState = { lastUpdatedBy: "tui" as const, lastUpdatedAt: Date.now(), sessions: sessionStates };
-    saveState(sharedState);
 
     if (groups.length === 0) {
       // Empty state
@@ -277,8 +186,16 @@ async function refresh(opts?: { skipArchivedSummaries?: boolean; skipSessionIds?
       selectedIndex = -1;
       cachedSession = null;
     } else if (selectedIndex < 0) {
-      // First load
-      selectedIndex = selectable[0];
+      // First load — pre-select focused pane if provided, else first session
+      if (focusPaneId) {
+        const found = selectable.find((idx) => {
+          const row = rows[idx];
+          return row.type === "session" && row.session.tmuxPane?.paneId === focusPaneId;
+        });
+        selectedIndex = found ?? selectable[0];
+      } else {
+        selectedIndex = selectable[0];
+      }
       saveSelection();
     } else {
       // Try to keep cursor on the same session across refreshes
@@ -336,14 +253,14 @@ async function handleSelect(direction: 1 | -1) {
   selectedIndex = moveSelection(rows, selectedIndex, direction);
   saveSelection();
 
-  // Clear attention for newly selected session
+  // Dismiss attention for newly selected session (visual only, monitor clears within 5s)
   const session = getSelectedSession();
   if (session) {
     const key = session.tmuxPane?.paneId ?? session.id;
-    needsAttention.delete(key);
-    attentionTypes.delete(key);
-    if (session.tmuxPane && !otherPanesNeedAttention(session, allSessions)) {
-      clearWindowAttentionPrefix(session.tmuxPane.sessionName, session.tmuxPane.windowIndex);
+    if (needsAttention.has(key)) {
+      localDismissals.add(key);
+      needsAttention.delete(key);
+      attentionTypes.delete(key);
     }
   }
 
@@ -363,10 +280,10 @@ async function handleGroupSelect(direction: 1 | -1) {
   const session = getSelectedSession();
   if (session) {
     const key = session.tmuxPane?.paneId ?? session.id;
-    needsAttention.delete(key);
-    attentionTypes.delete(key);
-    if (session.tmuxPane && !otherPanesNeedAttention(session, allSessions)) {
-      clearWindowAttentionPrefix(session.tmuxPane.sessionName, session.tmuxPane.windowIndex);
+    if (needsAttention.has(key)) {
+      localDismissals.add(key);
+      needsAttention.delete(key);
+      attentionTypes.delete(key);
     }
   }
 
@@ -386,10 +303,21 @@ async function handleEnter() {
   const key = paneId;
   needsAttention.delete(key);
   attentionTypes.delete(key);
-  // Only clear ⚡ window prefix if no other panes in this window still need attention
-  if (!otherPanesNeedAttention(session, allSessions)) {
-    await clearWindowAttentionPrefix(sessionName, windowIndex);
+
+  // Immediate ⚡ clear — don't wait 5s for monitor
+  const flags = getWindowFlags(session, allSessions);
+  await syncWindowPrefix(sessionName, windowIndex,
+    flags.hasAttention, session.status === "running" || flags.hasRunning);
+
+  // Clear attention in state.json (fresh read to avoid overwriting monitor data)
+  const freshState = await loadState();
+  if (freshState.sessions[key]) {
+    freshState.sessions[key].needsAttention = false;
+    freshState.sessions[key].attentionType = undefined;
+    freshState.lastUpdatedAt = Date.now();
+    await saveState(freshState);
   }
+
   cleanup();
   await switchToPane(paneId, sessionName, windowIndex);
   process.exit(0);
@@ -405,7 +333,7 @@ async function handleResume() {
 
   cleanup();
   try {
-    await Bun.$`tmux new-window -t ${targetSession} -n "claude" ${"claude --resume " + session.id}`.quiet();
+    await Bun.$`tmux new-window -a -t ${targetSession} -n "claude" -c ${session.repoPath} ${"claude --resume " + session.id}`.quiet();
   } catch {
     // ignore
   }
@@ -479,9 +407,14 @@ async function handleFork() {
   const targetSession = await getMainSession();
   if (!targetSession) return;
 
+  // Use the pane's AI name for multi-pane windows, otherwise keep the window name
+  const rawWindowName = session.tmuxPane?.windowName ?? "claude";
+  const baseName = stripAllPrefixes(rawWindowName);
+  const forkName = baseName.includes("/") ? (session.name || baseName) : baseName;
+
   cleanup();
   try {
-    await Bun.$`tmux new-window -t ${targetSession} -n "claude" ${"claude --resume " + session.id + " --fork"}`.quiet();
+    await Bun.$`tmux new-window -a -t ${targetSession} -n ${forkName} -c ${session.repoPath} ${"claude --resume " + session.id + " --fork-session"}`.quiet();
   } catch {
     // ignore
   }
@@ -529,7 +462,6 @@ screen.key(["s"], () => {
     return;
   }
   flashStatusMessage(`{${C.muted}-fg}Generating name…{/${C.muted}-fg}`);
-  clearAutoNameFailure(session.id);
   const sessionId = session.id;
   const sessionSummary = session.summary;
   const sessionFirstPrompt = session.firstPrompt;
@@ -685,16 +617,12 @@ screen.on("keypress", async (_ch: string, key: any) => {
     case "launch": {
       if (wizardLaunching) break;
       wizardLaunching = true;
-      const progressMsg = action.worktreeName
-        ? `Creating worktree {${C.fg}-fg}${action.worktreeName}{/${C.fg}-fg}…`
-        : action.branch.isCurrent ? "Launching…" : `Checking out {${C.fg}-fg}${action.branch.name}{/${C.fg}-fg}…`;
-      statusBar.setContent(`  {${C.muted}-fg}${progressMsg}{/${C.muted}-fg}`);
+      statusBar.setContent(`  {${C.muted}-fg}Launching…{/${C.muted}-fg}`);
       screen.render();
       const error = await handleWizardLaunch(action.repo, action.branch, action.worktreeName);
       wizardLaunching = false;
       if (error) {
-        // Git/tmux error — keep wizard open so user can retry.
-        // Re-render wizard form but NOT the status bar — let the flash message show the error.
+        // Only reachable if tmux session lookup fails
         renderWizard(listBox, wizardState!);
         screen.render();
         flashStatusMessage(`{${C.red}-fg}${error}{/${C.red}-fg}`, 4000);
@@ -715,36 +643,13 @@ function getUniqueRepos(displayRows: DisplayRow[]): Array<{ name: string; path: 
   return [...seen.values()];
 }
 
-/** Handle wizard launch: checkout/worktree + open new tmux window with claude.
+/** Handle wizard launch: create tmux window immediately, run git + claude inside it.
  *  Returns null on success (exits process), or error string on failure. */
 async function handleWizardLaunch(
   repo: WizardRepo,
   branch: { name: string; isRemote: boolean; isCurrent: boolean },
   worktreeName: string,
 ): Promise<string | null> {
-  let targetDir = repo.path;
-
-  if (worktreeName) {
-    const wtPath = worktreeDirName(repo.name, worktreeName);
-    const wtAbsPath = resolve(repo.path, wtPath);
-    const result = await createWorktree(repo.path, wtAbsPath, worktreeName, branch.name, branch.isRemote);
-    if (!result.ok) {
-      return result.error ?? "Worktree creation failed";
-    }
-    targetDir = wtAbsPath;
-  } else if (!branch.isCurrent) {
-    // Need to checkout a different branch
-    let result: { ok: boolean; error?: string };
-    if (branch.isRemote) {
-      result = await trackAndCheckout(repo.path, branch.name);
-    } else {
-      result = await checkoutBranch(repo.path, branch.name);
-    }
-    if (!result.ok) {
-      return result.error ?? "Checkout failed";
-    }
-  }
-
   const targetSession = await getMainSession();
   if (!targetSession) {
     return "No tmux session found";
@@ -753,16 +658,41 @@ async function handleWizardLaunch(
   wizardState = null;
   cleanup();
   try {
-    // Create window with a shell (so exiting claude doesn't close the window),
-    // then send the claude command via send-keys
-    const paneId = (await Bun.$`tmux new-window -t ${targetSession} -n "claude" -c ${targetDir} -P -F '#{pane_id}'`.quiet().text()).trim();
-    if (paneId) {
-      await Bun.$`tmux send-keys -t ${paneId} claude Enter`.quiet();
+    // Build compound command: git operations (if needed) then claude
+    let cmd: string;
+    if (worktreeName) {
+      const wtPath = worktreeDirName(repo.name, worktreeName);
+      const wtAbsPath = resolve(repo.path, wtPath);
+      const baseRef = branch.isRemote ? `origin/${branch.name}` : branch.name;
+      cmd = `git worktree add ${shellQuote(wtAbsPath)} -b ${shellQuote(worktreeName)} ${shellQuote(baseRef)} && cd ${shellQuote(wtAbsPath)} && claude`;
+    } else if (!branch.isCurrent) {
+      const checkout = branch.isRemote
+        ? `git checkout -b ${shellQuote(branch.name)} --track origin/${shellQuote(branch.name)} 2>/dev/null || git checkout ${shellQuote(branch.name)}`
+        : `git checkout ${shellQuote(branch.name)}`;
+      cmd = `${checkout} && claude`;
+    } else {
+      cmd = "claude";
+    }
+
+    if (cmd === "claude") {
+      // Simple case: launch claude directly as the window command (no shell race)
+      await Bun.$`tmux new-window -a -t ${targetSession} -n "claude" -c ${repo.path} claude`.quiet();
+    } else {
+      // Compound command: run via zsh -c to avoid send-keys race with shell init
+      // (oh-my-zsh prompts can swallow keystrokes). exec zsh -l keeps shell open after claude exits.
+      const wrapped = `${cmd}; exec zsh -l`;
+      await Bun.$`tmux new-window -a -t ${targetSession} -n "claude" -c ${repo.path} zsh -c ${wrapped}`.quiet();
     }
   } catch {
-    // ignore
+    // ignore — window may already exist
   }
   process.exit(0);
+}
+
+/** Shell-quote a string for safe embedding in tmux send-keys commands. */
+function shellQuote(s: string): string {
+  if (/^[a-zA-Z0-9._\-\/]+$/.test(s)) return s;
+  return `'${s.replace(/'/g, "'\\''")}'`;
 }
 
 // Render loading state immediately so the TUI appears instantly
@@ -772,12 +702,26 @@ listBox.setContent(
 updateStatusBar();
 screen.render();
 
-// Load name cache + notification config, then start refresh loop
-Promise.all([loadNameCache(), loadConfig()]).then(([cache, config]) => {
+// Load name cache + notification config + pane sessions, then start refresh loop
+Promise.all([loadNameCache(), loadConfig(), loadPaneSessions()]).then(([cache, config, paneSessions]) => {
   nameCache = cache;
   notifConfig = config;
-  // Initial load: skip lsof (1-3s cold) and archived summaries for instant render.
-  // The 3s auto-refresh will fill in session IDs, summaries, and context %.
-  refresh({ skipArchivedSummaries: true, skipSessionIds: true });
+  // Seed pane→sessionId cache from disk (persisted by monitor)
+  seedPaneSessionCache(paneSessions);
+  // Nudge: flash a message if the SessionStart hook is missing or outdated
+  const hookPath = `${homedir()}/.config/csm/hooks/session-start.sh`;
+  let needsSetup = !existsSync(hookPath);
+  if (!needsSetup) {
+    try {
+      const content = readFileSync(hookPath, "utf-8");
+      needsSetup = !content.includes("CSM_HOOK_VERSION=");
+    } catch { needsSetup = true; }
+  }
+  if (needsSetup) {
+    setTimeout(() => flashStatusMessage(`{${C.muted}-fg}Run {${C.peach}-fg}csm setup{/${C.peach}-fg} for auto session naming{/${C.muted}-fg}`, 5000), 500);
+  }
+  // Initial load: skip archived summaries for instant render.
+  // The 3s auto-refresh will fill in summaries and context %.
+  refresh({ skipArchivedSummaries: true });
   refreshTimer = setInterval(refresh, 3000);
 });
