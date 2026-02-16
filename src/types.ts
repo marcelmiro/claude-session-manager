@@ -74,8 +74,8 @@ export type DisplayRow =
 // --- Notification system types ---
 
 export interface NotificationConfig {
-  /** Enable tmux status bar widget (Tier 1) */
-  statusWidget: boolean;
+  /** Enable tmux status bar monitor (Tier 1) */
+  statusMonitor: boolean;
   /** Enable window name ⚡ prefix (Tier 2) */
   windowPrefix: boolean;
 }
@@ -157,7 +157,7 @@ export type WizardAction =
   | { type: "launch"; repo: WizardRepo; branch: WizardBranch; worktreeName: string };
 
 export interface CsmConfig {
-  statusWidget: boolean;
+  statusMonitor: boolean;
   windowPrefix: boolean;
   repoPaths?: string[];       // dirs to scan 1-level deep for git repos
   priorityRepos?: string[];   // repo names pinned at top of list (lowercase)

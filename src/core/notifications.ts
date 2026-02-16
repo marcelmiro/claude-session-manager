@@ -60,13 +60,14 @@ export function classifyTransition(
   current: string,
 ): "blocked" | "turnComplete" | "none" {
   if (prev === "running" && current === "waiting") return "blocked";
+  if (prev === "ready" && current === "waiting") return "blocked";
   if (prev === "running" && current === "ready") return "turnComplete";
   return "none";
 }
 
 /**
  * Dispatch notifications for transition events.
- * Tier 1 (status widget) is handled externally via state.
+ * Tier 1 (status monitor) is handled externally via state.
  * Tier 2 (window ⚡ prefix) is dispatched here.
  */
 export async function dispatchNotifications(
@@ -95,15 +96,21 @@ export async function dispatchNotifications(
 }
 
 /**
- * Clear the ⚡ prefix from a tmux window name.
- * Called when switching to a session or selecting it in the TUI.
+ * Sync the prefix (⚡/🔄/none) on a tmux window to match the desired state.
+ * Callers pass the window's computed attention/running flags.
  */
-export async function clearWindowAttentionPrefix(
+export async function syncWindowPrefix(
   sessionName: string,
   windowIndex: number,
+  hasAttention: boolean,
+  hasRunning: boolean,
 ): Promise<void> {
   const currentName = await getWindowName(sessionName, windowIndex);
-  if (currentName.startsWith(ATTENTION_PREFIX)) {
-    await renameWindow(sessionName, windowIndex, stripAllPrefixes(currentName));
+  if (!currentName) return;
+  const baseName = stripAllPrefixes(currentName);
+  const prefix = desiredPrefix(hasAttention, hasRunning);
+  const desired = `${prefix}${baseName}`;
+  if (currentName !== desired) {
+    await renameWindow(sessionName, windowIndex, desired);
   }
 }
