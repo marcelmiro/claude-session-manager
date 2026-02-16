@@ -86,22 +86,15 @@ export function detectStatus(
   const contextPercent = parseContextPercent(capturedOutput);
   const { nearbyLines } = getAbovePrompt(lines);
 
-  // 1. Running: spinner characters anywhere in visible pane output
-  //    These chars only appear during active processing and are replaced when done
-  for (const pattern of RUNNING_PATTERNS) {
-    if (pattern.test(capturedOutput)) {
-      return { status: "running", contextPercent };
-    }
-  }
-
-  // 2. Waiting: permission/confirmation prompts in the few lines above prompt
+  // 1. Waiting: permission/confirmation prompts take priority over running
+  //    (spinner chars can linger in pane output while a prompt is displayed)
   for (const pattern of WAITING_PATTERNS) {
     if (pattern.test(nearbyLines)) {
       return { status: "waiting", contextPercent };
     }
   }
 
-  // 3. Waiting: AskUserQuestion UI appears below the prompt at the bottom of screen
+  // 2. Waiting: AskUserQuestion UI appears below the prompt at the bottom of screen
   const bottomLines = lines.slice(-15).join("\n");
   for (const pattern of QUESTION_UI_PATTERNS) {
     if (pattern.test(bottomLines)) {
@@ -109,7 +102,14 @@ export function detectStatus(
     }
   }
 
-  // 4. Ready: has a process and ❯ prompt is visible
+  // 3. Running: spinner characters anywhere in visible pane output
+  for (const pattern of RUNNING_PATTERNS) {
+    if (pattern.test(capturedOutput)) {
+      return { status: "running", contextPercent };
+    }
+  }
+
+  // 4. Ready: has a process but no spinner or prompt detected
   return { status: "ready", contextPercent };
 }
 
