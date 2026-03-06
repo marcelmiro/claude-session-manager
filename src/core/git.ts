@@ -247,7 +247,13 @@ export async function createWorktree(
 ): Promise<{ ok: boolean; error?: string }> {
   try {
     const baseRef = isRemote ? `origin/${baseBranch}` : baseBranch;
-    await Bun.$`git -C ${repoPath} worktree add ${wtPath} -b ${newBranch} ${baseRef}`.quiet();
+    // If branch already exists locally, use it directly instead of -b (which fails on existing branches)
+    const branchExists = await Bun.$`git -C ${repoPath} show-ref --verify --quiet refs/heads/${newBranch}`.quiet().then(() => true, () => false);
+    if (branchExists) {
+      await Bun.$`git -C ${repoPath} worktree add ${wtPath} ${newBranch}`.quiet();
+    } else {
+      await Bun.$`git -C ${repoPath} worktree add ${wtPath} -b ${newBranch} ${baseRef}`.quiet();
+    }
     return { ok: true };
   } catch (e: any) {
     const msg = e?.stderr?.toString?.() || e?.message || "worktree creation failed";
