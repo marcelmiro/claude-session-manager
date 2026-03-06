@@ -1,6 +1,7 @@
 import { createLayout } from "./ui/layout";
 import { renderStatusBar } from "./ui/status-bar";
-import { buildDisplayRows, renderSessionList, moveSelection, moveToGroup, getSelectableIndices } from "./ui/session-list";
+import { buildDisplayRows, renderSessionList, moveSelection, moveToGroup, getSelectableIndices, filterDisplayRows } from "./ui/session-list";
+import { handleTextInputKey, renderTextWithCursor } from "./ui/text-input";
 import { updatePreview, getPreviewPlainText } from "./ui/preview-pane";
 import { discoverSessions, groupSessions, seedPaneSessionCache } from "./core/sessions";
 import { switchToPane, getMainSession, killPane } from "./core/tmux";
@@ -49,6 +50,13 @@ let wizardLaunching = false;
 // on a key the wizard already consumed (e.g. Escape = cancel, not quit).
 let wizardHandledKey = false;
 
+// Search mode state
+let searchActive = false;
+let searchFilter = "";
+let searchCursor = 0;
+let unfilteredRows: DisplayRow[] = [];
+let preSearchIndex = -1; // selection before search started
+
 // Attention type tracking: what kind of transition triggered attention
 const attentionTypes = new Map<string, "blocked" | "turnComplete">();
 
@@ -79,8 +87,51 @@ function getWindowFlags(session: Session, sessions: Session[]): { hasAttention: 
 
 function updateStatusBar() {
   if (wizardState) return; // Don't overwrite wizard status bar
+  if (searchActive) return; // Don't overwrite search bar
   if (flashTimer) return; // Don't overwrite active flash messages
   renderStatusBar(statusBar, getSelectedSession()?.status, showArchived);
+}
+
+function renderSearchBar() {
+  const text = renderTextWithCursor(searchFilter, searchCursor);
+  statusBar.setContent(
+    `{${C.peach}-fg}/{/${C.peach}-fg} ${text}` +
+    `  {${C.dim}-fg}↑/↓ move  ⏎ select  Esc cancel{/${C.dim}-fg}`,
+  );
+}
+
+function applySearchFilter() {
+  rows = filterDisplayRows(unfilteredRows, searchFilter);
+  const selectable = getSelectableIndices(rows);
+  if (selectable.length > 0) {
+    // Clamp selection to first match
+    if (!selectable.includes(selectedIndex)) {
+      selectedIndex = selectable[0];
+    }
+  } else {
+    selectedIndex = -1;
+  }
+  saveSelection();
+}
+
+function exitSearch(restoreSelection: boolean) {
+  searchActive = false;
+  searchFilter = "";
+  searchCursor = 0;
+  rows = unfilteredRows;
+  unfilteredRows = [];
+  if (restoreSelection) {
+    selectedIndex = preSearchIndex;
+    // Clamp to valid range
+    const selectable = getSelectableIndices(rows);
+    if (selectable.length > 0 && !selectable.includes(selectedIndex)) {
+      selectedIndex = selectable[0];
+    }
+  }
+  saveSelection();
+  renderSessionList(listBox, rows, selectedIndex, needsAttention);
+  updateStatusBar();
+  screen.render();
 }
 
 function flashStatusMessage(msg: string, duration = 2000) {
@@ -168,6 +219,13 @@ async function refresh(opts?: { skipArchivedSummaries?: boolean }) {
     }
 
     if (groups.length === 0) {
+      // Empty state — exit search if active
+      if (searchActive) {
+        searchActive = false;
+        searchFilter = "";
+        searchCursor = 0;
+        unfilteredRows = [];
+      }
       listBox.setContent(
         `\n\n\n{center}{${C.muted}-fg}No active sessions{/${C.muted}-fg}{/center}\n\n{center}{${C.dim}-fg}Start one with: claude{/${C.dim}-fg}{/center}`,
       );
@@ -178,12 +236,27 @@ async function refresh(opts?: { skipArchivedSummaries?: boolean }) {
       return;
     }
 
-    rows = buildDisplayRows(groups, showArchived);
+    const builtRows = buildDisplayRows(groups, showArchived);
+
+    // When search is active, update unfiltered + reapply filter
+    if (searchActive) {
+      unfilteredRows = builtRows;
+      rows = filterDisplayRows(unfilteredRows, searchFilter);
+    } else {
+      rows = builtRows;
+    }
+
     const selectable = getSelectableIndices(rows);
 
     if (selectable.length === 0) {
-      selectedIndex = -1;
+      selectedIndex = searchActive ? -1 : -1;
       cachedSession = null;
+    } else if (searchActive) {
+      // During search, clamp to first selectable if current is invalid
+      if (!selectable.includes(selectedIndex)) {
+        selectedIndex = selectable[0];
+      }
+      saveSelection();
     } else if (selectedIndex < 0) {
       // First load — pre-select focused pane if provided, else first session
       if (focusPaneId) {
@@ -237,7 +310,11 @@ async function refresh(opts?: { skipArchivedSummaries?: boolean }) {
 
     const isInitial = !refreshTimer;
     renderSessionList(listBox, rows, selectedIndex, needsAttention);
-    updateStatusBar();
+    if (searchActive) {
+      renderSearchBar();
+    } else {
+      updateStatusBar();
+    }
     const selectedRow = getSelectedRow();
     const archivedSessions = selectedRow?.type === "archive-collapsed" ? selectedRow.sessions : undefined;
     const isCurrent = await safeUpdatePreview(cachedSession, { scrollToBottom: isInitial, archivedSessions });
@@ -427,17 +504,17 @@ function cleanup() {
   screen.destroy();
 }
 
-// Key bindings (guarded: no-op when wizard is active)
-screen.key(["j", "down"], () => { if (wizardState) return; handleSelect(1); });
-screen.key(["k", "up"], () => { if (wizardState) return; handleSelect(-1); });
-screen.key(["S-j"], () => { if (wizardState) return; handleGroupSelect(1); });
-screen.key(["S-k"], () => { if (wizardState) return; handleGroupSelect(-1); });
-screen.key(["enter"], () => { if (wizardState || wizardHandledKey) return; handleEnterContextual(); });
-screen.key(["r"], () => { if (wizardState) return; refresh(); });
-screen.key(["x"], () => { if (wizardState) return; handleKill(); });
-screen.key(["f"], () => { if (wizardState) return; handleFork(); });
+// Key bindings (guarded: no-op when wizard or search is active)
+screen.key(["j", "down"], () => { if (wizardState || searchActive) return; handleSelect(1); });
+screen.key(["k", "up"], () => { if (wizardState || searchActive) return; handleSelect(-1); });
+screen.key(["S-j"], () => { if (wizardState || searchActive) return; handleGroupSelect(1); });
+screen.key(["S-k"], () => { if (wizardState || searchActive) return; handleGroupSelect(-1); });
+screen.key(["enter"], () => { if (wizardState || wizardHandledKey || searchActive) return; handleEnterContextual(); });
+screen.key(["r"], () => { if (wizardState || searchActive) return; refresh(); });
+screen.key(["x"], () => { if (wizardState || searchActive) return; handleKill(); });
+screen.key(["f"], () => { if (wizardState || searchActive) return; handleFork(); });
 screen.key(["c"], async () => {
-  if (wizardState) return;
+  if (wizardState || searchActive) return;
   const session = getSelectedSession();
   if (!session?.repoPath) {
     flashStatusMessage(`{${C.dim}-fg}No repo path{/${C.dim}-fg}`);
@@ -451,7 +528,7 @@ screen.key(["c"], async () => {
   }
 });
 screen.key(["s"], () => {
-  if (wizardState) return;
+  if (wizardState || searchActive) return;
   const session = getSelectedSession();
   if (!session || !session.firstPrompt) {
     flashStatusMessage(`{${C.dim}-fg}No prompt to generate name from{/${C.dim}-fg}`);
@@ -477,12 +554,12 @@ screen.key(["s"], () => {
   });
 });
 screen.key(["a"], () => {
-  if (wizardState) return;
+  if (wizardState || searchActive) return;
   showArchived = !showArchived;
   refresh();
 });
 screen.key(["y"], async () => {
-  if (wizardState) return;
+  if (wizardState || searchActive) return;
   const text = getPreviewPlainText();
   if (!text) {
     flashStatusMessage(`{${C.dim}-fg}Nothing to copy{/${C.dim}-fg}`);
@@ -499,29 +576,29 @@ screen.key(["y"], async () => {
   }
 });
 screen.key(["u"], () => {
-  if (wizardState) return;
+  if (wizardState || searchActive) return;
   previewBox.scroll(-6);
   screen.render();
 });
 screen.key(["d"], () => {
-  if (wizardState) return;
+  if (wizardState || searchActive) return;
   previewBox.scroll(6);
   screen.render();
 });
 screen.key(["q"], () => {
-  if (wizardState || wizardHandledKey) return;
+  if (wizardState || wizardHandledKey || searchActive) return;
   cleanup();
   process.exit(0);
 });
 screen.key(["escape"], () => {
-  if (wizardState || wizardHandledKey) return;
+  if (wizardState || wizardHandledKey || searchActive) return;
   cleanup();
   process.exit(0);
 });
 
 // New Session wizard (`n` key)
 screen.key(["n"], async () => {
-  if (wizardState) return;
+  if (wizardState || searchActive) return;
 
   // Pause refresh loop
   if (refreshTimer) { clearInterval(refreshTimer); refreshTimer = null; }
@@ -566,6 +643,109 @@ screen.key(["n"], async () => {
   renderWizardStatusBar(statusBar, wizardState);
   await renderWizardPreview(previewBox, wizardState);
   screen.render();
+});
+
+// Flag: true during the tick when `/` activates search, prevents the search
+// keypress handler from also processing `/` as text input in the same event.
+let searchJustActivated = false;
+
+// `/` key activates search mode
+screen.on("keypress", (_ch: string, key: any) => {
+  if (!key || wizardState || searchActive) return;
+  if (_ch === "/" && !key.ctrl && !key.meta) {
+    searchActive = true;
+    searchFilter = "";
+    searchCursor = 0;
+    preSearchIndex = selectedIndex;
+    unfilteredRows = [...rows];
+    searchJustActivated = true;
+    queueMicrotask(() => { searchJustActivated = false; });
+    renderSearchBar();
+    screen.render();
+  }
+});
+
+// Search keypress handler (intercepts all keys when search is active)
+screen.on("keypress", async (_ch: string, key: any) => {
+  if (!searchActive || !key || searchJustActivated) return;
+
+  const keyName = key.full || key.name || "";
+  const ch = _ch || "";
+
+  if (keyName === "escape") {
+    exitSearch(true);
+    return;
+  }
+
+  if (keyName === "enter" || keyName === "return") {
+    const row = getSelectedRow();
+    if (row?.type === "archive-collapsed") {
+      // Expand archives: exit search and show all
+      exitSearch(false);
+      showArchived = true;
+      await refresh();
+      return;
+    }
+    const session = getSelectedSession();
+    if (session) {
+      // Exit search, keep filtered selection, then switch/resume
+      searchActive = false;
+      searchFilter = "";
+      searchCursor = 0;
+      rows = unfilteredRows;
+      unfilteredRows = [];
+
+      if (session.status === "archived") {
+        await handleResume();
+      } else {
+        await handleEnter();
+      }
+    }
+    return;
+  }
+
+  if (keyName === "up") {
+    if (rows.length > 0) {
+      selectedIndex = moveSelection(rows, selectedIndex, -1);
+      saveSelection();
+      renderSessionList(listBox, rows, selectedIndex, needsAttention);
+      const selectedRow = getSelectedRow();
+      const archivedSessions = selectedRow?.type === "archive-collapsed" ? selectedRow.sessions : undefined;
+      await safeUpdatePreview(cachedSession, { scrollToBottom: true, archivedSessions });
+      screen.render();
+    }
+    return;
+  }
+
+  if (keyName === "down") {
+    if (rows.length > 0) {
+      selectedIndex = moveSelection(rows, selectedIndex, 1);
+      saveSelection();
+      renderSessionList(listBox, rows, selectedIndex, needsAttention);
+      const selectedRow = getSelectedRow();
+      const archivedSessions = selectedRow?.type === "archive-collapsed" ? selectedRow.sessions : undefined;
+      await safeUpdatePreview(cachedSession, { scrollToBottom: true, archivedSessions });
+      screen.render();
+    }
+    return;
+  }
+
+  // All other keys go to text input
+  const result = handleTextInputKey(searchFilter, searchCursor, keyName, ch);
+  if (result.handled) {
+    const changed = result.text !== searchFilter;
+    searchFilter = result.text;
+    searchCursor = result.cursor;
+    if (changed) {
+      applySearchFilter();
+      renderSessionList(listBox, rows, selectedIndex, needsAttention);
+      const selectedRow = getSelectedRow();
+      const archivedSessions = selectedRow?.type === "archive-collapsed" ? selectedRow.sessions : undefined;
+      await safeUpdatePreview(cachedSession, { scrollToBottom: true, archivedSessions });
+    }
+    renderSearchBar();
+    screen.render();
+  }
 });
 
 // Wizard keypress handler (intercepts all keys when wizard is active)

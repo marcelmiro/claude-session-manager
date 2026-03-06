@@ -4,13 +4,13 @@ import { C, statusColor, statusDot } from "./colors";
 import { formatTimeAgo } from "../core/status";
 
 /** Extract a Linear/Jira-style ticket ID from a branch name (e.g. ENG-2687) */
-function extractTicketId(branch: string): string | null {
+export function extractTicketId(branch: string): string | null {
   const match = branch.match(/(?:^|\/)([a-zA-Z]{2,6}-\d{2,})(?=-|\/|$)/i);
   return match ? match[1].toUpperCase() : null;
 }
 
 /** Build a display label: ticket+name > ticket+suffix > name > branch */
-function buildSessionLabel(session: Session): string {
+export function buildSessionLabel(session: Session): string {
   const ticket = extractTicketId(session.branch);
   const name = session.name;
   if (ticket && name) return `${ticket} \u00b7 ${name}`;
@@ -316,4 +316,139 @@ export function moveSelection(
   }
 
   return selectable[nextPos];
+}
+
+// ---------------------------------------------------------------------------
+// Search / filter
+// ---------------------------------------------------------------------------
+
+function isSubsequence(sub: string, str: string): boolean {
+  let j = 0;
+  for (let i = 0; i < str.length && j < sub.length; i++) {
+    if (str[i] === sub[j]) j++;
+  }
+  return j === sub.length;
+}
+
+function fuzzyScore(candidate: string, needle: string): number {
+  if (candidate === needle) return 100;
+  if (candidate.startsWith(needle)) return 80;
+  if (candidate.includes(needle)) return 60;
+  const words = candidate.split(/[-_\s]+/);
+  if (words.some((w) => w.startsWith(needle))) return 40;
+  if (isSubsequence(needle, candidate)) return 20;
+  return 0;
+}
+
+/** Score a session against a search needle across all searchable fields. */
+export function scoreSessionMatch(session: Session, needle: string): number {
+  const lower = needle.toLowerCase();
+  let best = 0;
+
+  const fields = [
+    session.name,
+    session.branch,
+    session.repo,
+    extractTicketId(session.branch),
+    session.summary,
+    buildSessionLabel(session),
+  ];
+
+  for (const field of fields) {
+    if (!field) continue;
+    const score = fuzzyScore(field.toLowerCase(), lower);
+    if (score > best) best = score;
+  }
+
+  return best;
+}
+
+/**
+ * Filter DisplayRow[] by search string, preserving group structure.
+ * Keeps repo headers that have at least one matching session underneath.
+ * Strips empty groups and their separators.
+ */
+export function filterDisplayRows(rows: DisplayRow[], filter: string): DisplayRow[] {
+  if (!filter) return rows;
+
+  // Score every session row
+  const sessionScores = new Map<number, number>();
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i];
+    if (row.type === "session") {
+      sessionScores.set(i, scoreSessionMatch(row.session, filter));
+    }
+  }
+
+  // Walk rows, keeping groups that have at least one matching session
+  const result: DisplayRow[] = [];
+  let pendingSeparator: DisplayRow | null = null;
+  let pendingHeader: DisplayRow | null = null;
+  let groupHasMatch = false;
+
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i];
+
+    if (row.type === "separator") {
+      // Flush previous group if it had matches
+      // Hold this separator for the next group
+      pendingSeparator = row;
+      pendingHeader = null;
+      groupHasMatch = false;
+      continue;
+    }
+
+    if (row.type === "repo-header") {
+      pendingHeader = row;
+      groupHasMatch = false;
+      continue;
+    }
+
+    if (row.type === "session") {
+      const score = sessionScores.get(i) ?? 0;
+      if (score > 0) {
+        // Emit pending separator + header if this is the first match in the group
+        if (!groupHasMatch) {
+          if (result.length > 0 && pendingSeparator) {
+            result.push(pendingSeparator);
+          }
+          if (pendingHeader) {
+            result.push(pendingHeader);
+          }
+          groupHasMatch = true;
+        }
+        result.push(row);
+      }
+      continue;
+    }
+
+    if (row.type === "session-detail") {
+      // Include detail row if its parent session was included
+      const parentIdx = i - 1;
+      const parentScore = sessionScores.get(parentIdx) ?? 0;
+      if (parentScore > 0) {
+        result.push(row);
+      }
+      continue;
+    }
+
+    if (row.type === "archive-collapsed") {
+      // Check if any archived session in this collapsed row matches
+      const hasMatch = row.sessions.some((s) => scoreSessionMatch(s, filter) > 0);
+      if (hasMatch) {
+        if (!groupHasMatch) {
+          if (result.length > 0 && pendingSeparator) {
+            result.push(pendingSeparator);
+          }
+          if (pendingHeader) {
+            result.push(pendingHeader);
+          }
+          groupHasMatch = true;
+        }
+        result.push(row);
+      }
+    }
+  }
+
+  return result;
 }

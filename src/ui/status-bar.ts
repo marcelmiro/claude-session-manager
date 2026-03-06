@@ -8,6 +8,7 @@ export function renderStatusBar(box: Widgets.BoxElement, enterAction?: SessionSt
   const content =
     `{${C.peach}-fg}j/k/J/K{/${C.peach}-fg} {${C.dim}-fg}move{/${C.dim}-fg}` +
     `  {${C.peach}-fg}\u23CE{/${C.peach}-fg} {${C.dim}-fg}${enterLabel}{/${C.dim}-fg}` +
+    `  {${C.peach}-fg}/{/${C.peach}-fg} {${C.dim}-fg}search{/${C.dim}-fg}` +
     `  {${C.peach}-fg}r{/${C.peach}-fg} {${C.dim}-fg}refresh{/${C.dim}-fg}` +
     `  {${C.peach}-fg}x{/${C.peach}-fg} {${C.dim}-fg}kill{/${C.dim}-fg}` +
     `  {${C.peach}-fg}f{/${C.peach}-fg} {${C.dim}-fg}fork{/${C.dim}-fg}` +
