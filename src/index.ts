@@ -596,6 +596,35 @@ screen.key(["escape"], () => {
   process.exit(0);
 });
 
+// Quick new session in selected repo (`N` / Shift+N)
+screen.key(["S-n"], async () => {
+  if (wizardState || searchActive) return;
+
+  const session = getSelectedSession();
+  if (!session?.repoPath) {
+    flashStatusMessage(`{${C.dim}-fg}No repo selected{/${C.dim}-fg}`);
+    return;
+  }
+
+  const repoPath = session.baseRepoPath || session.repoPath;
+  const repoName = repoPath.split("/").pop() || "repo";
+
+  // Get current branch
+  let currentBranch = "main";
+  try {
+    currentBranch = (await Bun.$`git -C ${repoPath} branch --show-current`.quiet().text()).trim() || "main";
+  } catch {}
+
+  const repo: WizardRepo = { name: repoName, path: repoPath, currentBranch };
+  const branch = { name: currentBranch, isRemote: false, isCurrent: true };
+
+  flashStatusMessage(`{${C.muted}-fg}Launching in ${repoName}…{/${C.muted}-fg}`);
+  const error = await handleWizardLaunch(repo, branch, "");
+  if (error) {
+    flashStatusMessage(`{${C.red}-fg}${error}{/${C.red}-fg}`, 4000);
+  }
+});
+
 // New Session wizard (`n` key)
 screen.key(["n"], async () => {
   if (wizardState || searchActive) return;
