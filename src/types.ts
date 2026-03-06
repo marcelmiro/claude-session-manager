@@ -78,6 +78,8 @@ export interface NotificationConfig {
   statusMonitor: boolean;
   /** Enable window name ⚡ prefix (Tier 2) */
   windowPrefix: boolean;
+  /** Enable macOS native notifications (Tier 3) */
+  nativeNotification: boolean;
 }
 
 export interface SessionNotificationState {
@@ -159,6 +161,7 @@ export type WizardAction =
 export interface CsmConfig {
   statusMonitor: boolean;
   windowPrefix: boolean;
+  nativeNotification: boolean;
   repoPaths?: string[];       // dirs to scan 1-level deep for git repos
   priorityRepos?: string[];   // repo names pinned at top of list (lowercase)
 }

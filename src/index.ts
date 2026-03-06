@@ -39,7 +39,7 @@ let isRefreshing = false;
 let previewGeneration = 0;
 let showArchived = false;
 let nameCache: NameCache = { version: 3, names: {}, sources: {} };
-let notifConfig: CsmConfig = { statusMonitor: true, windowPrefix: true, repoPaths: [] };
+let notifConfig: CsmConfig = { statusMonitor: true, windowPrefix: true, nativeNotification: true, repoPaths: [] };
 
 // Wizard state (null = not in wizard mode)
 let wizardState: WizardState | null = null;

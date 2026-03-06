@@ -130,6 +130,7 @@ async function quickDiscoverActive(): Promise<{ sessions: Session[]; allPanes: P
         modified: new Date(),
         firstPrompt: "",
         name: stripAllPrefixes(pane.windowName),
+        lastCapture: plain,
         tmuxPane: {
           paneId: pane.paneId,
           windowIndex: pane.windowIndex,

@@ -12,6 +12,7 @@ export const PATHS = {
 const DEFAULT_CONFIG: CsmConfig = {
   statusMonitor: true,
   windowPrefix: true,
+  nativeNotification: true,
   repoPaths: ["~/Documents"],
   priorityRepos: ["throxy"],
 };

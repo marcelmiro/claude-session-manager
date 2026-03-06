@@ -1,5 +1,6 @@
 import type { NotificationConfig, Session, TransitionEvent } from "../types";
 import type { SessionStatus } from "./status";
+import { getAbovePrompt } from "./status";
 import { renameWindow, getWindowName } from "./tmux";
 
 export const ATTENTION_PREFIX = "⚡";
@@ -91,10 +92,71 @@ export function classifyTransition(
   return "none";
 }
 
+/** Extract the waiting prompt text from a pane capture for notification body */
+function extractBlockedBody(lastCapture?: string): string {
+  if (!lastCapture) return "Waiting for input";
+  const lines = lastCapture.split("\n");
+  const { nearbyLines } = getAbovePrompt(lines);
+  if (!nearbyLines) return "Waiting for input";
+  const trimmed = nearbyLines.replace(/\s+/g, " ").trim();
+  return trimmed.length > 100 ? trimmed.slice(0, 97) + "..." : trimmed;
+}
+
+/** Cached result of `which terminal-notifier` check */
+let _hasTerminalNotifier: boolean | undefined;
+
+function hasTerminalNotifier(): boolean {
+  if (_hasTerminalNotifier !== undefined) return _hasTerminalNotifier;
+  try {
+    const result = Bun.spawnSync(["which", "terminal-notifier"]);
+    _hasTerminalNotifier = result.exitCode === 0;
+  } catch {
+    _hasTerminalNotifier = false;
+  }
+  return _hasTerminalNotifier;
+}
+
+/** Send a macOS native notification (fire-and-forget).
+ *  Uses terminal-notifier when available for clickable notifications that focus
+ *  Ghostty and switch to the correct tmux window/pane.
+ *  Falls back to osascript (no click action).
+ *  Skips if Ghostty is the frontmost app. */
+function sendNativeNotification(
+  title: string,
+  body: string,
+  pane?: { sessionName: string; windowIndex: number; paneId: string },
+): void {
+  try {
+    const frontCheck = `front=$(osascript -e 'tell application "System Events" to return name of first application process whose frontmost is true' 2>/dev/null); [ "$front" = "ghostty" ] && exit 0`;
+
+    if (hasTerminalNotifier() && pane) {
+      const switchCmd = `tmux select-window -t '${pane.sessionName}:${pane.windowIndex}' && tmux select-pane -t '${pane.paneId}'`;
+      Bun.spawn(["bash", "-c", [
+        frontCheck,
+        `terminal-notifier -title "$CSM_TITLE" -message "$CSM_BODY" -sound Ping -activate com.mitchellh.ghostty -execute "$CSM_SWITCH"`,
+      ].join("; ")], {
+        stdout: "ignore",
+        stderr: "ignore",
+        env: { ...process.env, CSM_TITLE: title, CSM_BODY: body, CSM_SWITCH: switchCmd },
+      });
+    } else {
+      const escaped = (s: string) => s.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+      Bun.spawn(["osascript",
+        "-e", `tell application "System Events" to set frontApp to name of first application process whose frontmost is true`,
+        "-e", `if frontApp is "ghostty" then return`,
+        "-e", `display notification "${escaped(body)}" with title "${escaped(title)}" sound name "Ping"`,
+      ], { stdout: "ignore", stderr: "ignore" });
+    }
+  } catch {
+    // Non-fatal
+  }
+}
+
 /**
  * Dispatch notifications for transition events.
  * Tier 1 (status monitor) is handled externally via state.
  * Tier 2 (window ⚡ prefix) is dispatched here.
+ * Tier 3 (macOS native notification) is dispatched here.
  */
 export async function dispatchNotifications(
   events: TransitionEvent[],
@@ -119,6 +181,24 @@ export async function dispatchNotifications(
       }
     }
 
+    // Tier 3: macOS native notification
+    if (config.nativeNotification) {
+      const name = stripAllPrefixes(session.name || session.tmuxPane.windowName);
+      const pane = {
+        sessionName: session.tmuxPane.sessionName,
+        windowIndex: session.tmuxPane.windowIndex,
+        paneId: session.tmuxPane.paneId,
+      };
+      if (event.classification === "blocked") {
+        const title = `⚡ [csm] ${name}`;
+        const body = extractBlockedBody(session.lastCapture);
+        sendNativeNotification(title, body, pane);
+      } else if (event.classification === "turnComplete") {
+        const title = `✓ [csm] ${name}`;
+        const ctx = session.contextPercent ? `${session.contextPercent}% context used` : "Turn complete";
+        sendNativeNotification(title, ctx, pane);
+      }
+    }
   }
 }
 

@@ -49,7 +49,7 @@ const SEPARATOR_RE = /^[─━═─\-]{4,}$/;
  *   statusLine = the first non-empty, non-separator line above the prompt (spinner/completion)
  *   nearbyLines = up to 3 such lines (for multi-line waiting prompts)
  */
-function getAbovePrompt(lines: string[]): { statusLine: string; nearbyLines: string } {
+export function getAbovePrompt(lines: string[]): { statusLine: string; nearbyLines: string } {
   // Find the last ❯ line (current input prompt)
   let promptIdx = -1;
   for (let i = lines.length - 1; i >= 0; i--) {
