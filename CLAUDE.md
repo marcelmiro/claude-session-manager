@@ -38,7 +38,7 @@ Entry: `bin/csm.ts` (CLI router) → `src/index.ts` (TUI) or `src/cli.ts` (subco
 
 **`csm next` details**: Reads `state.json` attention flags, picks the session with the oldest `lastTransition` timestamp, clears its attention flag, strips ⚡ prefix, and calls `switchToPane()`. Falls back to scanning tmux windows for ⚡ prefixes when state.json has no valid candidates (handles state↔window desync).
 
-**`csm reset` details**: Lists all tmux windows, renames any with non-standard names (not in `claude|zsh|bash|dev|fish|sh`) back to "claude". Strips both ⚡ and 🔄 prefixes. Also clears all attention flags in `state.json`.
+**`csm reset` details**: Lists all tmux windows, renames any with non-standard names (not in `zsh|bash|dev|fish|sh`) back to repo name from pane cwd. Strips ⚡ and 🔄 prefixes. Also clears all attention flags in `state.json`.
 
 **`csm switch` scoring**: exact=100, starts-with=80, contains=60, word-starts-with=40, subsequence=20. Matches against window names with ⚡/🔄 stripped.
 
@@ -85,7 +85,7 @@ Sessions in git worktrees group under their base repo via `getBaseRepoPath()` (u
 
 ### Multi-pane window support
 
-Windows with multiple Claude panes are named `claude/{repo}` (same repo) or `claude` (mixed). Attention prefix (⚡) only cleared from a window when no other panes in that window still need attention. State synced with external changes from `csm next` and the monitor on each refresh cycle.
+Windows with multiple Claude panes are named `{repo}` (same repo) or `{repo1}+{repo2}` (mixed). Attention prefix (⚡) only cleared from a window when no other panes in that window still need attention. State synced with external changes from `csm next` and the monitor on each refresh cycle.
 
 ### Session matching
 
@@ -167,7 +167,19 @@ Config `repoPaths` (default `["~/Documents"]`): directories scanned 1-level deep
 
 ### AI naming (`names.ts`)
 
-Priority: cache → summary → plan title → first prompt. AI via `claude -p` subprocess. Heuristic fallback: strip prefixes, filter stop words, kebab-case. Cache at `~/.config/csm/names.json`.
+Priority: cache → summary → plan title → first prompt + branch context. AI via `claude -p` subprocess with compact prompt (1-3 words, abbreviations encouraged). Names appear on tmux windows as `{repo}·{ai-name}`. Cache at `~/.config/csm/names.json` (v3).
+
+### Window naming format
+
+Tmux windows use the format `[⚡|🔄]{repo}[/{ai-name}][+]`:
+- `{repo}` = base repo name from pane cwd (worktrees resolved via `getBaseRepoPath`)
+- `/{ai-name}` = AI-generated compact name (1-3 words, kebab-case)
+- `+` = fork indicator (transitional, until fork gets its own AI name)
+- `⚡`/`🔄` = status prefixes (attention > running > none)
+
+Examples: `csm`, `csm/fix-auth`, `⚡csm/fix-auth`, `🔄api`, `csm/fix-auth+`
+Multi-pane same repo: `{repo}`. Multi-pane mixed: `{repo1}+{repo2}`.
+Helpers in `notifications.ts`: `buildBaseName()`, `extractAIName()`, `extractRepoFromWindowName()`.
 
 ## Conventions
 
