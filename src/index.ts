@@ -7,7 +7,7 @@ import { switchToPane, getMainSession, killPane } from "./core/tmux";
 import { loadNameCache, getSessionName, generateAIName, saveNameCache, type NameCache } from "./core/names";
 import { loadConfig } from "./core/config";
 import { loadState, saveState, loadPaneSessions } from "./core/state";
-import { syncWindowPrefix, stripAllPrefixes } from "./core/notifications";
+import { syncWindowPrefix, buildBaseName } from "./core/notifications";
 import { discoverRepos, listBranches } from "./core/git";
 import { initWizard, renderWizard, renderWizardPreview, renderWizardStatusBar, handleWizardKey, worktreeDirName } from "./ui/wizard";
 import { C } from "./ui/colors";
@@ -38,7 +38,7 @@ let flashTimer: ReturnType<typeof setTimeout> | null = null;
 let isRefreshing = false;
 let previewGeneration = 0;
 let showArchived = false;
-let nameCache: NameCache = { version: 2, names: {}, sources: {} };
+let nameCache: NameCache = { version: 3, names: {}, sources: {} };
 let notifConfig: CsmConfig = { statusMonitor: true, windowPrefix: true, repoPaths: [] };
 
 // Wizard state (null = not in wizard mode)
@@ -168,7 +168,6 @@ async function refresh(opts?: { skipArchivedSummaries?: boolean }) {
     }
 
     if (groups.length === 0) {
-      // Empty state
       listBox.setContent(
         `\n\n\n{center}{${C.muted}-fg}No active sessions{/${C.muted}-fg}{/center}\n\n{center}{${C.dim}-fg}Start one with: claude{/${C.dim}-fg}{/center}`,
       );
@@ -331,9 +330,11 @@ async function handleResume() {
   const targetSession = await getMainSession();
   if (!targetSession) return;
 
+  const repoName = session.repoPath.split("/").filter(Boolean).pop() ?? "claude";
   cleanup();
   try {
-    await Bun.$`tmux new-window -a -t ${targetSession} -n "claude" -c ${session.repoPath} ${"claude --resume " + session.id}`.quiet();
+    const cmd = `claude --resume=${session.id}; exec zsh -l`;
+    await Bun.$`tmux new-window -a -t ${targetSession} -n ${repoName} -c ${session.repoPath} zsh -c ${cmd}`.quiet();
   } catch {
     // ignore
   }
@@ -407,14 +408,13 @@ async function handleFork() {
   const targetSession = await getMainSession();
   if (!targetSession) return;
 
-  // Use the pane's AI name for multi-pane windows, otherwise keep the window name
-  const rawWindowName = session.tmuxPane?.windowName ?? "claude";
-  const baseName = stripAllPrefixes(rawWindowName);
-  const forkName = baseName.includes("/") ? (session.name || baseName) : baseName;
+  const repoName = session.repoPath.split("/").filter(Boolean).pop() ?? "claude";
+  const forkName = buildBaseName(repoName, session.name || undefined, true);
 
   cleanup();
   try {
-    await Bun.$`tmux new-window -a -t ${targetSession} -n ${forkName} -c ${session.repoPath} ${"claude --resume " + session.id + " --fork-session"}`.quiet();
+    const cmd = `claude --resume=${session.id} --fork-session; exec zsh -l`;
+    await Bun.$`tmux new-window -a -t ${targetSession} -n ${forkName} -c ${session.repoPath} zsh -c ${cmd}`.quiet();
   } catch {
     // ignore
   }
@@ -664,7 +664,7 @@ async function handleWizardLaunch(
       const wtPath = worktreeDirName(repo.name, worktreeName);
       const wtAbsPath = resolve(repo.path, wtPath);
       const baseRef = branch.isRemote ? `origin/${branch.name}` : branch.name;
-      cmd = `git worktree add ${shellQuote(wtAbsPath)} -b ${shellQuote(worktreeName)} ${shellQuote(baseRef)} && cd ${shellQuote(wtAbsPath)} && claude`;
+      cmd = `git worktree add ${shellQuote(wtAbsPath)} -b ${shellQuote(worktreeName)} ${shellQuote(baseRef)} 2>/dev/null || git worktree add ${shellQuote(wtAbsPath)} ${shellQuote(worktreeName)} && cd ${shellQuote(wtAbsPath)} && claude`;
     } else if (!branch.isCurrent) {
       const checkout = branch.isRemote
         ? `git checkout -b ${shellQuote(branch.name)} --track origin/${shellQuote(branch.name)} 2>/dev/null || git checkout ${shellQuote(branch.name)}`
@@ -676,12 +676,12 @@ async function handleWizardLaunch(
 
     if (cmd === "claude") {
       // Simple case: launch claude directly as the window command (no shell race)
-      await Bun.$`tmux new-window -a -t ${targetSession} -n "claude" -c ${repo.path} claude`.quiet();
+      await Bun.$`tmux new-window -a -t ${targetSession} -n ${repo.name} -c ${repo.path} claude`.quiet();
     } else {
       // Compound command: run via zsh -c to avoid send-keys race with shell init
       // (oh-my-zsh prompts can swallow keystrokes). exec zsh -l keeps shell open after claude exits.
       const wrapped = `${cmd}; exec zsh -l`;
-      await Bun.$`tmux new-window -a -t ${targetSession} -n "claude" -c ${repo.path} zsh -c ${wrapped}`.quiet();
+      await Bun.$`tmux new-window -a -t ${targetSession} -n ${repo.name} -c ${repo.path} zsh -c ${wrapped}`.quiet();
     }
   } catch {
     // ignore — window may already exist

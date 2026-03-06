@@ -9,8 +9,16 @@ import { listPanes, capturePane } from "./tmux";
 import { findClaudeProcesses } from "./process";
 import { detectStatus, estimateContextPercent, type StatusResult } from "./status";
 import { getBaseRepoPath } from "./git";
-import { stripAllPrefixes } from "./notifications";
+import { stripAllPrefixes, extractAIName } from "./notifications";
 import { processHookEvents } from "./state";
+
+const home = homedir();
+
+/** Derive a display-friendly repo name from a path. Returns "~" for home dir. */
+export function repoNameFromPath(p: string): string {
+  if (p === home) return "~";
+  return p.split("/").filter(Boolean).pop() ?? "unknown";
+}
 
 // Persistent cache: paneId → sessionId, survives across refresh cycles.
 // Populated by hook events, --resume flag, or JSONL mtime heuristic (best-guess).
@@ -168,7 +176,7 @@ async function enrichUnmatchedSessions(
     try {
       const encodedPath = repoPath.replace(/\//g, "-");
       const projectDir = `${projectsDir}/${encodedPath}`;
-      const repoName = repoPath.split("/").filter(Boolean).pop() ?? "";
+      const repoName = repoNameFromPath(repoPath);
 
       // Read the index once for summary lookup
       let index: SessionIndex | null = null;
@@ -322,14 +330,18 @@ async function enrichUnmatchedSessions(
   }
 }
 
-/** Normalize a tmux window name for matching: strip ⚡/🔄 prefix, skip defaults */
+/** Normalize a tmux window name for matching: strip prefix, extract AI name for cache lookup */
 function normalizeWindowName(windowName: string | undefined, repoName: string): string | null {
   if (!windowName) return null;
-  let name = stripAllPrefixes(windowName);
-  // Skip default/generic names (including "claude/{repo}" multi-pane format)
-  if (name === "claude" || name === repoName || name === "zsh" || name === "bash") return null;
-  if (name.startsWith("claude/")) return null;
-  return name;
+  const stripped = stripAllPrefixes(windowName);
+  // Skip legacy "claude/{repo}" multi-pane format
+  if (stripped.startsWith("claude/")) return null;
+  // Try new format: "{repo}/{ai-name}" → extract AI name
+  const aiName = extractAIName(windowName);
+  if (aiName) return aiName;
+  // Legacy/fallback: bare name after stripping prefixes
+  if (stripped === "claude" || stripped === repoName || stripped === "zsh" || stripped === "bash") return null;
+  return stripped;
 }
 
 /** Populate a session object with metadata from index/JSONL */
@@ -387,7 +399,7 @@ async function buildActiveSession(
     getBaseRepoPath(repoPath),
   ]);
 
-  const repo = baseRepoPath.split("/").filter(Boolean).pop() ?? "unknown";
+  const repo = repoNameFromPath(baseRepoPath);
 
   const contextPercent = statusResult.contextPercent
     ?? (activeInfo ? estimateContextPercent(activeInfo.messageCount) : 0);
@@ -424,61 +436,80 @@ export async function findActiveSessionInfo(
   repoPath: string,
   knownSessionId?: string,
 ): Promise<{ sessionId: string; messageCount: number; summary: string; modified?: string; firstPrompt: string } | null> {
+  // Without a known session ID we can't reliably match — enrichment
+  // for unmatched sessions happens in enrichUnmatchedSessions() instead
+  if (!knownSessionId) return null;
+
+  // Try the expected project dir first, then fall back to searching all dirs.
+  // The pane CWD can diverge from the project dir Claude was launched in
+  // (e.g. user cd'd after starting Claude), so the JSONL may live elsewhere.
+  const encodedPath = repoPath.replace(/\//g, "-");
+  const projectDir = await resolveProjectDir(projectsDir, encodedPath, knownSessionId);
+  if (!projectDir) return null;
+
+  return readSessionInfo(projectDir, knownSessionId);
+}
+
+/** Find the project dir containing a session's JSONL. Tries expected dir first, then scans. */
+async function resolveProjectDir(projectsDir: string, encodedPath: string, sessionId: string): Promise<string | null> {
+  const expectedDir = `${projectsDir}/${encodedPath}`;
   try {
-    // Claude encodes project paths by replacing / with - and prefixing with -
-    // e.g. /Users/foo/bar → -Users-foo-bar
-    const encodedPath = repoPath.replace(/\//g, "-");
-    const projectDir = `${projectsDir}/${encodedPath}`;
+    const stat = await Bun.file(`${expectedDir}/${sessionId}.jsonl`).stat();
+    if (stat) return expectedDir;
+  } catch {}
 
-    // Without a known session ID we can't reliably match — enrichment
-    // for unmatched sessions happens in enrichUnmatchedSessions() instead
-    if (!knownSessionId) return null;
-    const sessionId = knownSessionId;
-
-    // Look up session in the index
-    let messageCount = 0;
-    let summary = "";
-    let modified: string | undefined;
-    let firstPrompt = "";
-
-    try {
-      const indexPath = `${projectDir}/sessions-index.json`;
-      const raw = await Bun.file(indexPath).text();
-      const index: SessionIndex = JSON.parse(raw);
-      const entry = index.entries.find((e) => e.sessionId === sessionId);
-      if (entry) {
-        messageCount = entry.messageCount;
-        summary = (entry.summary || entry.firstPrompt || "").replace(/\s+/g, " ").trim();
-        modified = entry.modified;
-        firstPrompt = entry.firstPrompt || "";
-      }
-    } catch {
-      // No index file or malformed — that's fine
+  // Fallback: scan all project dirs for this session's JSONL
+  try {
+    const glob = new Bun.Glob(`*/${sessionId}.jsonl`);
+    for await (const path of glob.scan({ cwd: projectsDir, absolute: true })) {
+      return path.replace(`/${sessionId}.jsonl`, "");
     }
+  } catch {}
 
-    // Use JSONL file mtime as authoritative last-activity time —
-    // the file is written on every message, so mtime is always accurate
-    // (unlike the index which may update lazily)
-    const jsonlPath = `${projectDir}/${sessionId}.jsonl`;
-    try {
-      const stat = await Bun.file(jsonlPath).stat();
-      if (stat) {
-        modified = new Date(stat.mtimeMs).toISOString();
-      }
-    } catch {
-      // Keep index-derived modified
+  return null;
+}
+
+/** Read session metadata from a resolved project directory. */
+async function readSessionInfo(
+  projectDir: string,
+  sessionId: string,
+): Promise<{ sessionId: string; messageCount: number; summary: string; modified?: string; firstPrompt: string }> {
+  let messageCount = 0;
+  let summary = "";
+  let modified: string | undefined;
+  let firstPrompt = "";
+
+  try {
+    const indexPath = `${projectDir}/sessions-index.json`;
+    const raw = await Bun.file(indexPath).text();
+    const index: SessionIndex = JSON.parse(raw);
+    const entry = index.entries.find((e) => e.sessionId === sessionId);
+    if (entry) {
+      messageCount = entry.messageCount;
+      summary = (entry.summary || entry.firstPrompt || "").replace(/\s+/g, " ").trim();
+      modified = entry.modified;
+      firstPrompt = entry.firstPrompt || "";
     }
-
-    // If no summary from index, read first user prompt from the JSONL
-    if (!summary) {
-      summary = await getFirstUserPrompt(jsonlPath);
-      if (!firstPrompt) firstPrompt = summary;
-    }
-
-    return { sessionId, messageCount, summary, modified, firstPrompt };
   } catch {
-    return null;
+    // No index file or malformed — that's fine
   }
+
+  // Use JSONL file mtime as authoritative last-activity time
+  const jsonlPath = `${projectDir}/${sessionId}.jsonl`;
+  try {
+    const stat = await Bun.file(jsonlPath).stat();
+    if (stat) {
+      modified = new Date(stat.mtimeMs).toISOString();
+    }
+  } catch {}
+
+  // If no summary from index, read first user prompt from the JSONL
+  if (!summary) {
+    summary = await getFirstUserPrompt(jsonlPath);
+    if (!firstPrompt) firstPrompt = summary;
+  }
+
+  return { sessionId, messageCount, summary, modified, firstPrompt };
 }
 
 /**
@@ -534,7 +565,7 @@ async function discoverArchivedSessions(
 
         let baseRepoPath = entry.projectPath;
         try { baseRepoPath = await getBaseRepoPath(entry.projectPath); } catch {}
-        const repo = baseRepoPath.split("/").filter(Boolean).pop() ?? "unknown";
+        const repo = repoNameFromPath(baseRepoPath);
 
         // For archived sessions, use index summary or fetch last assistant message
         let summary = (entry.summary || entry.firstPrompt || "").replace(/\s+/g, " ").trim();
@@ -605,7 +636,7 @@ async function discoverArchivedSessions(
 
           let baseRepoPath = metadata.projectPath;
           try { baseRepoPath = await getBaseRepoPath(metadata.projectPath); } catch {}
-          const repo = baseRepoPath.split("/").filter(Boolean).pop() ?? "unknown";
+          const repo = repoNameFromPath(baseRepoPath);
           const summary = metadata.lastAssistantMessage || metadata.firstPrompt || "";
           const contextPercent = estimateContextPercent(metadata.messageCount);
 

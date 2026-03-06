@@ -2,17 +2,20 @@
  * CSM CLI subcommands — lightweight commands that don't require the full TUI.
  *
  * csm next          — switch to the next session needing attention
- * csm reset         — reset all window names back to "claude"
+ * csm reset         — reset all window names back to repo names
  * csm list          — print a text-only session list
  * csm switch <name> — fuzzy-match a session by name and switch to it
  */
 
+import { homedir } from "os";
 import { loadState, saveState } from "./core/state";
 import { switchToPane, listPanes, renameWindow, capturePane, displayMessage } from "./core/tmux";
 import { syncWindowPrefix, stripAllPrefixes, ATTENTION_PREFIX } from "./core/notifications";
 import { findClaudeProcesses } from "./core/process";
 import { detectStatus } from "./core/status";
 import { loadNameCache } from "./core/names";
+
+const home = homedir();
 
 // ---------------------------------------------------------------------------
 // csm next
@@ -177,14 +180,27 @@ export async function next(): Promise<void> {
 // ---------------------------------------------------------------------------
 
 /** Standard shell/tool names that shouldn't be renamed. */
-const KEEP_NAMES = new Set(["claude", "zsh", "bash", "dev", "fish", "sh"]);
+const KEEP_NAMES = new Set(["zsh", "bash", "dev", "fish", "sh"]);
 
 /**
- * Reset all tmux window names back to "claude".
- * Strips ⚡ prefixes and AI-generated names. Also clears attention state.
+ * Reset all tmux window names back to repo name.
+ * Strips ⚡/🔄 prefixes and AI-generated names. Also clears attention state.
  */
 export async function reset(): Promise<void> {
   try {
+    // Get all panes to map windows to repo paths
+    const panes = await listPanes();
+    const windowRepos = new Map<string, string>();
+    for (const pane of panes) {
+      const wKey = `${pane.sessionName}:${pane.windowIndex}`;
+      if (!windowRepos.has(wKey)) {
+        const repo = pane.currentPath === home
+          ? "~"
+          : (pane.currentPath.split("/").pop() || "claude");
+        windowRepos.set(wKey, repo);
+      }
+    }
+
     const output = await Bun.$`tmux list-windows -a -F '#{session_name}:#{window_index} #{window_name}'`
       .quiet()
       .text();
@@ -199,17 +215,21 @@ export async function reset(): Promise<void> {
       const [sessionName, windowIndex] = target.split(":");
 
       const cleanName = stripAllPrefixes(name);
+      const wKey = `${sessionName}:${windowIndex}`;
+      const repoName = windowRepos.get(wKey) ?? "claude";
 
-      if (cleanName === sessionName) {
-        // Window name matches tmux session name → reset to "claude"
-        await renameWindow(sessionName, parseInt(windowIndex, 10), "claude");
-        count++;
-      } else if (!KEEP_NAMES.has(cleanName)) {
-        // AI-generated or unknown name → reset to "claude"
-        await renameWindow(sessionName, parseInt(windowIndex, 10), "claude");
+      if (KEEP_NAMES.has(cleanName)) {
+        // Shell/tool name — only strip prefix if present
+        if (name !== cleanName) {
+          await renameWindow(sessionName, parseInt(windowIndex, 10), cleanName);
+          count++;
+        }
+      } else if (cleanName !== repoName) {
+        // AI-generated, legacy "claude", or prefixed name → reset to repo name
+        await renameWindow(sessionName, parseInt(windowIndex, 10), repoName);
         count++;
       } else if (name !== cleanName) {
-        // Standard name with prefix → just strip the prefix
+        // Already repo name but has prefix → strip it
         await renameWindow(sessionName, parseInt(windowIndex, 10), cleanName);
         count++;
       }
@@ -280,7 +300,9 @@ export async function list(): Promise<void> {
       const result = detectStatus(plain, true);
 
       const name = stripAllPrefixes(pane.windowName);
-      const repo = pane.currentPath.split("/").pop() || pane.currentPath;
+      const repo = pane.currentPath === home
+        ? "~"
+        : (pane.currentPath.split("/").pop() || pane.currentPath);
 
       return {
         name,
@@ -400,13 +422,14 @@ function isSubsequence(sub: string, str: string): boolean {
 // csm setup
 // ---------------------------------------------------------------------------
 
-const HOOK_VERSION = 2;
+const HOOK_VERSION = 3;
 const HOOK_SCRIPT = `#!/bin/bash
 # CSM_HOOK_VERSION=${HOOK_VERSION}
 INPUT=$(cat)
 SESSION_ID=$(echo "$INPUT" | grep -o '"session_id":"[^"]*"' | head -1 | cut -d'"' -f4)
-# $TMUX_PANE may not be inherited by hook subprocesses — fall back to tmux query
-PANE_ID=\${TMUX_PANE:-$(tmux display-message -p '#{pane_id}' 2>/dev/null)}
+# Only use $TMUX_PANE — never fall back to tmux display-message which returns
+# the active pane, not the pane running this Claude session.
+PANE_ID="$TMUX_PANE"
 if [ -n "$SESSION_ID" ] && [ -n "$PANE_ID" ]; then
   mkdir -p ~/.config/csm
   printf '%s %s\\n' "$PANE_ID" "$SESSION_ID" >> ~/.config/csm/hook-events
@@ -459,31 +482,31 @@ export async function setup(): Promise<void> {
 
   if (alreadyInstalled && !scriptOutdated) {
     console.log("CSM hooks already configured.");
-    return;
-  }
-
-  // Write the hook script
-  await Bun.$`mkdir -p ${hookDir}`.quiet();
-  await Bun.write(hookPath, HOOK_SCRIPT);
-  await Bun.$`chmod +x ${hookPath}`.quiet();
-
-  if (!alreadyInstalled) {
-    // Add hook entry to settings (omit matcher to match all SessionStart events)
-    settings.hooks.SessionStart.push({
-      hooks: [{ type: "command", command: hookPath }],
-    });
-
-    // Write back settings
-    await Bun.$`mkdir -p ${home}/.claude`.quiet();
-    await Bun.write(settingsPath, JSON.stringify(settings, null, 2) + "\n");
-  }
-
-  if (scriptOutdated && installedVersion > 0) {
-    console.log("CSM SessionStart hook updated.");
   } else {
-    console.log("CSM SessionStart hook installed.");
+    // Write the hook script
+    await Bun.$`mkdir -p ${hookDir}`.quiet();
+    await Bun.write(hookPath, HOOK_SCRIPT);
+    await Bun.$`chmod +x ${hookPath}`.quiet();
+
+    if (!alreadyInstalled) {
+      // Add hook entry to settings (omit matcher to match all SessionStart events)
+      settings.hooks.SessionStart.push({
+        hooks: [{ type: "command", command: hookPath }],
+      });
+
+      // Write back settings
+      await Bun.$`mkdir -p ${home}/.claude`.quiet();
+      await Bun.write(settingsPath, JSON.stringify(settings, null, 2) + "\n");
+    }
+
+    if (scriptOutdated && installedVersion > 0) {
+      console.log("CSM SessionStart hook updated.");
+    } else {
+      console.log("CSM SessionStart hook installed.");
+    }
+    console.log(`  Hook script: ${hookPath}`);
+    console.log(`  Settings: ${settingsPath}`);
+    console.log("\nNew Claude Code sessions will now be automatically tracked.");
   }
-  console.log(`  Hook script: ${hookPath}`);
-  console.log(`  Settings: ${settingsPath}`);
-  console.log("\nNew Claude Code sessions will now be automatically tracked.");
+
 }

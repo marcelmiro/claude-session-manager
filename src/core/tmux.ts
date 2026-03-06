@@ -6,10 +6,12 @@ import type { PaneInfo } from "../types.ts";
  */
 export async function getMainSession(): Promise<string | null> {
   try {
-    const output = await Bun.$`tmux list-sessions -F '#{session_name}'`.quiet().text();
-    const sessions = output.trim().split("\n").filter(Boolean);
-    const current = (await Bun.$`tmux display-message -p '#S'`.quiet().text()).trim();
-    return sessions.find((s) => s !== current) ?? sessions[0] ?? null;
+    // Popup runs in the same session context (tmux 3.3+), so current IS the main session
+    const session = (await Bun.$`tmux display-message -p '#S'`.quiet().text()).trim();
+    if (!session) return null;
+    // Return session:windowId so new-window -a inserts after the active window
+    const windowId = (await Bun.$`tmux display-message -t ${session} -p '#{window_id}'`.quiet().text()).trim();
+    return windowId ? `${session}:${windowId}` : session;
   } catch {
     return null;
   }

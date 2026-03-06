@@ -21,7 +21,7 @@ export async function releaseNamingLock(): Promise<void> {
 }
 
 export interface NameCache {
-  version: 2;
+  version: 3;
   names: Record<string, string>;     // sessionId → name
   sources: Record<string, string>;   // sessionId → summary/prompt used for naming
 }
@@ -60,7 +60,7 @@ export function extractPlanTitle(prompt: string): string {
  * AI-powered name generation using `claude -p`.
  * Returns kebab-case name or empty string on failure.
  */
-export async function generateAIName(firstPrompt: string, summary?: string): Promise<string> {
+export async function generateAIName(firstPrompt: string, summary?: string, branch?: string): Promise<string> {
   if (!firstPrompt && !summary) return "";
 
   try {
@@ -68,20 +68,29 @@ export async function generateAIName(firstPrompt: string, summary?: string): Pro
     const contextParts: string[] = [];
     if (summary) contextParts.push(`Summary: "${summary}"`);
     if (planTitle) contextParts.push(`Plan title: "${planTitle}"`);
+    if (branch) {
+      // Strip ticket prefix (e.g. "ENG-2687-") for naming context
+      const branchContext = branch.replace(/^[a-zA-Z]{2,6}-\d{2,}-?/, "");
+      if (branchContext) contextParts.push(`Branch: "${branchContext}"`);
+    }
     contextParts.push(`First message: "${(firstPrompt || "").slice(0, 300)}"`);
 
-    const namePrompt = `Name this coding session in 2-4 words, kebab-case. Focus on the ACTION and GOAL, not file paths, code structure, or locations. The name should answer "what is being done?" not "where is it happening?".
+    const namePrompt = `Name this coding session in 1-3 words, kebab-case. Be extremely compact: "impl" not "implement", "cfg" not "config", "auth" not "authentication", "perf" not "performance", "refactor" not "refactoring". Drop filler words (the, a, for, with, to). Focus on the ACTION and GOAL, not file paths or locations.
 
-Good: fix-auth-flow, add-dark-mode, refactor-api-client, improve-startup-perf
-Bad: packages-api-src, src-utils-helpers, update-index-ts, components-modal
+Good: fix-auth, impl-dark-mode, refactor-api, db-perf
+Bad: implement-authentication-flow, packages-api-src, update-index-ts
 
 Reply with ONLY the kebab-case name, nothing else.
 
 ${contextParts.join("\n")}`;
-    const proc = Bun.spawn(["claude", "-p", namePrompt], { stdout: "pipe", stderr: "ignore" });
+    const proc = Bun.spawn(["claude", "-p", namePrompt], {
+      stdout: "pipe",
+      stderr: "ignore",
+      env: { ...process.env, TMUX: "", TMUX_PANE: "" },
+    });
     const result = await new Response(proc.stdout).text();
     const name = result.trim().toLowerCase().replace(/[^a-z0-9-]/g, "").replace(/-+/g, "-").replace(/^-|-$/g, "");
-    return name.length > 0 && name.length <= 40 ? name : "";
+    return name.length > 0 && name.length <= 25 ? name : "";
   } catch {
     return "";
   }
@@ -91,15 +100,15 @@ export async function loadNameCache(): Promise<NameCache> {
   try {
     const raw = await Bun.file(CACHE_PATH).text();
     const parsed = JSON.parse(raw);
-    if (parsed.version === 2 && parsed.names) return parsed;
-    // Migrate from v1: carry over names, sources unknown
-    if (parsed.version === 1 && parsed.names) {
-      return { version: 2, names: parsed.names, sources: {} };
+    if (parsed.version === 3 && parsed.names) return parsed;
+    // Migrate from v1/v2: discard names to regenerate with compact prompt
+    if ((parsed.version === 1 || parsed.version === 2) && parsed.names) {
+      return { version: 3, names: {}, sources: {} };
     }
   } catch {
     // No cache or malformed
   }
-  return { version: 2, names: {}, sources: {} };
+  return { version: 3, names: {}, sources: {} };
 }
 
 export async function saveNameCache(cache: NameCache): Promise<void> {

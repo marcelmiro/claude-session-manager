@@ -11,7 +11,9 @@ import { findClaudeProcesses } from "./core/process";
 import { detectStatus, type SessionStatus } from "./core/status";
 import { loadConfig, PATHS } from "./core/config";
 import { loadState, saveState, computeAggregate, buildSessionStates, loadPaneSessions, savePaneSessions, processHookEvents } from "./core/state";
-import { detectTransitions, dispatchNotifications, syncWindowPrefix, ATTENTION_PREFIX, stripAllPrefixes, desiredPrefix } from "./core/notifications";
+import { detectTransitions, dispatchNotifications, syncWindowPrefix, ATTENTION_PREFIX, stripAllPrefixes, desiredPrefix, buildBaseName, NAME_SEPARATOR } from "./core/notifications";
+import { getBaseRepoPath } from "./core/git";
+import { repoNameFromPath } from "./core/sessions";
 import { loadNameCache, saveNameCache, generateAIName, acquireNamingLock, releaseNamingLock, type NameCache } from "./core/names";
 import { findActiveSessionInfo } from "./core/sessions";
 import { homedir } from "os";
@@ -114,11 +116,12 @@ async function quickDiscoverActive(): Promise<{ sessions: Session[]; allPanes: P
         .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, "");
       const result = detectStatus(plain, true);
 
+      const baseRepoPath = await getBaseRepoPath(pane.currentPath);
       return {
         id: "",
-        repo: "",
+        repo: repoNameFromPath(baseRepoPath),
         repoPath: pane.currentPath,
-        baseRepoPath: pane.currentPath,
+        baseRepoPath,
         branch: "",
         status: result.status,
         contextPercent: result.contextPercent ?? 0,
@@ -296,27 +299,29 @@ async function main(): Promise<void> {
   }
   for (const win of windowMap.values()) {
     const prefix = desiredPrefix(win.hasAttention, win.hasRunning);
-    let baseName = stripAllPrefixes(win.windowName);
 
-    // If any pane in this window just had /clear, reset to "claude"
+    // Resolve repo name(s) for this window's panes
+    const paneRepos = win.paneIds.map(id => {
+      const s = sessions.find(s => s.tmuxPane?.paneId === id);
+      return s ? repoNameFromPath(s.baseRepoPath) : "unknown";
+    });
+    const uniqueRepos = [...new Set(paneRepos)].filter(r => r !== "unknown");
+    const repo = uniqueRepos.length > 0 ? uniqueRepos[0] : "unknown";
+
+    let baseName: string;
+
+    // If any pane in this window just had /clear, reset to repo name
     const hasCleared = win.paneIds.some(id => clearPaneIds.has(id));
     if (hasCleared) {
-      baseName = "claude";
+      baseName = repo;
     } else if (win.paneIds.length === 1) {
-      // For single-pane windows, use AI name from cache if available
+      // Single-pane: {repo}·{ai-name} or just {repo}
       const sessionId = paneSessionMap[win.paneIds[0]];
-      if (sessionId && nameCache.names[sessionId]) {
-        baseName = nameCache.names[sessionId];
-      }
+      const aiName = sessionId ? nameCache.names[sessionId] : undefined;
+      baseName = buildBaseName(repo, aiName);
     } else {
-      // Multi-pane window: "claude/{repo}" if same repo, else "claude"
-      const repos = new Set(
-        win.paneIds.map(id => {
-          const s = sessions.find(s => s.tmuxPane?.paneId === id);
-          return s ? s.repoPath.split("/").filter(Boolean).pop() ?? "unknown" : "unknown";
-        })
-      );
-      baseName = repos.size === 1 ? `claude/${[...repos][0]}` : "claude";
+      // Multi-pane: show all unique repos joined with "+"
+      baseName = uniqueRepos.length > 1 ? uniqueRepos.join("+") : repo;
     }
 
     const desired = `${prefix}${baseName}`;
@@ -426,7 +431,10 @@ async function phase2(
         const firstPrompt = info?.firstPrompt ?? "";
         const summary = info?.summary ?? "";
         if (firstPrompt || summary) {
-          const name = await generateAIName(firstPrompt, summary);
+          // Get branch for naming context
+          let branch = "";
+          try { branch = (await Bun.$`git -C ${unnamed.repoPath} branch --show-current`.quiet().text()).trim(); } catch {}
+          const name = await generateAIName(firstPrompt, summary, branch);
           if (name) {
             nameCache.names[sessionId] = name;
             nameCache.sources[sessionId] = summary || firstPrompt;
@@ -437,7 +445,8 @@ async function phase2(
             const currentWindowName = unnamed.tmuxPane.windowName;
             const prefix = currentWindowName.startsWith(ATTENTION_PREFIX) ? ATTENTION_PREFIX
               : currentWindowName.startsWith("🔄") ? "🔄" : "";
-            await renameWindow(unnamed.tmuxPane.sessionName, unnamed.tmuxPane.windowIndex, `${prefix}${name}`);
+            const repo = repoNameFromPath(unnamed.baseRepoPath);
+            await renameWindow(unnamed.tmuxPane.sessionName, unnamed.tmuxPane.windowIndex, `${prefix}${buildBaseName(repo, name)}`);
           } else {
             // AI naming returned empty — skip for a while
             namingSkips[sessionId] = now;

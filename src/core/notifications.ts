@@ -4,6 +4,7 @@ import { renameWindow, getWindowName } from "./tmux";
 
 export const ATTENTION_PREFIX = "⚡";
 export const RUNNING_PREFIX = "🔄";
+export const NAME_SEPARATOR = "/";
 
 /** Strip both ⚡ and 🔄 prefixes from a window name */
 export function stripAllPrefixes(name: string): string {
@@ -17,6 +18,31 @@ export function desiredPrefix(hasAttention: boolean, isRunning: boolean): string
   if (hasAttention) return ATTENTION_PREFIX;
   if (isRunning) return RUNNING_PREFIX;
   return "";
+}
+
+/** Build the base window name: {repo}[·{ai-name}][+] */
+export function buildBaseName(repo: string, aiName?: string, isFork?: boolean): string {
+  let name = repo;
+  if (aiName) name += `${NAME_SEPARATOR}${aiName}`;
+  if (isFork) name += "+";
+  return name;
+}
+
+/** Extract AI name from a window name like "{repo}·{ai-name}" or "{repo}·{ai-name}+" */
+export function extractAIName(windowName: string): string | null {
+  const stripped = stripAllPrefixes(windowName);
+  const sepIdx = stripped.indexOf(NAME_SEPARATOR);
+  if (sepIdx === -1) return null;
+  let aiName = stripped.slice(sepIdx + NAME_SEPARATOR.length);
+  if (aiName.endsWith("+")) aiName = aiName.slice(0, -1);
+  return aiName || null;
+}
+
+/** Extract repo name from a window name like "{repo}" or "{repo}·{ai-name}" */
+export function extractRepoFromWindowName(windowName: string): string {
+  const stripped = stripAllPrefixes(windowName);
+  const sepIdx = stripped.indexOf(NAME_SEPARATOR);
+  return sepIdx === -1 ? stripped : stripped.slice(0, sepIdx);
 }
 
 /**
@@ -92,6 +118,7 @@ export async function dispatchNotifications(
         );
       }
     }
+
   }
 }
 
