@@ -1,19 +1,22 @@
 /**
  * CSM CLI subcommands — lightweight commands that don't require the full TUI.
  *
- * csm next          — switch to the next session needing attention
- * csm reset         — reset all window names back to repo names
- * csm list          — print a text-only session list
- * csm switch <name> — fuzzy-match a session by name and switch to it
+ * csm next              — switch to the next session needing attention
+ * csm reset             — reset all window names back to repo names
+ * csm list              — print a text-only session list
+ * csm switch <name>     — fuzzy-match a session by name and switch to it
+ * csm save-sessions     — snapshot pane→session mappings for tmux-resurrect
+ * csm restore-sessions  — restore Claude sessions after tmux-resurrect restore
  */
 
 import { homedir } from "os";
-import { loadState, saveState } from "./core/state";
+import { loadState, saveState, loadPaneSessions } from "./core/state";
 import { switchToPane, listPanes, renameWindow, capturePane, displayMessage } from "./core/tmux";
 import { syncWindowPrefix, stripAllPrefixes, ATTENTION_PREFIX } from "./core/notifications";
 import { findClaudeProcesses } from "./core/process";
 import { detectStatus } from "./core/status";
 import { loadNameCache } from "./core/names";
+import { PATHS } from "./core/config";
 
 const home = homedir();
 
@@ -509,4 +512,158 @@ export async function setup(): Promise<void> {
     console.log("\nNew Claude Code sessions will now be automatically tracked.");
   }
 
+}
+
+// ---------------------------------------------------------------------------
+// csm save-sessions  (tmux-resurrect post-save hook)
+// ---------------------------------------------------------------------------
+
+const RESURRECT_SESSIONS_PATH = `${PATHS.dir}/resurrect-sessions.json`;
+
+interface ResurrectSessionEntry {
+  sessionId: string;
+  cwd: string;
+}
+
+interface ResurrectSessionMap {
+  savedAt: string;
+  sessions: Record<string, ResurrectSessionEntry>;
+}
+
+/**
+ * Snapshot current pane→Claude session mappings using tmux coordinates
+ * (session:window.pane_index) that survive a tmux server restart.
+ *
+ * Designed to be called by tmux-resurrect's @resurrect-hook-post-save-all.
+ * Can also be run manually before a planned restart.
+ */
+export async function saveSessions(): Promise<void> {
+  const paneSessions = await loadPaneSessions();
+  if (Object.keys(paneSessions).length === 0) {
+    // Nothing tracked — skip silently (hook context)
+    return;
+  }
+
+  // Get all panes with their stable coordinates + pane_id
+  let paneCoords: Array<{ paneId: string; coord: string; cwd: string }>;
+  try {
+    const output = await Bun.$`tmux list-panes -a -F '#{pane_id} #{session_name}:#{window_index}.#{pane_index} #{pane_current_path}'`
+      .quiet()
+      .text();
+    paneCoords = output.trim().split("\n").filter(Boolean).map((line) => {
+      const [paneId, coord, ...cwdParts] = line.split(" ");
+      return { paneId, coord, cwd: cwdParts.join(" ") };
+    });
+  } catch {
+    return;
+  }
+
+  // Build coordinate→sessionId map from paneSessions (keyed by pane ID)
+  const sessions: Record<string, ResurrectSessionEntry> = {};
+  for (const { paneId, coord, cwd } of paneCoords) {
+    const sessionId = paneSessions[paneId];
+    if (sessionId) {
+      sessions[coord] = { sessionId, cwd };
+    }
+  }
+
+  if (Object.keys(sessions).length === 0) return;
+
+  const map: ResurrectSessionMap = {
+    savedAt: new Date().toISOString(),
+    sessions,
+  };
+
+  try {
+    await Bun.$`mkdir -p ${PATHS.dir}`.quiet();
+    await Bun.write(RESURRECT_SESSIONS_PATH, JSON.stringify(map, null, 2));
+  } catch {
+    // Non-fatal — running in hook context
+  }
+}
+
+// ---------------------------------------------------------------------------
+// csm restore-sessions  (tmux-resurrect post-restore hook)
+// ---------------------------------------------------------------------------
+
+/**
+ * Restore Claude Code sessions after tmux-resurrect restores panes.
+ *
+ * Reads the coordinate→sessionId mapping saved by `csm save-sessions`,
+ * matches coordinates to newly created panes, and launches
+ * `claude --resume=<id>` in each via tmux send-keys.
+ *
+ * Designed to be called by tmux-resurrect's @resurrect-hook-post-restore-all.
+ * Can also be run manually after a restore.
+ */
+export async function restoreSessions(): Promise<void> {
+  // Read saved mapping
+  let map: ResurrectSessionMap;
+  try {
+    const raw = await Bun.file(RESURRECT_SESSIONS_PATH).text();
+    map = JSON.parse(raw);
+  } catch {
+    console.log("No saved session map found. Run 'csm save-sessions' first or configure the tmux-resurrect hook.");
+    return;
+  }
+
+  if (!map.sessions || Object.keys(map.sessions).length === 0) {
+    console.log("No Claude sessions to restore.");
+    return;
+  }
+
+  // Get current panes with their coordinates
+  let paneCoords: Array<{ paneId: string; coord: string; cwd: string }>;
+  try {
+    const output = await Bun.$`tmux list-panes -a -F '#{pane_id} #{session_name}:#{window_index}.#{pane_index} #{pane_current_path}'`
+      .quiet()
+      .text();
+    paneCoords = output.trim().split("\n").filter(Boolean).map((line) => {
+      const [paneId, coord, ...cwdParts] = line.split(" ");
+      return { paneId, coord, cwd: cwdParts.join(" ") };
+    });
+  } catch {
+    console.error("Failed to list tmux panes.");
+    return;
+  }
+
+  // Match coordinates and launch claude in matching panes
+  let restored = 0;
+  let skipped = 0;
+
+  for (const { paneId, coord } of paneCoords) {
+    const entry = map.sessions[coord];
+    if (!entry) continue;
+
+    // Verify the pane is a shell (not already running something).
+    // Check if there's a foreground process other than the shell.
+    try {
+      const cmd = (await Bun.$`tmux display-message -t ${paneId} -p '#{pane_current_command}'`.quiet().text()).trim();
+      if (cmd && !["zsh", "bash", "fish", "sh"].includes(cmd)) {
+        skipped++;
+        continue;
+      }
+    } catch {
+      skipped++;
+      continue;
+    }
+
+    // Launch claude --resume in this pane
+    try {
+      await Bun.$`tmux send-keys -t ${paneId} ${`claude --resume=${entry.sessionId}`} Enter`.quiet();
+      restored++;
+    } catch {
+      skipped++;
+    }
+  }
+
+  if (restored > 0) {
+    console.log(`Restored ${restored} Claude session${restored !== 1 ? "s" : ""}.`);
+  }
+  if (skipped > 0) {
+    console.log(`Skipped ${skipped} pane${skipped !== 1 ? "s" : ""} (already running or inaccessible).`);
+  }
+  if (restored === 0 && skipped === 0) {
+    console.log("No matching panes found for saved sessions.");
+  }
 }
