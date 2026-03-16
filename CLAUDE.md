@@ -32,6 +32,8 @@ Entry: `bin/csm.ts` (CLI router) → `src/index.ts` (TUI) or `src/cli.ts` (subco
 | `csm list` | Text-only session list with status/repo/context% | stdout |
 | `csm switch <name>` | Fuzzy-match session by name and switch to it | tmux display-message |
 | `csm setup` | Install SessionStart hook for session tracking | stdout |
+| `csm save-sessions` | Snapshot pane→session map for tmux-resurrect | stdout (silent in hook) |
+| `csm restore-sessions` | Restore Claude sessions after tmux-resurrect restore | stdout |
 | `csm --help` | Show available commands and usage | stdout |
 
 **Testing subcommands**: Use `bun run bin/csm.ts <cmd>` to test without installing globally. Example: `bun run bin/csm.ts list` prints active sessions to stdout — useful for verifying session discovery, status detection, and name resolution without launching the TUI.
@@ -202,6 +204,46 @@ Status: waiting/ready=peach, running=mint, idle=dim. Context %: <50=mint, 50-79=
 
 TUI refuses to run without a TTY (`process.stdout.isTTY` check) to prevent orphaned background processes (e.g. from `bun --watch` after terminal closes) from overwriting `state.json` with stale attention flags.
 
+## Session persistence (optional tmux-resurrect integration)
+
+CSM can save and restore Claude Code sessions across tmux server crashes when paired with tmux-resurrect (and optionally tmux-continuum for auto-save).
+
+### How it works
+
+1. **On save** (`csm save-sessions`): Snapshots a mapping of stable tmux coordinates (`session:window.pane_index`) to Claude session UUIDs, written to `~/.config/csm/resurrect-sessions.json`. This uses data already tracked by CSM's SessionStart hook in `pane-sessions.json`.
+
+2. **On restore** (`csm restore-sessions`): After tmux-resurrect restores panes (as empty shells), reads the saved mapping, matches coordinates to the newly created panes, and launches `claude --resume=<sessionId>` in each via `tmux send-keys`. Skips panes that already have a foreground process.
+
+### Setup
+
+Add these hooks to your `tmux.conf` alongside the tmux-resurrect plugin config:
+
+```
+set -g @resurrect-hook-post-save-all 'csm save-sessions'
+set -g @resurrect-hook-post-restore-all 'csm restore-sessions'
+```
+
+If using tmux-continuum for auto-save, the save hook runs automatically on each periodic save. The restore hook runs when `@continuum-restore 'on'` triggers a restore on server start.
+
+### Commands
+
+| Command | Description | When called |
+|---------|-------------|-------------|
+| `csm save-sessions` | Snapshot pane→session map using stable tmux coordinates | tmux-resurrect post-save hook or manually |
+| `csm restore-sessions` | Launch `claude --resume` in restored panes | tmux-resurrect post-restore hook or manually |
+
+### Data flow
+
+Save: `pane-sessions.json` (paneId→sessionId) + `tmux list-panes` (paneId→coordinate) → `resurrect-sessions.json` (coordinate→sessionId)
+
+Restore: `resurrect-sessions.json` (coordinate→sessionId) + `tmux list-panes` (coordinate→new paneId) → `tmux send-keys` (launch claude --resume in each pane)
+
+### Limitations
+
+- Requires CSM's SessionStart hook to be installed (`csm setup`) so pane→session mappings are tracked.
+- The mapping is only as fresh as the last save. Sessions started after the last save won't be in the map.
+- Pane coordinates rely on tmux-resurrect restoring the same session/window/pane layout. Manual tmux reconfiguration after restore may shift coordinates.
+
 ## Key references
 
 - `ideas.txt` — feature backlog (worktrees, search, Cursor integration, etc.)
@@ -210,4 +252,5 @@ TUI refuses to run without a TTY (`process.stdout.isTTY` check) to prevent orpha
 - Config/state: `~/.config/csm/{config,state,names}.json`
 - Hook events: `~/.config/csm/hook-events` (SessionStart hook writes pane→session mappings)
 - Hook script: `~/.config/csm/hooks/session-start.sh` (installed by `csm setup`)
+- Resurrect map: `~/.config/csm/resurrect-sessions.json` (coordinate→sessionId, written by save-sessions)
 - Debug log: `~/.config/csm/debug.log` (monitor debug, create file to enable)
