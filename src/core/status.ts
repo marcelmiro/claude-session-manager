@@ -32,7 +32,9 @@ const QUESTION_UI_PATTERNS = [
   /←.*[☐✔].*→/,                 // Navigation bar with checkbox/checkmark controls
 ];
 
-const SEPARATOR_RE = /^[─━═─\-]{4,}$/;
+const SEPARATOR_RE = /^[─━═─\-\s▪]+$/;
+const TIP_RE = /^⎿\s+Tip:/;  // UI tip lines shown during running — skip like separators
+const TASK_RE = /^(?:⎿\s+)?[✔◼◻☐]\s/;  // Task list items (completed/in-progress/pending) — skip to reach spinner
 
 /**
  * Extract content lines immediately above the ❯ prompt.
@@ -64,7 +66,13 @@ export function getAbovePrompt(lines: string[]): { statusLine: string; nearbyLin
   const above: string[] = [];
   for (let i = promptIdx - 1; i >= Math.max(0, promptIdx - 8); i--) {
     const trimmed = lines[i].trim();
-    if (!trimmed || SEPARATOR_RE.test(trimmed)) continue;
+    if (!trimmed || SEPARATOR_RE.test(trimmed) || TASK_RE.test(trimmed)) continue;
+    if (TIP_RE.test(trimmed)) {
+      // Tip line found — discard any continuation lines we already collected
+      // (in narrow panes, tips wrap and continuations appear between tip header and separator)
+      above.length = 0;
+      continue;
+    }
     above.push(trimmed);
     if (above.length >= 3) break;
   }
@@ -84,7 +92,7 @@ export function detectStatus(
 
   const lines = capturedOutput.split("\n");
   const contextPercent = parseContextPercent(capturedOutput);
-  const { nearbyLines } = getAbovePrompt(lines);
+  const { statusLine, nearbyLines } = getAbovePrompt(lines);
 
   // 1. Waiting: permission/confirmation prompts take priority over running
   //    (spinner chars can linger in pane output while a prompt is displayed)
@@ -102,9 +110,11 @@ export function detectStatus(
     }
   }
 
-  // 3. Running: spinner characters anywhere in visible pane output
+  // 3. Running: spinner on the status line (first line above prompt separator).
+  //    Only check statusLine — old spinner text (e.g. "✻ Optimus Priming…") lingers
+  //    in nearbyLines/scrollback after Claude finishes, causing false positives.
   for (const pattern of RUNNING_PATTERNS) {
-    if (pattern.test(capturedOutput)) {
+    if (pattern.test(statusLine)) {
       return { status: "running", contextPercent };
     }
   }
