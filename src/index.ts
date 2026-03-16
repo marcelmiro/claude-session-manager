@@ -1,9 +1,10 @@
 import { createLayout } from "./ui/layout";
 import { renderStatusBar } from "./ui/status-bar";
-import { buildDisplayRows, renderSessionList, moveSelection, moveToGroup, getSelectableIndices, filterDisplayRows } from "./ui/session-list";
+import { buildDisplayRows, renderSessionList, moveSelection, moveToGroup, getSelectableIndices } from "./ui/session-list";
 import { handleTextInputKey, renderTextWithCursor } from "./ui/text-input";
-import { updatePreview, getPreviewPlainText } from "./ui/preview-pane";
+import { updatePreview, getPreviewPlainText, renderMessage } from "./ui/preview-pane";
 import { discoverSessions, groupSessions, seedPaneSessionCache } from "./core/sessions";
+import { readPreviewMessages } from "./core/jsonl-reader";
 import { switchToPane, getMainSession, killPane } from "./core/tmux";
 import { loadNameCache, getSessionName, generateAIName, saveNameCache, type NameCache } from "./core/names";
 import { loadConfig } from "./core/config";
@@ -11,8 +12,10 @@ import { loadState, saveState, loadPaneSessions } from "./core/state";
 import { syncWindowPrefix, buildBaseName } from "./core/notifications";
 import { discoverRepos, listBranches } from "./core/git";
 import { initWizard, renderWizard, renderWizardPreview, renderWizardStatusBar, handleWizardKey, worktreeDirName } from "./ui/wizard";
+import { loadAllSessions, filterAndRankEntries, type SearchEntry } from "./core/search";
+import { renderSearchResults } from "./ui/search-list";
 import { C } from "./ui/colors";
-import type { DisplayRow, Session, CsmConfig, WizardState, WizardRepo } from "./types";
+import type { DisplayRow, Session, CsmConfig, WizardState, WizardRepo, GlobalSearchState } from "./types";
 import { resolve } from "path";
 import { existsSync, readFileSync } from "fs";
 import { homedir } from "os";
@@ -50,11 +53,9 @@ let wizardLaunching = false;
 // on a key the wizard already consumed (e.g. Escape = cancel, not quit).
 let wizardHandledKey = false;
 
-// Search mode state
-let searchActive = false;
-let searchFilter = "";
-let searchCursor = 0;
-let unfilteredRows: DisplayRow[] = [];
+// Global search state (null = not in search mode)
+let globalSearch: GlobalSearchState | null = null;
+let searchDebounceTimer: ReturnType<typeof setTimeout> | null = null;
 let preSearchIndex = -1; // selection before search started
 
 // Attention type tracking: what kind of transition triggered attention
@@ -87,51 +88,113 @@ function getWindowFlags(session: Session, sessions: Session[]): { hasAttention: 
 
 function updateStatusBar() {
   if (wizardState) return; // Don't overwrite wizard status bar
-  if (searchActive) return; // Don't overwrite search bar
+  if (globalSearch) return; // Don't overwrite search bar
   if (flashTimer) return; // Don't overwrite active flash messages
   renderStatusBar(statusBar, getSelectedSession()?.status, showArchived);
 }
 
 function renderSearchBar() {
-  const text = renderTextWithCursor(searchFilter, searchCursor);
+  if (!globalSearch) return;
+  const text = renderTextWithCursor(globalSearch.query, globalSearch.cursor);
+  const countStr = globalSearch.loading
+    ? "loading…"
+    : `${globalSearch.results.length} result${globalSearch.results.length === 1 ? "" : "s"}`;
   statusBar.setContent(
     `{${C.peach}-fg}/{/${C.peach}-fg} ${text}` +
-    `  {${C.dim}-fg}↑/↓ move  ⏎ select  Esc cancel{/${C.dim}-fg}`,
+    `  {${C.dim}-fg}${countStr}  ↑/↓ move  ⏎ switch/resume  Esc cancel{/${C.dim}-fg}`,
   );
 }
 
 function applySearchFilter() {
-  rows = filterDisplayRows(unfilteredRows, searchFilter);
-  const selectable = getSelectableIndices(rows);
-  if (selectable.length > 0) {
-    // Clamp selection to first match
-    if (!selectable.includes(selectedIndex)) {
-      selectedIndex = selectable[0];
-    }
+  if (!globalSearch) return;
+  globalSearch.results = filterAndRankEntries(globalSearch.entries, globalSearch.query);
+  if (globalSearch.results.length > 0) {
+    globalSearch.selectedIndex = Math.min(globalSearch.selectedIndex, globalSearch.results.length - 1);
   } else {
-    selectedIndex = -1;
+    globalSearch.selectedIndex = 0;
   }
-  saveSelection();
 }
 
-function exitSearch(restoreSelection: boolean) {
-  searchActive = false;
-  searchFilter = "";
-  searchCursor = 0;
-  rows = unfilteredRows;
-  unfilteredRows = [];
-  if (restoreSelection) {
-    selectedIndex = preSearchIndex;
-    // Clamp to valid range
-    const selectable = getSelectableIndices(rows);
-    if (selectable.length > 0 && !selectable.includes(selectedIndex)) {
-      selectedIndex = selectable[0];
-    }
+async function exitSearch() {
+  if (searchDebounceTimer) { clearTimeout(searchDebounceTimer); searchDebounceTimer = null; }
+  globalSearch = null;
+  selectedIndex = preSearchIndex;
+  // Clamp to valid range
+  const selectable = getSelectableIndices(rows);
+  if (selectable.length > 0 && !selectable.includes(selectedIndex)) {
+    selectedIndex = selectable[0];
   }
   saveSelection();
   renderSessionList(listBox, rows, selectedIndex, needsAttention);
   updateStatusBar();
+  // Restore preview for the selected session
+  const selectedRow = getSelectedRow();
+  const archivedSessions = selectedRow?.type === "archive-collapsed" ? selectedRow.sessions : undefined;
+  await safeUpdatePreview(cachedSession, { scrollToBottom: true, archivedSessions });
   screen.render();
+}
+
+/** Get the currently selected search entry (if in search mode) */
+function getSelectedSearchEntry(): SearchEntry | null {
+  if (!globalSearch || globalSearch.results.length === 0) return null;
+  return globalSearch.results[globalSearch.selectedIndex] ?? null;
+}
+
+/** Update preview pane for a search result, with staleness guard */
+async function updateSearchPreview(entry: SearchEntry | null): Promise<void> {
+  if (!entry) {
+    previewBox.setContent("");
+    return;
+  }
+
+  // For active sessions, reuse the existing preview pipeline
+  if (entry.isActive) {
+    const activeSession = allSessions.find((s) => s.id === entry.sessionId);
+    if (activeSession) {
+      await safeUpdatePreview(activeSession, { scrollToBottom: true });
+      return;
+    }
+  }
+
+  // Staleness guard — if selection changed while reading JSONL, discard
+  const gen = ++previewGeneration;
+
+  // Header: repo/branch · summary
+  const boxWidth = typeof previewBox.width === "number" ? previewBox.width : 40;
+  const contentWidth = Math.max(10, boxWidth - 4);
+  const repoHeader = `${entry.repo}/${entry.branch}`;
+  let header = `{${C.muted}-fg}  ${repoHeader}{/${C.muted}-fg}`;
+  if (entry.summary) {
+    const escaped = entry.summary.replace(/\{/g, "{open}").replace(/\}/g, "{close}").replace(/\n/g, " ");
+    const maxLen = Math.max(10, boxWidth - repoHeader.length - 5);
+    const trunc = escaped.length > maxLen ? escaped.slice(0, maxLen - 1) + "\u2026" : escaped;
+    header += ` {${C.dim}-fg}\u00b7{/${C.dim}-fg} {${C.muted}-fg}${trunc}{/${C.muted}-fg}`;
+  }
+
+  // Read messages from JSONL, reusing shared rendering from preview-pane
+  let body = "";
+  if (entry.fullPath) {
+    try {
+      const messages = await readPreviewMessages(entry.fullPath, 3);
+      if (gen !== previewGeneration) return; // stale
+      if (messages.length > 0) {
+        body = messages.map((msg) => renderMessage(msg, contentWidth)).join("\n\n");
+      }
+    } catch {}
+  }
+
+  if (!body && entry.firstPrompt) {
+    const escaped = entry.firstPrompt.replace(/\{/g, "{open}").replace(/\}/g, "{close}");
+    body = `{${C.muted}-fg}${escaped}{/${C.muted}-fg}`;
+  }
+
+  if (!body) {
+    body = `{${C.dim}-fg}No recent output{/${C.dim}-fg}`;
+  }
+
+  if (gen !== previewGeneration) return; // stale
+  previewBox.setContent(`${header}\n\n${body}`);
+  previewBox.setScrollPerc(100);
 }
 
 function flashStatusMessage(msg: string, duration = 2000) {
@@ -173,6 +236,7 @@ async function safeUpdatePreview(
 async function refresh(opts?: { skipArchivedSummaries?: boolean }) {
   if (isRefreshing) return;
   if (wizardState) return; // Don't overwrite wizard UI with session list
+  if (globalSearch) return; // Don't overwrite search UI
   isRefreshing = true;
   try {
     const { sessions, changedPaneIds } = await discoverSessions({
@@ -219,13 +283,6 @@ async function refresh(opts?: { skipArchivedSummaries?: boolean }) {
     }
 
     if (groups.length === 0) {
-      // Empty state — exit search if active
-      if (searchActive) {
-        searchActive = false;
-        searchFilter = "";
-        searchCursor = 0;
-        unfilteredRows = [];
-      }
       listBox.setContent(
         `\n\n\n{center}{${C.muted}-fg}No active sessions{/${C.muted}-fg}{/center}\n\n{center}{${C.dim}-fg}Start one with: claude{/${C.dim}-fg}{/center}`,
       );
@@ -236,27 +293,13 @@ async function refresh(opts?: { skipArchivedSummaries?: boolean }) {
       return;
     }
 
-    const builtRows = buildDisplayRows(groups, showArchived);
-
-    // When search is active, update unfiltered + reapply filter
-    if (searchActive) {
-      unfilteredRows = builtRows;
-      rows = filterDisplayRows(unfilteredRows, searchFilter);
-    } else {
-      rows = builtRows;
-    }
+    rows = buildDisplayRows(groups, showArchived);
 
     const selectable = getSelectableIndices(rows);
 
     if (selectable.length === 0) {
-      selectedIndex = searchActive ? -1 : -1;
+      selectedIndex = -1;
       cachedSession = null;
-    } else if (searchActive) {
-      // During search, clamp to first selectable if current is invalid
-      if (!selectable.includes(selectedIndex)) {
-        selectedIndex = selectable[0];
-      }
-      saveSelection();
     } else if (selectedIndex < 0) {
       // First load — pre-select focused pane if provided, else first session
       if (focusPaneId) {
@@ -310,11 +353,7 @@ async function refresh(opts?: { skipArchivedSummaries?: boolean }) {
 
     const isInitial = !refreshTimer;
     renderSessionList(listBox, rows, selectedIndex, needsAttention);
-    if (searchActive) {
-      renderSearchBar();
-    } else {
-      updateStatusBar();
-    }
+    updateStatusBar();
     const selectedRow = getSelectedRow();
     const archivedSessions = selectedRow?.type === "archive-collapsed" ? selectedRow.sessions : undefined;
     const isCurrent = await safeUpdatePreview(cachedSession, { scrollToBottom: isInitial, archivedSessions });
@@ -505,16 +544,16 @@ function cleanup() {
 }
 
 // Key bindings (guarded: no-op when wizard or search is active)
-screen.key(["j", "down"], () => { if (wizardState || searchActive) return; handleSelect(1); });
-screen.key(["k", "up"], () => { if (wizardState || searchActive) return; handleSelect(-1); });
-screen.key(["S-j"], () => { if (wizardState || searchActive) return; handleGroupSelect(1); });
-screen.key(["S-k"], () => { if (wizardState || searchActive) return; handleGroupSelect(-1); });
-screen.key(["enter"], () => { if (wizardState || wizardHandledKey || searchActive) return; handleEnterContextual(); });
-screen.key(["r"], () => { if (wizardState || searchActive) return; refresh(); });
-screen.key(["x"], () => { if (wizardState || searchActive) return; handleKill(); });
-screen.key(["f"], () => { if (wizardState || searchActive) return; handleFork(); });
+screen.key(["j", "down"], () => { if (wizardState || globalSearch) return; handleSelect(1); });
+screen.key(["k", "up"], () => { if (wizardState || globalSearch) return; handleSelect(-1); });
+screen.key(["S-j"], () => { if (wizardState || globalSearch) return; handleGroupSelect(1); });
+screen.key(["S-k"], () => { if (wizardState || globalSearch) return; handleGroupSelect(-1); });
+screen.key(["enter"], () => { if (wizardState || wizardHandledKey || globalSearch) return; handleEnterContextual(); });
+screen.key(["r"], () => { if (wizardState || globalSearch) return; refresh(); });
+screen.key(["x"], () => { if (wizardState || globalSearch) return; handleKill(); });
+screen.key(["f"], () => { if (wizardState || globalSearch) return; handleFork(); });
 screen.key(["c"], async () => {
-  if (wizardState || searchActive) return;
+  if (wizardState || globalSearch) return;
   const session = getSelectedSession();
   if (!session?.repoPath) {
     flashStatusMessage(`{${C.dim}-fg}No repo path{/${C.dim}-fg}`);
@@ -528,7 +567,7 @@ screen.key(["c"], async () => {
   }
 });
 screen.key(["s"], () => {
-  if (wizardState || searchActive) return;
+  if (wizardState || globalSearch) return;
   const session = getSelectedSession();
   if (!session || !session.firstPrompt) {
     flashStatusMessage(`{${C.dim}-fg}No prompt to generate name from{/${C.dim}-fg}`);
@@ -554,12 +593,12 @@ screen.key(["s"], () => {
   });
 });
 screen.key(["a"], () => {
-  if (wizardState || searchActive) return;
+  if (wizardState || globalSearch) return;
   showArchived = !showArchived;
   refresh();
 });
 screen.key(["y"], async () => {
-  if (wizardState || searchActive) return;
+  if (wizardState || globalSearch) return;
   const text = getPreviewPlainText();
   if (!text) {
     flashStatusMessage(`{${C.dim}-fg}Nothing to copy{/${C.dim}-fg}`);
@@ -576,29 +615,29 @@ screen.key(["y"], async () => {
   }
 });
 screen.key(["u"], () => {
-  if (wizardState || searchActive) return;
+  if (wizardState || globalSearch) return;
   previewBox.scroll(-6);
   screen.render();
 });
 screen.key(["d"], () => {
-  if (wizardState || searchActive) return;
+  if (wizardState || globalSearch) return;
   previewBox.scroll(6);
   screen.render();
 });
 screen.key(["q"], () => {
-  if (wizardState || wizardHandledKey || searchActive) return;
+  if (wizardState || wizardHandledKey || globalSearch) return;
   cleanup();
   process.exit(0);
 });
 screen.key(["escape"], () => {
-  if (wizardState || wizardHandledKey || searchActive) return;
+  if (wizardState || wizardHandledKey || globalSearch) return;
   cleanup();
   process.exit(0);
 });
 
 // Quick new session in selected repo (`N` / Shift+N)
 screen.key(["S-n"], async () => {
-  if (wizardState || searchActive) return;
+  if (wizardState || globalSearch) return;
 
   const session = getSelectedSession();
   if (!session?.repoPath) {
@@ -606,7 +645,7 @@ screen.key(["S-n"], async () => {
     return;
   }
 
-  const repoPath = session.baseRepoPath || session.repoPath;
+  const repoPath = session.repoPath;
   const repoName = repoPath.split("/").pop() || "repo";
 
   // Get current branch
@@ -627,7 +666,7 @@ screen.key(["S-n"], async () => {
 
 // New Session wizard (`n` key)
 screen.key(["n"], async () => {
-  if (wizardState || searchActive) return;
+  if (wizardState || globalSearch) return;
 
   // Pause refresh loop
   if (refreshTimer) { clearInterval(refreshTimer); refreshTimer = null; }
@@ -678,99 +717,154 @@ screen.key(["n"], async () => {
 // keypress handler from also processing `/` as text input in the same event.
 let searchJustActivated = false;
 
-// `/` key activates search mode
+// `/` key activates global search mode
 screen.on("keypress", (_ch: string, key: any) => {
-  if (!key || wizardState || searchActive) return;
+  if (!key || wizardState || globalSearch) return;
   if (_ch === "/" && !key.ctrl && !key.meta) {
-    searchActive = true;
-    searchFilter = "";
-    searchCursor = 0;
     preSearchIndex = selectedIndex;
-    unfilteredRows = [...rows];
+    globalSearch = {
+      query: "",
+      cursor: 0,
+      entries: [],
+      results: [],
+      selectedIndex: 0,
+      loading: true,
+    };
     searchJustActivated = true;
     queueMicrotask(() => { searchJustActivated = false; });
+
+    // Show loading state
+    listBox.setContent(
+      `\n\n\n{center}{${C.muted}-fg}Loading sessions…{/${C.muted}-fg}{/center}`,
+    );
     renderSearchBar();
     screen.render();
+
+    // Load all sessions asynchronously
+    loadAllSessions(nameCache, allSessions).then((entries) => {
+      if (!globalSearch) return; // exited search while loading
+      globalSearch.entries = entries;
+      globalSearch.loading = false;
+      globalSearch.results = filterAndRankEntries(entries, globalSearch.query);
+      renderSearchResults(listBox, globalSearch.results, globalSearch.selectedIndex);
+      renderSearchBar();
+      // Update preview for first result
+      updateSearchPreview(getSelectedSearchEntry());
+      screen.render();
+    });
   }
 });
 
+/** Handle search result selection: switch to active or resume archived */
+async function handleSearchEnter() {
+  const entry = getSelectedSearchEntry();
+  if (!entry) return;
+
+  if (entry.isActive && entry.activePaneId && entry.activeSessionName != null && entry.activeWindowIndex != null) {
+    const paneId = entry.activePaneId;
+    const sessionName = entry.activeSessionName;
+    const windowIndex = entry.activeWindowIndex;
+
+    // Clear attention for this pane
+    needsAttention.delete(paneId);
+    attentionTypes.delete(paneId);
+
+    // Find matching session to sync window prefix
+    const session = allSessions.find((s) => s.id === entry.sessionId);
+    if (session) {
+      const flags = getWindowFlags(session, allSessions);
+      await syncWindowPrefix(sessionName, windowIndex,
+        flags.hasAttention, session.status === "running" || flags.hasRunning);
+    }
+
+    // Clear attention in state.json
+    const freshState = await loadState();
+    if (freshState.sessions[paneId]) {
+      freshState.sessions[paneId].needsAttention = false;
+      freshState.sessions[paneId].attentionType = undefined;
+      freshState.lastUpdatedAt = Date.now();
+      await saveState(freshState);
+    }
+
+    globalSearch = null;
+    cleanup();
+    await switchToPane(paneId, sessionName, windowIndex);
+    process.exit(0);
+    return;
+  }
+
+  // Archived session: resume in new tmux window
+  const targetSession = await getMainSession();
+  if (!targetSession) return;
+
+  // Determine directory: use base repo if worktree is deleted
+  const effectivePath = entry.isDeletedWorktree ? entry.baseRepoPath : entry.projectPath;
+  const repoName = entry.repo;
+
+  globalSearch = null;
+  cleanup();
+  try {
+    const cmd = `claude --resume=${entry.sessionId}; exec zsh -l`;
+    await Bun.$`tmux new-window -a -t ${targetSession} -n ${repoName} -c ${effectivePath} zsh -c ${cmd}`.quiet();
+  } catch {
+    // ignore
+  }
+  process.exit(0);
+}
+
 // Search keypress handler (intercepts all keys when search is active)
 screen.on("keypress", async (_ch: string, key: any) => {
-  if (!searchActive || !key || searchJustActivated) return;
+  if (!globalSearch || !key || searchJustActivated) return;
 
   const keyName = key.full || key.name || "";
   const ch = _ch || "";
 
   if (keyName === "escape") {
-    exitSearch(true);
+    exitSearch();
     return;
   }
 
   if (keyName === "enter" || keyName === "return") {
-    const row = getSelectedRow();
-    if (row?.type === "archive-collapsed") {
-      // Expand archives: exit search and show all
-      exitSearch(false);
-      showArchived = true;
-      await refresh();
-      return;
-    }
-    const session = getSelectedSession();
-    if (session) {
-      // Exit search, keep filtered selection, then switch/resume
-      searchActive = false;
-      searchFilter = "";
-      searchCursor = 0;
-      rows = unfilteredRows;
-      unfilteredRows = [];
-
-      if (session.status === "archived") {
-        await handleResume();
-      } else {
-        await handleEnter();
-      }
-    }
+    await handleSearchEnter();
     return;
   }
 
   if (keyName === "up") {
-    if (rows.length > 0) {
-      selectedIndex = moveSelection(rows, selectedIndex, -1);
-      saveSelection();
-      renderSessionList(listBox, rows, selectedIndex, needsAttention);
-      const selectedRow = getSelectedRow();
-      const archivedSessions = selectedRow?.type === "archive-collapsed" ? selectedRow.sessions : undefined;
-      await safeUpdatePreview(cachedSession, { scrollToBottom: true, archivedSessions });
+    if (globalSearch.results.length > 0) {
+      globalSearch.selectedIndex = Math.max(0, globalSearch.selectedIndex - 1);
+      renderSearchResults(listBox, globalSearch.results, globalSearch.selectedIndex);
+      await updateSearchPreview(getSelectedSearchEntry());
       screen.render();
     }
     return;
   }
 
   if (keyName === "down") {
-    if (rows.length > 0) {
-      selectedIndex = moveSelection(rows, selectedIndex, 1);
-      saveSelection();
-      renderSessionList(listBox, rows, selectedIndex, needsAttention);
-      const selectedRow = getSelectedRow();
-      const archivedSessions = selectedRow?.type === "archive-collapsed" ? selectedRow.sessions : undefined;
-      await safeUpdatePreview(cachedSession, { scrollToBottom: true, archivedSessions });
+    if (globalSearch.results.length > 0) {
+      globalSearch.selectedIndex = Math.min(globalSearch.results.length - 1, globalSearch.selectedIndex + 1);
+      renderSearchResults(listBox, globalSearch.results, globalSearch.selectedIndex);
+      await updateSearchPreview(getSelectedSearchEntry());
       screen.render();
     }
     return;
   }
 
   // All other keys go to text input
-  const result = handleTextInputKey(searchFilter, searchCursor, keyName, ch);
+  const result = handleTextInputKey(globalSearch.query, globalSearch.cursor, keyName, ch);
   if (result.handled) {
-    const changed = result.text !== searchFilter;
-    searchFilter = result.text;
-    searchCursor = result.cursor;
+    const changed = result.text !== globalSearch.query;
+    globalSearch.query = result.text;
+    globalSearch.cursor = result.cursor;
     if (changed) {
-      applySearchFilter();
-      renderSessionList(listBox, rows, selectedIndex, needsAttention);
-      const selectedRow = getSelectedRow();
-      const archivedSessions = selectedRow?.type === "archive-collapsed" ? selectedRow.sessions : undefined;
-      await safeUpdatePreview(cachedSession, { scrollToBottom: true, archivedSessions });
+      // Debounce filter/rank
+      if (searchDebounceTimer) clearTimeout(searchDebounceTimer);
+      searchDebounceTimer = setTimeout(() => {
+        if (!globalSearch) return;
+        applySearchFilter();
+        renderSearchResults(listBox, globalSearch.results, globalSearch.selectedIndex);
+        updateSearchPreview(getSelectedSearchEntry());
+        screen.render();
+      }, 100);
     }
     renderSearchBar();
     screen.render();

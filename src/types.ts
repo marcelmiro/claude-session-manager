@@ -159,6 +159,20 @@ export type WizardAction =
   | { type: "loadBranches" }
   | { type: "launch"; repo: WizardRepo; branch: WizardBranch; worktreeName: string };
 
+// --- Global search types ---
+
+export interface GlobalSearchState {
+  query: string;
+  cursor: number;
+  entries: SearchEntryRef[];  // all loaded entries (cached for search session)
+  results: SearchEntryRef[];  // filtered/ranked subset (max 50)
+  selectedIndex: number;
+  loading: boolean;
+}
+
+// Forward ref — actual type lives in core/search.ts to avoid circular deps
+export type SearchEntryRef = import("./core/search").SearchEntry;
+
 export interface CsmConfig {
   statusMonitor: boolean;
   windowPrefix: boolean;
