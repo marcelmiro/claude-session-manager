@@ -130,7 +130,7 @@ export interface WizardBranch {
   fullRef: string;     // original ref
 }
 
-export type WizardStep = "repo" | "branch" | "worktree";
+export type WizardStep = "repo" | "branch" | "worktree-choice" | "worktree";
 
 export interface WizardState {
   step: WizardStep;
@@ -144,6 +144,7 @@ export interface WizardState {
   branchFilterCursor: number;
   branchFilterActive: boolean;
   selectedBranch: WizardBranch | null;
+  worktreeChoiceIndex: number; // 0 = switch/checkout, 1 = new worktree
   worktreeName: string;        // text input: new branch name for worktree (empty = no worktree)
   worktreeNameCursor: number;
   enterDebounceUntil: number;  // timestamp (ms) — ignore Enter until this time (prevents double-fire on step transition)

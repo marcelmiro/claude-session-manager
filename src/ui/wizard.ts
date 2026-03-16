@@ -35,6 +35,7 @@ export function initWizard(
     branchFilterCursor: 0,
     branchFilterActive: false,
     selectedBranch: null,
+    worktreeChoiceIndex: 0,
     worktreeName: "",
     worktreeNameCursor: 0,
     enterDebounceUntil: 0,
@@ -64,6 +65,8 @@ export function renderWizard(listBox: Widgets.BoxElement, state: WizardState): v
     renderRepoStep(lines, listBox, state);
   } else if (state.step === "branch") {
     renderBranchStep(lines, listBox, state);
+  } else if (state.step === "worktree-choice") {
+    renderWorktreeChoiceStep(lines, state);
   } else if (state.step === "worktree") {
     renderWorktreeStep(lines, state);
   }
@@ -89,6 +92,7 @@ function getSelectedLine(state: WizardState): number {
   if (state.step === "branch") {
     return headerLines + 1 + state.branchIndex; // +1 for always-visible filter bar
   }
+  if (state.step === "worktree-choice") return headerLines + state.worktreeChoiceIndex;
   if (state.step === "worktree") return headerLines + 2; // instruction + blank + input line
   return -1;
 }
@@ -185,11 +189,51 @@ function renderBranchStep(lines: string[], _listBox: Widgets.BoxElement, state: 
   }
 }
 
+function renderWorktreeChoiceStep(lines: string[], state: WizardState): void {
+  const branch = state.selectedBranch!;
+  const repo = state.selectedRepo!;
+
+  const choices = getWorktreeChoices(branch, repo);
+
+  for (let i = 0; i < choices.length; i++) {
+    const isSelected = i === state.worktreeChoiceIndex;
+    const cursor = isSelected ? `{${C.peach}-fg}▸{/${C.peach}-fg}` : " ";
+    const dot = isSelected ? "●" : "○";
+    const label = choices[i].label;
+    const hint = choices[i].hint;
+
+    if (isSelected) {
+      lines.push(
+        `{${C.surface}-bg} ${cursor} ${dot} {bold}{${C.fg}-fg}${label}{/${C.fg}-fg}{/bold}` +
+        `  {${C.dim}-fg}${hint}{/${C.dim}-fg}{/${C.surface}-bg}`,
+      );
+    } else {
+      lines.push(
+        ` ${cursor} {${C.dim}-fg}${dot}{/${C.dim}-fg} {${C.muted}-fg}${label}{/${C.muted}-fg}` +
+        `  {${C.dim}-fg}${hint}{/${C.dim}-fg}`,
+      );
+    }
+  }
+}
+
+function getWorktreeChoices(branch: WizardBranch, repo: WizardRepo): Array<{ label: string; hint: string }> {
+  if (branch.isRemote) {
+    return [
+      { label: "Checkout locally", hint: `create local ${branch.name} tracking origin` },
+      { label: "New worktree", hint: `new branch off origin/${branch.name}` },
+    ];
+  }
+  return [
+    { label: "Switch branch", hint: `checkout ${branch.name}` },
+    { label: "New worktree", hint: `worktree on ${branch.name}` },
+  ];
+}
+
 function renderWorktreeStep(lines: string[], state: WizardState): void {
   const repo = state.selectedRepo!;
   const branch = state.selectedBranch!;
 
-  lines.push(`  {${C.muted}-fg}Worktree branch name {${C.dim}-fg}(Enter to skip){/${C.dim}-fg}:{/${C.muted}-fg}`);
+  lines.push(`  {${C.muted}-fg}New branch name:{/${C.muted}-fg}`);
   lines.push("");
   lines.push(`{${C.surface}-bg}  {${C.peach}-fg}>{/${C.peach}-fg} ${renderTextWithCursor(state.worktreeName, state.worktreeNameCursor)}{/${C.surface}-bg}`);
 
@@ -201,13 +245,7 @@ function renderWorktreeStep(lines: string[], state: WizardState): void {
     lines.push(`  {${C.dim}-fg}Command:{/${C.dim}-fg} {${C.mint}-fg}git worktree add ${wtPath} -b ${state.worktreeName} ${baseRef}{/${C.mint}-fg}`);
   } else {
     lines.push("");
-    if (branch.isCurrent) {
-      lines.push(`  {${C.dim}-fg}Will launch claude in ${repo.name}{/${C.dim}-fg}`);
-    } else if (branch.isRemote) {
-      lines.push(`  {${C.dim}-fg}Will checkout ${branch.name} from origin and launch claude{/${C.dim}-fg}`);
-    } else {
-      lines.push(`  {${C.dim}-fg}Will checkout ${branch.name} and launch claude{/${C.dim}-fg}`);
-    }
+    lines.push(`  {${C.dim}-fg}Type a branch name to create a worktree{/${C.dim}-fg}`);
   }
 }
 
@@ -240,6 +278,43 @@ export async function renderWizardPreview(previewBox: Widgets.BoxElement, state:
     return;
   }
 
+  if (state.step === "worktree-choice") {
+    const repo = state.selectedRepo!;
+    const branch = state.selectedBranch!;
+    const lines: string[] = [
+      `{${C.muted}-fg}  Summary{/${C.muted}-fg}`,
+      "",
+      `  {${C.dim}-fg}Repo:{/${C.dim}-fg}   {${C.fg}-fg}${repo.name}{/${C.fg}-fg}`,
+      `  {${C.dim}-fg}Base:{/${C.dim}-fg}   {${C.fg}-fg}${branch.fullRef}{/${C.fg}-fg}`,
+    ];
+
+    if (state.worktreeChoiceIndex === 0) {
+      // Switch/checkout preview
+      if (branch.isRemote) {
+        lines.push(
+          "",
+          `  {${C.dim}-fg}Command:{/${C.dim}-fg}`,
+          `  {${C.mint}-fg}git checkout -b ${branch.name} --track origin/${branch.name}{/${C.mint}-fg}`,
+        );
+      } else {
+        lines.push(
+          "",
+          `  {${C.dim}-fg}Command:{/${C.dim}-fg}`,
+          `  {${C.mint}-fg}git checkout ${branch.name}{/${C.mint}-fg}`,
+        );
+      }
+    } else {
+      // Worktree preview
+      const baseRef = branch.isRemote ? `origin/${branch.name}` : branch.name;
+      lines.push(
+        "",
+        `  {${C.dim}-fg}Will create a new worktree off ${baseRef}{/${C.dim}-fg}`,
+      );
+    }
+
+    previewBox.setContent(lines.join("\n"));
+  }
+
   if (state.step === "worktree") {
     const repo = state.selectedRepo!;
     const branch = state.selectedBranch!;
@@ -247,8 +322,7 @@ export async function renderWizardPreview(previewBox: Widgets.BoxElement, state:
       `{${C.muted}-fg}  Summary{/${C.muted}-fg}`,
       "",
       `  {${C.dim}-fg}Repo:{/${C.dim}-fg}   {${C.fg}-fg}${repo.name}{/${C.fg}-fg}`,
-      `  {${C.dim}-fg}Base:{/${C.dim}-fg}   {${C.fg}-fg}${branch.name}{/${C.fg}-fg}` +
-        (branch.isRemote ? ` {${C.dim}-fg}(remote){/${C.dim}-fg}` : ""),
+      `  {${C.dim}-fg}Base:{/${C.dim}-fg}   {${C.fg}-fg}${branch.fullRef}{/${C.fg}-fg}`,
     ];
 
     if (state.worktreeName) {
@@ -260,11 +334,10 @@ export async function renderWizardPreview(previewBox: Widgets.BoxElement, state:
         `  {${C.dim}-fg}Command:{/${C.dim}-fg}`,
         `  {${C.mint}-fg}git worktree add ${wtPath} -b ${state.worktreeName} ${baseRef}{/${C.mint}-fg}`,
       );
-    } else if (!branch.isCurrent) {
+    } else {
       lines.push(
         "",
-        `  {${C.dim}-fg}Command:{/${C.dim}-fg}`,
-        `  {${C.mint}-fg}git checkout ${branch.isRemote ? `-b ${branch.name} --track origin/${branch.name}` : branch.name}{/${C.mint}-fg}`,
+        `  {${C.dim}-fg}Enter a branch name for the worktree{/${C.dim}-fg}`,
       );
     }
 
@@ -289,6 +362,11 @@ export function renderWizardStatusBar(statusBar: Widgets.BoxElement, state: Wiza
       `  {${C.peach}-fg}type{/${C.peach}-fg} {${C.dim}-fg}to filter{/${C.dim}-fg}` +
       `  {${C.peach}-fg}\u23CE{/${C.peach}-fg} {${C.dim}-fg}select{/${C.dim}-fg}` +
       `  {${C.peach}-fg}Esc{/${C.peach}-fg} {${C.dim}-fg}back{/${C.dim}-fg}`;
+  } else if (state.step === "worktree-choice") {
+    content =
+      `{${C.peach}-fg}j/k{/${C.peach}-fg} {${C.dim}-fg}move{/${C.dim}-fg}` +
+      `  {${C.peach}-fg}\u23CE{/${C.peach}-fg} {${C.dim}-fg}select{/${C.dim}-fg}` +
+      `  {${C.peach}-fg}Esc{/${C.peach}-fg} {${C.dim}-fg}back{/${C.dim}-fg}`;
   } else if (state.step === "worktree") {
     content =
       `{${C.peach}-fg}type{/${C.peach}-fg} {${C.dim}-fg}branch name{/${C.dim}-fg}` +
@@ -306,8 +384,9 @@ export function handleWizardKey(state: WizardState, keyName: string, ch: string)
   if (state.step === "repo") {
     return handleRepoKey(state, keyName);
   } else if (state.step === "branch") {
-    // Always use filter handler — branch step is searchable by default (fzf-style)
     return handleBranchFilterKey(state, keyName, ch);
+  } else if (state.step === "worktree-choice") {
+    return handleWorktreeChoiceKey(state, keyName);
   } else if (state.step === "worktree") {
     return handleWorktreeKey(state, keyName, ch);
   }
@@ -378,9 +457,13 @@ function handleBranchFilterKey(state: WizardState, keyName: string, ch: string):
       const branch = state.filteredBranches[state.branchIndex];
       state.selectedBranch = branch;
 
-      state.step = "worktree";
-      state.worktreeName = "";
-      state.worktreeNameCursor = 0;
+      if (branch.isCurrent) {
+        // Current branch: launch directly, no chooser needed
+        return { type: "launch", repo: state.selectedRepo!, branch, worktreeName: "" };
+      }
+
+      state.step = "worktree-choice";
+      state.worktreeChoiceIndex = 0;
       state.enterDebounceUntil = Date.now() + 100;
       return { type: "render" };
     }
@@ -432,30 +515,65 @@ function scoreBranchMatch(branch: WizardBranch, filter: string): number {
   return 0;
 }
 
+function handleWorktreeChoiceKey(state: WizardState, keyName: string): WizardAction {
+  switch (keyName) {
+    case "j":
+    case "down":
+      state.worktreeChoiceIndex = Math.min(state.worktreeChoiceIndex + 1, 1);
+      return { type: "render" };
+    case "k":
+    case "up":
+      state.worktreeChoiceIndex = Math.max(state.worktreeChoiceIndex - 1, 0);
+      return { type: "render" };
+    case "enter":
+    case "return": {
+      if (Date.now() < state.enterDebounceUntil) return { type: "noop" };
+      const branch = state.selectedBranch!;
+      const repo = state.selectedRepo!;
+
+      if (state.worktreeChoiceIndex === 0) {
+        // Switch branch / Checkout locally → launch directly
+        return { type: "launch", repo, branch, worktreeName: "" };
+      }
+
+      // New worktree → advance to name input
+      state.step = "worktree";
+      // Prefill: local branch name for local, blank for remote
+      const prefill = branch.isRemote ? "" : branch.name;
+      state.worktreeName = prefill;
+      state.worktreeNameCursor = prefill.length;
+      state.enterDebounceUntil = Date.now() + 100;
+      return { type: "render" };
+    }
+    case "escape":
+      // Back to branch step
+      state.step = "branch";
+      state.selectedBranch = null;
+      state.worktreeChoiceIndex = 0;
+      state.branchFilterActive = true;
+      return { type: "preview" };
+    default:
+      return { type: "noop" };
+  }
+}
+
 function handleWorktreeKey(state: WizardState, keyName: string, ch: string): WizardAction {
   // Step-specific keys first
   switch (keyName) {
     case "enter":
     case "return": {
-      // Ignore Enter events that arrive within 100ms of step transition (prevents double-fire)
-      if (Date.now() < state.enterDebounceUntil) {
-        return { type: "noop" };
-      }
+      if (Date.now() < state.enterDebounceUntil) return { type: "noop" };
+      if (!state.worktreeName.trim()) return { type: "noop" };
       const repo = state.selectedRepo!;
       const branch = state.selectedBranch!;
       return { type: "launch", repo, branch, worktreeName: state.worktreeName };
     }
     case "escape":
-      // Go back to branch step with filter active
-      state.step = "branch";
-      state.selectedBranch = null;
+      // Go back to worktree-choice step
+      state.step = "worktree-choice";
       state.worktreeName = "";
       state.worktreeNameCursor = 0;
-      state.branchFilterActive = true;
-      state.branchFilter = "";
-      state.branchFilterCursor = 0;
-      state.filteredBranches = state.branches;
-      return { type: "preview" };
+      return { type: "render" };
   }
 
   // Centralized text input handling (only valid git branch chars)
