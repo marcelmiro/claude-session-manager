@@ -158,12 +158,14 @@ async function main(): Promise<void> {
     loadNameCache(),
   ]);
 
-  // Auto-clear: sync prefix on the window the user is currently viewing.
-  // Clears ⚡ for the focused pane but preserves 🔄 if other panes are running.
-  // Cost: ~6ms (two lightweight tmux queries), negligible vs 5s status-interval.
+  // Auto-clear: sync prefix on the window the user is currently viewing,
+  // but ONLY when the terminal is actually focused (Ghostty frontmost).
+  // When the terminal is in the background, the user isn't looking — keep
+  // attention flags and ⚡ prefix so notifications still fire.
   let activePaneId: string | undefined;
   let activeWindow: string | undefined;
   let activeSession: string | undefined;
+  let terminalFocused = false;
   try {
     const client = (await Bun.$`tmux list-clients -F '#{client_name}'`.quiet().text()).trim().split("\n")[0];
     if (client) {
@@ -176,8 +178,17 @@ async function main(): Promise<void> {
       activeSession = info.slice(colonIdx2 + 1, colonIdx3);
       const activeWindowName = info.slice(colonIdx3 + 1);
 
-      // Sync prefix on active window — clear ⚡ for focused pane, preserve 🔄 for running panes
-      if (activeWindowName?.startsWith(ATTENTION_PREFIX)) {
+      // Check if the terminal is actually focused (Ghostty frontmost)
+      try {
+        const frontApp = (await Bun.$`osascript -e 'tell application "System Events" to return name of first application process whose frontmost is true'`.quiet().text()).trim().toLowerCase();
+        terminalFocused = frontApp === "ghostty";
+      } catch {
+        // Can't determine — assume focused to preserve existing behavior
+        terminalFocused = true;
+      }
+
+      // Only auto-clear ⚡ when the user is actually looking at the terminal
+      if (terminalFocused && activeWindowName?.startsWith(ATTENTION_PREFIX)) {
         const otherPanesHaveAttention = Object.values(state.sessions).some(
           (s) =>
             s.needsAttention &&
@@ -254,18 +265,20 @@ async function main(): Promise<void> {
     }
   }
 
-  // Add new attention from transitions (exclude active pane — user is already looking at it,
-  // and flaky status detection can cause running↔ready oscillation that re-adds attention)
+  // Add new attention from transitions. Exclude the active pane only when the
+  // terminal is focused — the user is actually looking at it. When unfocused,
+  // the active pane should still get attention + notifications.
   const notable = transitions.filter(
-    (e) => e.classification !== "none" && e.sessionKey !== activePaneId,
+    (e) => e.classification !== "none" && !(terminalFocused && e.sessionKey === activePaneId),
   );
   for (const event of notable) {
     needsAttention.add(event.sessionKey);
     attentionTypes.set(event.sessionKey, event.classification as "blocked" | "turnComplete");
   }
 
-  // Clear attention for the specific pane the user is focused on (not the whole window)
-  if (activePaneId) {
+  // Clear attention for the specific pane the user is focused on, but only
+  // when the terminal is focused — otherwise the user isn't actually looking
+  if (activePaneId && terminalFocused) {
     needsAttention.delete(activePaneId);
     attentionTypes.delete(activePaneId);
   }
@@ -470,6 +483,11 @@ async function phase2(
     await saveNamingSkips(namingSkips);
   }
 }
+
+// Safety net: force-exit after 20s to prevent blocking tmux's #() command.
+// If phase2 (AI naming via claude -p) hangs, tmux won't start new monitor
+// invocations and the status bar goes stale.
+setTimeout(() => process.exit(0), 20_000).unref();
 
 main().catch(() => {
   // Never crash — just output nothing

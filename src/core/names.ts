@@ -88,7 +88,11 @@ ${contextParts.join("\n")}`;
       stderr: "ignore",
       env: { ...process.env, TMUX: "", TMUX_PANE: "" },
     });
+    // Kill subprocess after 15s to prevent hanging the monitor process
+    // (tmux #() only runs one instance — a hung claude -p blocks all future polls)
+    const killTimer = setTimeout(() => proc.kill(), 15_000);
     const result = await new Response(proc.stdout).text();
+    clearTimeout(killTimer);
     const name = result.trim().toLowerCase().replace(/[^a-z0-9-]/g, "").replace(/-+/g, "-").replace(/^-|-$/g, "");
     return name.length > 0 && name.length <= 25 ? name : "";
   } catch {
