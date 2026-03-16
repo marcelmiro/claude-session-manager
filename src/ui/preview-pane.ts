@@ -2,16 +2,30 @@ import { homedir } from "os";
 import type { Widgets } from "blessed";
 import type { Session } from "../types";
 
-import { capturePane } from "../core/tmux";
-import { readSessionTail } from "../core/sessions";
+import { readPreviewMessages, type PreviewMessage } from "../core/jsonl-reader";
 import { formatTimeAgo } from "../core/status";
+import { markdownToBlessed } from "./markdown";
 import { C } from "./colors";
 
 function encodeProjectPath(projectPath: string): string {
   return projectPath.replace(/\//g, "-");
 }
 
-// -- ANSI → blessed color conversion --
+/** Escape blessed tag characters in text */
+function esc(text: string): string {
+  return text.replace(/\{/g, "{open}").replace(/\}/g, "{close}");
+}
+
+// -- Plain text extraction (for clipboard copy) --
+
+/** Last preview content as plain text (markdown source) */
+let lastPlainText = "";
+
+export function getPreviewPlainText(): string {
+  return lastPlainText;
+}
+
+// -- ANSI → blessed (kept for non-JSONL contexts like wizard preview) --
 
 const BASIC_COLORS = [
   "#000000", "#AA0000", "#00AA00", "#AA5500",
@@ -67,23 +81,17 @@ function closeTags(s: TermStyle): string {
   return t;
 }
 
-/** Strip non-SGR ANSI sequences (cursor movement, clearing, OSC, etc.) while preserving SGR (\x1b[...m) */
 function stripNonSgrAnsi(text: string): string {
   return text
-    // Strip all CSI sequences EXCEPT SGR (final byte 'm')
     .replace(/\x1b\[([0-9;?]*)([\x40-\x7e])/g, (match, _params, final) =>
       final === "m" ? match : "",
     )
-    .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, "")      // OSC
-    .replace(/\x1b[()][0-9A-Za-z]/g, "")                     // Charset
-    .replace(/\x1b(?!\[)[\x20-\x2f]*[\x30-\x7e]/g, "")      // Other non-CSI escapes ((?!\[) avoids CSI)
-    .replace(/[\x00-\x08\x0b\x0c\x0e-\x1a\x1c-\x1f\x7f]/g, ""); // Control chars (keep \x1b for SGR)
+    .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, "")
+    .replace(/\x1b[()][0-9A-Za-z]/g, "")
+    .replace(/\x1b(?!\[)[\x20-\x2f]*[\x30-\x7e]/g, "")
+    .replace(/[\x00-\x08\x0b\x0c\x0e-\x1a\x1c-\x1f\x7f]/g, "");
 }
 
-/**
- * Process a single SGR parameter sequence, emit blessed close/open tags,
- * and mutate `state` to reflect the new terminal style.
- */
 function processSgr(params: string, state: TermStyle): string {
   const codes = params === "" ? [0] : params.split(";").map(Number);
   let out = "";
@@ -93,7 +101,6 @@ function processSgr(params: string, state: TermStyle): string {
     const c = codes[i];
 
     if (c === 0) {
-      // Reset all
       out += closeTags(state);
       state.fg = state.bg = null;
       state.bold = state.italic = false;
@@ -130,7 +137,6 @@ function processSgr(params: string, state: TermStyle): string {
       state.bg = hex;
       out += `{${hex}-bg}`;
     } else if (c === 38 || c === 48) {
-      // Extended color: 38;2;R;G;B (24-bit) or 38;5;N (256-color)
       const isFg = c === 38;
       if (codes[i + 1] === 2 && i + 4 < codes.length) {
         const hex = rgbToHex(codes[i + 2], codes[i + 3], codes[i + 4]);
@@ -165,12 +171,6 @@ function processSgr(params: string, state: TermStyle): string {
   return out;
 }
 
-/**
- * Convert a line of text containing ANSI SGR codes into blessed markup.
- * `state` is mutated to carry over the style to the next line.
- * Each line is self-contained (tags are opened at start and closed at end)
- * so lines can be freely sliced for bottom-alignment.
- */
 function convertLine(line: string, state: TermStyle): string {
   const parts = line.split(/(\x1b\[[0-9;]*m)/);
   let result = openTags(state);
@@ -178,11 +178,9 @@ function convertLine(line: string, state: TermStyle): string {
   for (const part of parts) {
     const sgr = part.match(/^\x1b\[([0-9;]*)m$/);
     if (!sgr) {
-      // Plain text — escape braces so blessed doesn't interpret them
       result += part.replace(/\{/g, "{open}").replace(/\}/g, "{close}");
       continue;
     }
-    // processSgr handles closing old tags and opening new ones
     result += processSgr(sgr[1], state);
   }
 
@@ -190,10 +188,6 @@ function convertLine(line: string, state: TermStyle): string {
   return result;
 }
 
-/**
- * Convert ANSI-colored terminal output into blessed tag markup.
- * Each output line is self-contained so slicing for bottom-alignment is safe.
- */
 export function ansiToBlessedMarkup(text: string): string {
   const cleaned = stripNonSgrAnsi(text);
   const lines = cleaned.split("\n");
@@ -201,105 +195,97 @@ export function ansiToBlessedMarkup(text: string): string {
   return lines.map((line) => convertLine(line, state)).join("\n");
 }
 
-// -- Claude Code UI chrome stripping --
+// -- JSONL-based preview rendering --
 
-/** Strip all ANSI escape sequences (including SGR) for pattern matching */
-function stripAllAnsi(text: string): string {
-  return text
-    .replace(/\x1b\[[0-9;?]*[\x40-\x7e]/g, "")
-    .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, "")
-    .replace(/\x1b[\x20-\x2f]*[\x30-\x7e]/g, "")
-    .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, "");
+/** Resolve the JSONL path for a session */
+function getSessionPath(session: Session): string | null {
+  if (!session.id) return null;
+  const encodedPath = encodeProjectPath(session.repoPath);
+  return `${homedir()}/.claude/projects/${encodedPath}/${session.id}.jsonl`;
 }
 
-/**
- * Strip Claude Code UI chrome (input box, status line) from captured pane output.
- * Finds the ❯ prompt or status line and removes everything from the separator
- * border above it to the end, leaving only actual content.
- */
-function stripClaudeChrome(text: string): string {
-  const lines = text.split("\n");
+/** Render a single PreviewMessage to blessed markup at the given width */
+export function renderMessage(msg: PreviewMessage, maxWidth: number): string {
+  const parts: string[] = [];
 
-  // Find the ❯ prompt line, scanning from bottom
-  let promptIdx = -1;
-  for (let i = lines.length - 1; i >= 0; i--) {
-    if (/❯/.test(stripAllAnsi(lines[i]))) {
-      promptIdx = i;
-      break;
-    }
+  // Thinking block — truncated, dimmed
+  if (msg.thinking) {
+    const truncated = msg.thinking.length > 120
+      ? msg.thinking.slice(0, 119) + "…"
+      : msg.thinking;
+    parts.push(`{${C.dim}-fg}{italic}${esc(truncated)}{/italic}{/${C.dim}-fg}`);
   }
 
-  let cutIdx = lines.length;
-
-  if (promptIdx !== -1) {
-    // Scan upward from prompt past separators and blank lines to find top of chrome
-    cutIdx = promptIdx;
-    for (let i = promptIdx - 1; i >= 0; i--) {
-      const clean = stripAllAnsi(lines[i]).trim();
-      if (clean === "" || /^─+$/.test(clean)) {
-        cutIdx = i;
-        continue;
-      }
+  switch (msg.role) {
+    case "user": {
+      // User message — dimmed with ❯ prefix
+      const text = msg.text.replace(/\n/g, " ").trim();
+      const maxLen = maxWidth * 3; // Allow a few lines of user text
+      const truncated = text.length > maxLen ? text.slice(0, maxLen - 1) + "…" : text;
+      parts.push(`{${C.dim}-fg}❯ ${esc(truncated)}{/${C.dim}-fg}`);
       break;
     }
-  } else {
-    // No prompt found (e.g. running state) — look for status line (context %)
-    let statusIdx = -1;
-    for (let i = lines.length - 1; i >= 0; i--) {
-      const clean = stripAllAnsi(lines[i]);
-      if (/\d+\.?\d*k?\/\d+\.?\d*k?\s*\(\d+%\)/.test(clean)) {
-        statusIdx = i;
-        break;
-      }
+
+    case "assistant": {
+      // Full markdown rendering at target width
+      parts.push(markdownToBlessed(msg.text, maxWidth));
+      break;
     }
 
-    if (statusIdx !== -1) {
-      cutIdx = statusIdx;
-      for (let i = statusIdx - 1; i >= 0; i--) {
-        const clean = stripAllAnsi(lines[i]).trim();
-        if (clean === "" || /^─+$/.test(clean)) {
-          cutIdx = i;
-          continue;
+    case "tool-use": {
+      // Tool names as a summary line
+      const names = msg.toolNames?.join(", ") || "unknown";
+      parts.push(`{${C.dim}-fg}  ↳ ${esc(names)}{/${C.dim}-fg}`);
+
+      // Show bash output if available (truncated)
+      if (msg.bashOutput) {
+        const outputLines = msg.bashOutput.trim().split("\n");
+        const maxOutputLines = 4;
+        const shown = outputLines.slice(0, maxOutputLines);
+        for (const line of shown) {
+          const truncated = line.length > maxWidth - 4
+            ? line.slice(0, maxWidth - 5) + "…"
+            : line;
+          parts.push(`{${C.dim}-fg}    ${esc(truncated)}{/${C.dim}-fg}`);
         }
-        break;
+        if (outputLines.length > maxOutputLines) {
+          parts.push(`{${C.dim}-fg}    … ${outputLines.length - maxOutputLines} more lines{/${C.dim}-fg}`);
+        }
       }
+      break;
     }
+
   }
 
-  return lines.slice(0, cutIdx).join("\n");
+  return parts.join("\n");
 }
 
-// -- Plain text extraction (for clipboard copy) --
-
-/** Last preview content as plain text (no ANSI, no blessed tags) */
-let lastPlainText = "";
-
-export function getPreviewPlainText(): string {
-  return lastPlainText;
+/** Build plain text for clipboard from messages */
+export function buildPlainText(messages: PreviewMessage[]): string {
+  const parts: string[] = [];
+  for (const msg of messages) {
+    switch (msg.role) {
+      case "user":
+        parts.push(`❯ ${msg.text}`);
+        break;
+      case "assistant":
+        parts.push(msg.text);
+        break;
+      case "tool-use":
+        if (msg.toolNames) parts.push(`↳ ${msg.toolNames.join(", ")}`);
+        if (msg.bashOutput) parts.push(msg.bashOutput);
+        break;
+    }
+  }
+  return parts.join("\n\n");
 }
 
 // -- Preview rendering --
 
-/** Trim blank lines from both ends and return only the last N lines */
-function bottomAlignContent(text: string, availableLines: number): string {
-  const lines = text.split("\n");
-
-  while (lines.length > 0 && lines[lines.length - 1].trim() === "") {
-    lines.pop();
-  }
-  while (lines.length > 0 && lines[0].trim() === "") {
-    lines.shift();
-  }
-
-  const visible = lines.slice(-availableLines);
-  const padding = Math.max(0, availableLines - visible.length);
-  return "\n".repeat(padding) + visible.join("\n");
-}
-
 export async function updatePreview(
   box: Widgets.BoxElement,
   session: Session | null,
-  { scrollToBottom = false, archivedSessions }: { scrollToBottom?: boolean; archivedSessions?: Session[] } = {},
+  { archivedSessions }: { scrollToBottom?: boolean; archivedSessions?: Session[] } = {},
 ): Promise<void> {
   if (session === null && archivedSessions) {
     // Archive summary: show list of archived sessions
@@ -330,8 +316,9 @@ export async function updatePreview(
     return;
   }
 
-  // Header line 1: repo/branch · summary
+  // Header: repo/branch · summary
   const boxWidth = typeof box.width === "number" ? box.width : 40;
+  const contentWidth = Math.max(10, boxWidth - 4); // Account for padding + border
   const repoHeader = `${session.repo}/${session.branch}`;
   let header = `{${C.muted}-fg}  ${repoHeader}{/${C.muted}-fg}`;
   if (session.summary) {
@@ -339,70 +326,45 @@ export async function updatePreview(
       .replace(/\{/g, "{open}")
       .replace(/\}/g, "{close}")
       .replace(/\n/g, " ");
-    const maxSummaryLen = Math.max(10, boxWidth - repoHeader.length - 5);
+    const maxSummaryLen = Math.max(10, contentWidth - repoHeader.length - 5);
     const truncSummary = escapedSummary.length > maxSummaryLen ? escapedSummary.slice(0, maxSummaryLen - 1) + "…" : escapedSummary;
     header += ` {${C.dim}-fg}·{/${C.dim}-fg} {${C.muted}-fg}${truncSummary}{/${C.muted}-fg}`;
   }
 
+  // Try JSONL-based rendering
+  const sessionPath = getSessionPath(session);
   let body = "";
 
-  const boxHeight = typeof box.height === "number" ? box.height : 15;
-  const availableLines = Math.max(1, boxHeight - 3);
+  if (sessionPath) {
+    const messages = await readPreviewMessages(sessionPath, 3);
 
-  if (session.tmuxPane) {
-    // Live session — reuse cached capture from status detection, or capture fresh
-    const captured = session.lastCapture || await capturePane(session.tmuxPane.paneId, { escapes: true });
-    // Strip Claude Code UI chrome (input box, status line) before conversion
-    const stripped = stripClaudeChrome(captured);
-    const trimmed = stripped.replace(/\n\s*$/g, "");
-    lastPlainText = stripAllAnsi(trimmed);
-    const markup = ansiToBlessedMarkup(trimmed);
-    body = bottomAlignContent(markup, availableLines);
-  } else {
-    // Archived session — show first prompt + last assistant message with generous length
-    const encodedPath = encodeProjectPath(session.repoPath);
-    const sessionPath = `${homedir()}/.claude/projects/${encodedPath}/${session.id}.jsonl`;
-    const { lastMessage } = await readSessionTail(sessionPath, 2000);
+    if (messages.length > 0) {
+      const renderedParts: string[] = [];
 
-    const parts: string[] = [];
-
-    // Show first prompt if different from header summary
-    if (session.firstPrompt && session.firstPrompt !== session.summary) {
-      const escaped = session.firstPrompt
-        .replace(/\{/g, "{open}").replace(/\}/g, "{close}").replace(/\n/g, " ");
-      parts.push(`{${C.muted}-fg}${escaped}{/${C.muted}-fg}`);
-    }
-
-    // Show last assistant message (much longer for preview, avoiding duplication)
-    if (lastMessage) {
-      const escaped = lastMessage.replace(/\{/g, "{open}").replace(/\}/g, "{close}");
-      // Skip if it's just a short repeat of the summary already in the header
-      const isSummaryRepeat = session.summary && lastMessage.startsWith(session.summary.slice(0, 100));
-      if (!isSummaryRepeat || lastMessage.length > session.summary.length + 50) {
-        parts.push(`{#A0A0A0-fg}{italic}${escaped}{/italic}{/#A0A0A0-fg}`);
+      for (const msg of messages) {
+        renderedParts.push(renderMessage(msg, contentWidth));
       }
-    }
 
-    if (parts.length > 0) {
-      body = parts.join("\n\n");
+      // Add "Generating..." indicator for running sessions
+      if (session.status === "running") {
+        renderedParts.push(`{${C.mint}-fg}⦿ Generating…{/${C.mint}-fg}`);
+      }
+
+      body = renderedParts.join("\n\n");
+      lastPlainText = buildPlainText(messages);
     } else {
-      body = `{${C.dim}-fg}No recent output{/${C.dim}-fg}`;
+      body = `{${C.dim}-fg}No messages yet{/${C.dim}-fg}`;
+      lastPlainText = "";
     }
-
-    // Store plain text for clipboard copy
-    const plainParts: string[] = [];
-    if (session.firstPrompt && session.firstPrompt !== session.summary) {
-      plainParts.push(session.firstPrompt);
-    }
-    if (lastMessage) {
-      plainParts.push(lastMessage);
-    }
-    lastPlainText = plainParts.join("\n\n");
+  } else {
+    // No session ID — show placeholder
+    body = `{${C.dim}-fg}Session ID not resolved — will appear shortly{/${C.dim}-fg}`;
+    lastPlainText = "";
   }
 
-  const content = `${header}\n${body}`;
+  const content = `${header}\n\n${body}`;
   box.setContent(content);
-  if (scrollToBottom) {
-    box.setScrollPerc(100);
-  }
+  // Always scroll to bottom — content is chronological, most recent at bottom.
+  // Users can scroll up with u/d keys; next refresh re-snaps to bottom.
+  box.setScrollPerc(100);
 }
