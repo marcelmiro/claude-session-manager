@@ -71,6 +71,7 @@ src/
     ├── session-list.ts    # Build display rows, ticket ID extraction, render with blessed tags, navigation
     ├── preview-pane.ts    # ANSI→blessed conversion, chrome stripping, bottom-aligned preview
     ├── wizard.ts          # New Session wizard: inline step-through UI (repo → branch → worktree → launch)
+    ├── space-menu.ts      # Space action menu: which-key style popup (approve, send, copy, rename, kill, fork)
     ├── status-bar.ts      # Key hint bar (contextual: "switch" vs "resume")
     └── colors.ts          # Vesper palette constants + color helpers
 ```
@@ -107,16 +108,33 @@ Archived: resumes via `claude -r {id}` (or `--fork` with `f` key) in new tmux wi
 | `j`/`k` | Move up/down (skips headers) |
 | `J`/`K` | Jump to next/prev repo group |
 | `Enter` | Switch (active) or resume (archived) |
+| `Space` | Open action menu (approve, send, copy, rename, kill, fork) |
 | `n` | New session wizard (repo → branch → worktree → launch) |
 | `f` | Fork session (`--fork` in new window) |
 | `x` | Kill pane (double-tap to confirm) |
-| `s` | Generate AI name (claude -p, cached) |
 | `c` | Open repo in Cursor IDE |
-| `y` | Copy preview pane text to clipboard (pbcopy) |
-| `r` | Force refresh |
 | `u`/`d` | Scroll preview pane ±6 lines |
 | `a` | Toggle archived sessions visibility |
 | `q`/`Esc` | Quit |
+
+### Space action menu (`Space` key)
+
+Neovim which-key style popup at bottom-left. Press a key to select an action:
+
+| Key | Action |
+|-----|--------|
+| `y` | Approve — context-aware sub-menu (tool approval or question answer) |
+| `m` | Send message — type text to send to the session's pane |
+| `c` | Copy preview pane text to clipboard (pbcopy) |
+| `r` | Rename — generate AI name (claude -p, cached) |
+| `x` | Kill pane (double-tap to confirm) |
+| `f` | Fork session (`--fork` in new window) |
+
+**Approve sub-menu** detects the session's state:
+- **Tool approval** (Edit/Bash/etc.): `y` yes, `a` yes don't ask again, `n` no
+- **AskUserQuestion**: Shows numbered options from JSONL, `t` to type custom answer
+
+**Send message**: Opens inline text input. Enter sends text + newline to the pane. Useful for approving tool calls or sending instructions without switching.
 
 ### Session statuses
 
