@@ -102,6 +102,16 @@ function extractBlockedBody(lastCapture?: string): string {
   return trimmed.length > 100 ? trimmed.slice(0, 97) + "..." : trimmed;
 }
 
+/** Extract the last meaningful output line from a pane capture for "done" notification body */
+function extractDoneBody(lastCapture?: string): string {
+  if (!lastCapture) return "";
+  const lines = lastCapture.split("\n");
+  const { nearbyLines } = getAbovePrompt(lines);
+  if (!nearbyLines) return "";
+  const trimmed = nearbyLines.replace(/\s+/g, " ").trim();
+  return trimmed.length > 100 ? trimmed.slice(0, 97) + "..." : trimmed;
+}
+
 /** Cached result of `which terminal-notifier` check */
 let _hasTerminalNotifier: boolean | undefined;
 
@@ -190,13 +200,13 @@ export async function dispatchNotifications(
         paneId: session.tmuxPane.paneId,
       };
       if (event.classification === "blocked") {
-        const title = `⚡ [csm] ${name}`;
+        const title = `⚡ Blocked — ${name}`;
         const body = extractBlockedBody(session.lastCapture);
         sendNativeNotification(title, body, pane);
       } else if (event.classification === "turnComplete") {
-        const title = `✓ [csm] ${name}`;
-        const ctx = session.contextPercent ? `${session.contextPercent}% context used` : "Turn complete";
-        sendNativeNotification(title, ctx, pane);
+        const title = `✅ Done — ${name}`;
+        const body = extractDoneBody(session.lastCapture);
+        sendNativeNotification(title, body, pane);
       }
     }
   }

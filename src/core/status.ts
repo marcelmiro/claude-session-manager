@@ -32,7 +32,7 @@ const QUESTION_UI_PATTERNS = [
   /←.*[☐✔].*→/,                 // Navigation bar with checkbox/checkmark controls
 ];
 
-const SEPARATOR_RE = /^[─━═─\-\s▪]+$/;
+const SEPARATOR_RE = /^[─━═─\-▪][─━═─\-\s▪]{3,}/;
 const TIP_RE = /^⎿\s+Tip:/;  // UI tip lines shown during running — skip like separators
 const TASK_RE = /^(?:⎿\s+)?[✔◼◻☐]\s/;  // Task list items (completed/in-progress/pending) — skip to reach spinner
 
@@ -64,7 +64,7 @@ export function getAbovePrompt(lines: string[]): { statusLine: string; nearbyLin
 
   // Collect non-empty, non-separator lines above the prompt
   const above: string[] = [];
-  for (let i = promptIdx - 1; i >= Math.max(0, promptIdx - 8); i--) {
+  for (let i = promptIdx - 1; i >= Math.max(0, promptIdx - 20); i--) {
     const trimmed = lines[i].trim();
     if (!trimmed || SEPARATOR_RE.test(trimmed) || TASK_RE.test(trimmed)) continue;
     if (TIP_RE.test(trimmed)) {

@@ -1,4 +1,4 @@
-#!/usr/bin/env bun
+#!/usr/bin/env -S bun --env-file=/dev/null
 export {};
 
 function help() {

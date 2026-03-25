@@ -401,11 +401,19 @@ async function buildActiveSession(
 
   const repo = repoNameFromPath(baseRepoPath);
 
+  // If we had a cached session ID but no JSONL was found, the mapping is stale
+  // (e.g. after /clear or /compact created a new session). Clear it so the session
+  // falls through to enrichUnmatchedSessions() for re-matching.
+  const resolvedId = activeInfo ? (knownSessionId ?? activeInfo.sessionId) : "";
+  if (knownSessionId && !activeInfo) {
+    paneSessionCache.delete(pane.paneId);
+  }
+
   const contextPercent = statusResult.contextPercent
     ?? (activeInfo ? estimateContextPercent(activeInfo.messageCount) : 0);
 
   return {
-    id: knownSessionId ?? activeInfo?.sessionId ?? "",
+    id: resolvedId,
     repo,
     repoPath,
     baseRepoPath,

@@ -83,17 +83,24 @@ Bad: implement-authentication-flow, packages-api-src, update-index-ts
 Reply with ONLY the kebab-case name, nothing else.
 
 ${contextParts.join("\n")}`;
-    const proc = Bun.spawn(["claude", "-p", namePrompt], {
+    const proc = Bun.spawn(["claude", "-p", "--model", "haiku", "--no-session-persistence"], {
+      stdin: new Response(namePrompt),
       stdout: "pipe",
       stderr: "ignore",
-      env: { ...process.env, TMUX: "", TMUX_PANE: "" },
+      // CLAUDECODE=1 ensures cc_entrypoint=cli billing (Max subscription).
+      env: { ...process.env, TMUX: "", TMUX_PANE: "", CLAUDECODE: "1", CLAUDE_CODE_ENTRYPOINT: "cli" },
     });
     // Kill subprocess after 15s to prevent hanging the monitor process
     // (tmux #() only runs one instance — a hung claude -p blocks all future polls)
     const killTimer = setTimeout(() => proc.kill(), 15_000);
     const result = await new Response(proc.stdout).text();
     clearTimeout(killTimer);
-    const name = result.trim().toLowerCase().replace(/[^a-z0-9-]/g, "").replace(/-+/g, "-").replace(/^-|-$/g, "");
+    await proc.exited;
+    if (proc.exitCode !== 0) return "";
+    // Reject error/rate-limit messages that survive sanitization
+    const lower = result.trim().toLowerCase();
+    if (lower.includes("error") || lower.includes("credit") || lower.includes("balance") || lower.includes("rate limit") || lower.includes("unauthorized") || lower.includes("overloaded")) return "";
+    const name = lower.replace(/[^a-z0-9-]/g, "").replace(/-+/g, "-").replace(/^-|-$/g, "");
     return name.length > 0 && name.length <= 25 ? name : "";
   } catch {
     return "";
