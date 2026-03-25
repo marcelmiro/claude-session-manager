@@ -4,12 +4,34 @@
  * them in a format suitable for markdown rendering at any width.
  */
 
+export interface ToolInput {
+  name: string;
+  /** Bash: the command string */
+  command?: string;
+  /** Bash: intent description */
+  description?: string;
+  /** file path (Read/Edit/Write/etc.) */
+  filePath?: string;
+  /** Edit: text being replaced */
+  oldString?: string;
+  /** Edit: replacement text */
+  newString?: string;
+  /** Write: file content (truncated to 500 chars) */
+  content?: string;
+  /** Glob/Grep: search pattern */
+  pattern?: string;
+  /** AskUserQuestion: question data */
+  question?: { header: string; text: string; options: Array<{ label: string; description?: string }>; multiSelect: boolean };
+}
+
 export interface PreviewMessage {
   role: "user" | "assistant" | "tool-use";
   /** Raw markdown text (assistant text blocks, user prompts) */
   text: string;
   /** Tool names used in this turn (for tool-use messages) */
   toolNames?: string[];
+  /** Structured tool input details for preview rendering */
+  toolInputs?: ToolInput[];
   /** Bash command output from progress entries */
   bashOutput?: string;
   /** Thinking block text (truncated) */
@@ -94,7 +116,7 @@ export async function readPreviewMessages(
     const conversationMessages: PreviewMessage[] = [];
     const assistantTurns = new Map<
       string,
-      { text: string; toolNames: string[]; toolUseIds: string[]; thinking: string; index: number }
+      { text: string; toolNames: string[]; toolUseIds: string[]; toolInputs: ToolInput[]; thinking: string; index: number }
     >();
 
     for (const entry of entries) {
@@ -122,7 +144,7 @@ export async function readPreviewMessages(
         const msgId = msg.id || `anon-${entries.indexOf(entry)}`;
         let turn = assistantTurns.get(msgId);
         if (!turn) {
-          turn = { text: "", toolNames: [], toolUseIds: [], thinking: "", index: conversationMessages.length };
+          turn = { text: "", toolNames: [], toolUseIds: [], toolInputs: [], thinking: "", index: conversationMessages.length };
           assistantTurns.set(msgId, turn);
         }
 
@@ -135,6 +157,33 @@ export async function readPreviewMessages(
             } else if (block.type === "tool_use" && block.name) {
               turn.toolNames.push(block.name);
               if (block.id) turn.toolUseIds.push(block.id);
+              // Extract tool input details for preview
+              const input = block.input as Record<string, any> | undefined;
+              const toolInput: ToolInput = { name: block.name };
+              if (input) {
+                // Generic: extract common fields for any tool
+                if (typeof input.file_path === "string") toolInput.filePath = input.file_path;
+                if (typeof input.command === "string") toolInput.command = input.command;
+                if (typeof input.description === "string") toolInput.description = input.description;
+                if (typeof input.pattern === "string") toolInput.pattern = input.pattern;
+
+                // Tool-specific fields
+                if (block.name === "Edit") {
+                  if (typeof input.old_string === "string") toolInput.oldString = input.old_string;
+                  if (typeof input.new_string === "string") toolInput.newString = input.new_string;
+                } else if (block.name === "Write") {
+                  if (typeof input.content === "string") toolInput.content = input.content.slice(0, 500);
+                } else if (block.name === "AskUserQuestion" && input.questions?.[0]) {
+                  const q = input.questions[0] as any;
+                  toolInput.question = {
+                    header: q.header || "",
+                    text: q.question || "",
+                    options: (q.options || []).map((o: any) => ({ label: o.label || "", description: o.description })),
+                    multiSelect: q.multiSelect || false,
+                  };
+                }
+              }
+              turn.toolInputs.push(toolInput);
             }
           }
         }
@@ -163,8 +212,146 @@ export async function readPreviewMessages(
   }
 }
 
+// --- Pending tool call detection for Space menu approve flow + preview ---
+
+export interface PendingQuestion {
+  question: string;
+  header: string;
+  options: Array<{ label: string; description?: string }>;
+  multiSelect: boolean;
+  toolUseId: string;
+}
+
+export interface PendingToolCall {
+  name: string;
+  toolUseId: string;
+  /** Bash: the command string */
+  command?: string;
+  /** Bash: intent description */
+  description?: string;
+  /** file path (Read/Edit/Write/etc.) */
+  filePath?: string;
+  /** Edit: text being replaced */
+  oldString?: string;
+  /** Edit: replacement text */
+  newString?: string;
+  /** Write: file content (truncated to 500 chars) */
+  content?: string;
+  /** Glob/Grep: search pattern */
+  pattern?: string;
+  /** AskUserQuestion: full question data */
+  question?: PendingQuestion;
+}
+
+/**
+ * Read the last unanswered tool_use from the JSONL.
+ * Returns null if all tool calls have been answered or no tool call found.
+ */
+export async function readPendingToolCall(sessionPath: string): Promise<PendingToolCall | null> {
+  try {
+    const file = Bun.file(sessionPath);
+    const stat = await file.stat();
+    if (!stat) return null;
+
+    const TAIL_SIZE = 16 * 1024;
+    const offset = Math.max(0, stat.size - TAIL_SIZE);
+    const chunk = await file.slice(offset, stat.size).text();
+    const rawLines = chunk.trim().split("\n").filter(Boolean);
+    const startIdx = offset > 0 ? 1 : 0;
+
+    // Track the last tool_use block and its index
+    let lastToolIndex = -1;
+    let lastToolId = "";
+    let lastToolCall: PendingToolCall | null = null;
+
+    for (let i = startIdx; i < rawLines.length; i++) {
+      try {
+        const entry = JSON.parse(rawLines[i]);
+        const msg = entry.message;
+        if (!msg) continue;
+
+        if (msg.role === "assistant" && Array.isArray(msg.content)) {
+          for (const block of msg.content) {
+            if (block.type === "tool_use" && block.name && block.id) {
+              lastToolIndex = i;
+              lastToolId = block.id;
+              const input = block.input as Record<string, any> | undefined;
+              const call: PendingToolCall = { name: block.name, toolUseId: block.id };
+
+              if (input) {
+                // Generic: extract file_path for any tool that has it
+                if (typeof input.file_path === "string") call.filePath = input.file_path;
+                if (typeof input.command === "string") call.command = input.command;
+                if (typeof input.description === "string") call.description = input.description;
+                if (typeof input.pattern === "string") call.pattern = input.pattern;
+
+                // Tool-specific fields
+                if (block.name === "Edit") {
+                  if (typeof input.old_string === "string") call.oldString = input.old_string;
+                  if (typeof input.new_string === "string") call.newString = input.new_string;
+                } else if (block.name === "Write") {
+                  if (typeof input.content === "string") call.content = input.content.slice(0, 500);
+                } else if (block.name === "AskUserQuestion" && input.questions?.[0]) {
+                  const q = input.questions[0];
+                  call.question = {
+                    question: q.question || "",
+                    header: q.header || "",
+                    options: (q.options || []).map((o: any) => ({
+                      label: o.label || "",
+                      description: o.description,
+                    })),
+                    multiSelect: q.multiSelect || false,
+                    toolUseId: block.id,
+                  };
+                }
+              }
+
+              lastToolCall = call;
+            }
+          }
+        }
+      } catch {
+        continue;
+      }
+    }
+
+    if (!lastToolCall || lastToolIndex < 0) return null;
+
+    // Check if already answered
+    for (let i = lastToolIndex + 1; i < rawLines.length; i++) {
+      try {
+        const entry = JSON.parse(rawLines[i]);
+        const msg = entry.message;
+        if (!msg || msg.role !== "user") continue;
+
+        if (Array.isArray(msg.content)) {
+          for (const block of msg.content) {
+            if (block.type === "tool_result" && block.tool_use_id === lastToolId) {
+              return null; // Already answered
+            }
+          }
+        }
+      } catch {
+        continue;
+      }
+    }
+
+    return lastToolCall;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Convenience: check if the pending tool call is an AskUserQuestion.
+ */
+export async function readPendingQuestion(sessionPath: string): Promise<PendingQuestion | null> {
+  const call = await readPendingToolCall(sessionPath);
+  return call?.question ?? null;
+}
+
 function flushAssistantTurns(
-  turns: Map<string, { text: string; toolNames: string[]; toolUseIds: string[]; thinking: string; index: number }>,
+  turns: Map<string, { text: string; toolNames: string[]; toolUseIds: string[]; toolInputs: ToolInput[]; thinking: string; index: number }>,
   messages: PreviewMessage[],
   bashOutputs: Map<string, string>,
 ): void {
@@ -196,6 +383,7 @@ function flushAssistantTurns(
         role: "tool-use",
         text: "",
         toolNames: turn.toolNames,
+        toolInputs: turn.toolInputs.length > 0 ? turn.toolInputs : undefined,
         bashOutput: outputs.length > 0 ? outputs.join("\n") : undefined,
         thinking: !turn.text ? thinking : undefined, // Only attach thinking to tool-use if no text message was emitted
       });

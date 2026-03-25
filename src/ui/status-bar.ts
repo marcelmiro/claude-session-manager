@@ -1,23 +1,43 @@
 import type { Widgets } from "blessed";
 import { C } from "./colors";
 import type { SessionStatus } from "../core/status";
+import type { PendingToolCall } from "../core/jsonl-reader";
 
-export function renderStatusBar(box: Widgets.BoxElement, enterAction?: SessionStatus, showArchived = false): void {
+function kl(key: string, label: string): string {
+  return `{${C.peach}-fg}${key}{/${C.peach}-fg} {${C.dim}-fg}${label}{/${C.dim}-fg}`;
+}
+
+export function renderStatusBar(
+  box: Widgets.BoxElement,
+  enterAction?: SessionStatus,
+  showArchived = false,
+  pendingToolCall?: PendingToolCall | null,
+): void {
+  // Contextual approve/answer hints for waiting sessions
+  if (pendingToolCall) {
+    const common = `${kl("j/k", "move")}  ${kl("\u23CE", "switch")}  ${kl("Space", "more")}  ${kl("q", "quit")}`;
+    if (pendingToolCall.question) {
+      const n = pendingToolCall.question.options.length;
+      box.setContent(`${kl(`1-${n}`, "answer")}  ${kl("t", "custom")}  │  ${common}`);
+    } else {
+      box.setContent(`${kl("y", "approve")}  ${kl("Y", "always")}  │  ${common}`);
+    }
+    return;
+  }
+
   const enterLabel = enterAction === "archived" ? "resume" : "switch";
   const archiveLabel = showArchived ? "hide archived" : "show archived";
   const content =
-    `{${C.peach}-fg}j/k/J/K{/${C.peach}-fg} {${C.dim}-fg}move{/${C.dim}-fg}` +
-    `  {${C.peach}-fg}\u23CE{/${C.peach}-fg} {${C.dim}-fg}${enterLabel}{/${C.dim}-fg}` +
-    `  {${C.peach}-fg}/{/${C.peach}-fg} {${C.dim}-fg}search{/${C.dim}-fg}` +
-    `  {${C.peach}-fg}r{/${C.peach}-fg} {${C.dim}-fg}refresh{/${C.dim}-fg}` +
-    `  {${C.peach}-fg}x{/${C.peach}-fg} {${C.dim}-fg}kill{/${C.dim}-fg}` +
-    `  {${C.peach}-fg}f{/${C.peach}-fg} {${C.dim}-fg}fork{/${C.dim}-fg}` +
-    `  {${C.peach}-fg}c{/${C.peach}-fg} {${C.dim}-fg}cursor{/${C.dim}-fg}` +
-    `  {${C.peach}-fg}s{/${C.peach}-fg} {${C.dim}-fg}name{/${C.dim}-fg}` +
-    `  {${C.peach}-fg}y{/${C.peach}-fg} {${C.dim}-fg}copy{/${C.dim}-fg}` +
-    `  {${C.peach}-fg}u/d{/${C.peach}-fg} {${C.dim}-fg}scroll{/${C.dim}-fg}` +
-    `  {${C.peach}-fg}n{/${C.peach}-fg} {${C.dim}-fg}new{/${C.dim}-fg}` +
-    `  {${C.peach}-fg}q{/${C.peach}-fg} {${C.dim}-fg}quit{/${C.dim}-fg}` +
-    `  {${C.peach}-fg}a{/${C.peach}-fg} {${C.dim}-fg}${archiveLabel}{/${C.dim}-fg}`;
+    `${kl("j/k", "move")}` +
+    `  ${kl("\u23CE", enterLabel)}` +
+    `  ${kl("/", "search")}` +
+    `  ${kl("Space", "actions")}` +
+    `  ${kl("x", "kill")}` +
+    `  ${kl("f", "fork")}` +
+    `  ${kl("c", "cursor")}` +
+    `  ${kl("u/d", "scroll")}` +
+    `  ${kl("n", "new")}` +
+    `  ${kl("a", archiveLabel)}` +
+    `  ${kl("q", "quit")}`;
   box.setContent(content);
 }

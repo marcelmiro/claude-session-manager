@@ -125,6 +125,32 @@ export async function displayMessage(message: string): Promise<void> {
 }
 
 /**
+ * Send key names (e.g. "Enter", "Down", "Escape") to a tmux pane.
+ */
+export async function sendKeys(paneId: string, keys: string[]): Promise<void> {
+  try {
+    const args = ["-t", paneId, ...keys];
+    await Bun.$`tmux send-keys ${args}`.quiet();
+  } catch {
+    // pane may have closed
+  }
+}
+
+/**
+ * Send literal text followed by Enter to a tmux pane.
+ * Uses -l for the text (no key-name interpretation), then `;` to chain
+ * a second send-keys for Enter — all in one tmux invocation to avoid races.
+ */
+export async function sendTextAndEnter(paneId: string, text: string): Promise<void> {
+  try {
+    // tmux splits on `;` before parsing flags, so -l only applies to text, not to the `;`
+    Bun.spawnSync(["tmux", "send-keys", "-t", paneId, "-l", text, ";", "send-keys", "-t", paneId, "Enter"]);
+  } catch {
+    // pane may have closed
+  }
+}
+
+/**
  * Switch to the target tmux pane directly via tmux commands.
  * Works from within a tmux display-popup since tmux commands are server-side.
  */

@@ -2,7 +2,7 @@ import { homedir } from "os";
 import type { Widgets } from "blessed";
 import type { Session } from "../types";
 
-import { readPreviewMessages, type PreviewMessage } from "../core/jsonl-reader";
+import { readPreviewMessages, readPendingToolCall, type PreviewMessage, type PendingToolCall } from "../core/jsonl-reader";
 import { formatTimeAgo } from "../core/status";
 import { markdownToBlessed } from "./markdown";
 import { C } from "./colors";
@@ -198,7 +198,7 @@ export function ansiToBlessedMarkup(text: string): string {
 // -- JSONL-based preview rendering --
 
 /** Resolve the JSONL path for a session */
-function getSessionPath(session: Session): string | null {
+export function getSessionPath(session: Session): string | null {
   if (!session.id) return null;
   const encodedPath = encodeProjectPath(session.repoPath);
   return `${homedir()}/.claude/projects/${encodedPath}/${session.id}.jsonl`;
@@ -233,9 +233,48 @@ export function renderMessage(msg: PreviewMessage, maxWidth: number): string {
     }
 
     case "tool-use": {
-      // Tool names as a summary line
-      const names = msg.toolNames?.join(", ") || "unknown";
-      parts.push(`{${C.dim}-fg}  ↳ ${esc(names)}{/${C.dim}-fg}`);
+      // Show tool input details when available
+      if (msg.toolInputs && msg.toolInputs.length > 0) {
+        for (const ti of msg.toolInputs) {
+          if (ti.command) {
+            // Bash: show command
+            const cmd = ti.command.length > maxWidth - 6
+              ? ti.command.slice(0, maxWidth - 7) + "…"
+              : ti.command;
+            parts.push(`{${C.dim}-fg}  ↳ ${esc(ti.name)}{/${C.dim}-fg}`);
+            parts.push(`{${C.peach}-fg}    $ ${esc(cmd)}{/${C.peach}-fg}`);
+          } else if (ti.filePath) {
+            // Edit/Write: show file path
+            const fp = ti.filePath.length > maxWidth - 6
+              ? "…" + ti.filePath.slice(-(maxWidth - 7))
+              : ti.filePath;
+            parts.push(`{${C.dim}-fg}  ↳ ${esc(ti.name)}: ${esc(fp)}{/${C.dim}-fg}`);
+          } else if (ti.question) {
+            // AskUserQuestion: show question and options
+            const q = ti.question;
+            const header = q.header || "Question";
+            parts.push(`{${C.dim}-fg}  ↳ ${esc(header)}{/${C.dim}-fg}`);
+            const qText = q.text.length > maxWidth - 4
+              ? q.text.slice(0, maxWidth - 5) + "…"
+              : q.text;
+            parts.push(`{${C.muted}-fg}    ${esc(qText)}{/${C.muted}-fg}`);
+            for (let i = 0; i < q.options.length; i++) {
+              const label = q.options[i].label;
+              const trunc = label.length > maxWidth - 8
+                ? label.slice(0, maxWidth - 9) + "…"
+                : label;
+              parts.push(`{${C.peach}-fg}    ${i + 1}. ${esc(trunc)}{/${C.peach}-fg}`);
+            }
+          } else {
+            // Other tools: just show name
+            parts.push(`{${C.dim}-fg}  ↳ ${esc(ti.name)}{/${C.dim}-fg}`);
+          }
+        }
+      } else {
+        // Fallback: tool names only
+        const names = msg.toolNames?.join(", ") || "unknown";
+        parts.push(`{${C.dim}-fg}  ↳ ${esc(names)}{/${C.dim}-fg}`);
+      }
 
       // Show bash output if available (truncated)
       if (msg.bashOutput) {
@@ -272,12 +311,169 @@ export function buildPlainText(messages: PreviewMessage[]): string {
         parts.push(msg.text);
         break;
       case "tool-use":
-        if (msg.toolNames) parts.push(`↳ ${msg.toolNames.join(", ")}`);
+        if (msg.toolInputs) {
+          for (const ti of msg.toolInputs) {
+            if (ti.command) {
+              parts.push(`↳ ${ti.name}\n  $ ${ti.command}`);
+            } else if (ti.filePath) {
+              parts.push(`↳ ${ti.name}: ${ti.filePath}`);
+            } else if (ti.question) {
+              parts.push(`↳ ${ti.question.header || "Question"}\n  ${ti.question.text}\n${ti.question.options.map((o, i) => `  ${i + 1}. ${o.label}`).join("\n")}`);
+            } else {
+              parts.push(`↳ ${ti.name}`);
+            }
+          }
+        } else if (msg.toolNames) {
+          parts.push(`↳ ${msg.toolNames.join(", ")}`);
+        }
         if (msg.bashOutput) parts.push(msg.bashOutput);
         break;
     }
   }
   return parts.join("\n\n");
+}
+
+// -- Helpers for decision-first preview --
+
+/** Map tool names to Claude Code's display titles */
+function toolTitle(name: string): string {
+  switch (name) {
+    case "Read": return "Read file";
+    case "Bash": return "Run bash command";
+    case "Edit": return "Edit file";
+    case "Write": return "Write new file";
+    case "Glob": return "Search files";
+    case "Grep": return "Search content";
+    case "Agent": return "Launch agent";
+    case "WebFetch": return "Fetch URL";
+    case "WebSearch": return "Web search";
+    default: return name;
+  }
+}
+
+/** Render tool call details like Claude Code does */
+function renderToolDetails(pending: PendingToolCall, maxWidth: number): string[] {
+  const lines: string[] = [];
+  const name = pending.name;
+
+  if (name === "Bash") {
+    if (pending.description) {
+      lines.push(`  {${C.muted}-fg}${esc(pending.description)}{/${C.muted}-fg}`);
+      lines.push("");
+    }
+    if (pending.command) {
+      // Wrap long commands across multiple lines
+      const cmdLines = wrapText(`$ ${pending.command}`, maxWidth - 4);
+      for (const cl of cmdLines) {
+        lines.push(`  {${C.peach}-fg}${esc(cl)}{/${C.peach}-fg}`);
+      }
+    }
+  } else if (name === "Edit" && pending.oldString && pending.newString) {
+    if (pending.filePath) {
+      lines.push(`  {${C.muted}-fg}${esc(truncPath(pending.filePath, maxWidth - 4))}{/${C.muted}-fg}`);
+      lines.push("");
+    }
+    lines.push(...renderInlineDiff(pending.oldString, pending.newString, maxWidth));
+  } else if (name === "Write") {
+    if (pending.filePath) {
+      lines.push(`  {${C.muted}-fg}${esc(truncPath(pending.filePath, maxWidth - 4))}{/${C.muted}-fg}`);
+      lines.push("");
+    }
+    if (pending.content) {
+      const contentLines = pending.content.split("\n");
+      const maxShow = 8;
+      for (let i = 0; i < Math.min(contentLines.length, maxShow); i++) {
+        const trunc = contentLines[i].length > maxWidth - 4
+          ? contentLines[i].slice(0, maxWidth - 5) + "…"
+          : contentLines[i];
+        lines.push(`  {${C.dim}-fg}${esc(trunc)}{/${C.dim}-fg}`);
+      }
+      if (contentLines.length > maxShow) {
+        lines.push(`  {${C.dim}-fg}… ${contentLines.length - maxShow} more lines{/${C.dim}-fg}`);
+      }
+    }
+  } else if (name === "Read") {
+    if (pending.filePath) {
+      lines.push(`  {${C.muted}-fg}Read(${esc(truncPath(pending.filePath, maxWidth - 8))}){/${C.muted}-fg}`);
+    }
+  } else if (name === "Glob") {
+    if (pending.pattern) {
+      lines.push(`  {${C.muted}-fg}Glob(${esc(pending.pattern)}){/${C.muted}-fg}`);
+    }
+  } else if (name === "Grep") {
+    const parts = [pending.pattern ? `"${pending.pattern}"` : ""];
+    if (pending.filePath) parts.push(`in ${truncPath(pending.filePath, maxWidth - 20)}`);
+    lines.push(`  {${C.muted}-fg}Grep(${esc(parts.filter(Boolean).join(" "))}){/${C.muted}-fg}`);
+  } else {
+    // Generic: show whatever details we have
+    if (pending.filePath) {
+      lines.push(`  {${C.muted}-fg}${esc(truncPath(pending.filePath, maxWidth - 4))}{/${C.muted}-fg}`);
+    }
+    if (pending.command) {
+      const cmd = pending.command.length > maxWidth - 6
+        ? pending.command.slice(0, maxWidth - 7) + "…"
+        : pending.command;
+      lines.push(`  {${C.peach}-fg}$ ${esc(cmd)}{/${C.peach}-fg}`);
+    }
+  }
+
+  return lines;
+}
+
+/** Truncate a file path, keeping the end visible */
+function truncPath(path: string, maxLen: number): string {
+  if (path.length <= maxLen) return path;
+  return "…" + path.slice(-(maxLen - 1));
+}
+
+/** Wrap text into lines of maxLen, breaking at spaces when possible */
+function wrapText(text: string, maxLen: number): string[] {
+  if (text.length <= maxLen) return [text];
+  const lines: string[] = [];
+  let remaining = text;
+  while (remaining.length > maxLen) {
+    let breakAt = remaining.lastIndexOf(" ", maxLen);
+    if (breakAt <= 0) breakAt = maxLen;
+    lines.push(remaining.slice(0, breakAt));
+    remaining = remaining.slice(breakAt).trimStart();
+  }
+  if (remaining) lines.push(remaining);
+  return lines;
+}
+
+/** Render inline diff from old/new strings: red - lines, mint + lines, capped at maxLines */
+function renderInlineDiff(oldStr: string, newStr: string, maxWidth: number, maxLines = 12): string[] {
+  const oldLines = oldStr.split("\n");
+  const newLines = newStr.split("\n");
+  const diffLines: string[] = [];
+
+  for (const line of oldLines) {
+    const trunc = line.length > maxWidth - 4 ? line.slice(0, maxWidth - 5) + "…" : line;
+    diffLines.push(`{${C.red}-fg}- ${esc(trunc)}{/${C.red}-fg}`);
+  }
+  for (const line of newLines) {
+    const trunc = line.length > maxWidth - 4 ? line.slice(0, maxWidth - 5) + "…" : line;
+    diffLines.push(`{${C.mint}-fg}+ ${esc(trunc)}{/${C.mint}-fg}`);
+  }
+
+  if (diffLines.length > maxLines) {
+    const overflow = diffLines.length - maxLines;
+    return [...diffLines.slice(0, maxLines), `{${C.dim}-fg}… ${overflow} more lines{/${C.dim}-fg}`];
+  }
+  return diffLines;
+}
+
+/** Replace all blessed color tags with dim color */
+function dimContent(text: string): string {
+  return text
+    .replace(/\{#[0-9A-Fa-f]{6}-fg\}/g, `{${C.dim}-fg}`)
+    .replace(/\{\/#[0-9A-Fa-f]{6}-fg\}/g, `{/${C.dim}-fg}`)
+    .replace(/\{#[0-9A-Fa-f]{6}-bg\}/g, "")
+    .replace(/\{\/#[0-9A-Fa-f]{6}-bg\}/g, "")
+    .replace(/\{bold\}/g, "")
+    .replace(/\{\/bold\}/g, "")
+    .replace(/\{italic\}/g, "")
+    .replace(/\{\/italic\}/g, "");
 }
 
 // -- Preview rendering --
@@ -286,7 +482,7 @@ export async function updatePreview(
   box: Widgets.BoxElement,
   session: Session | null,
   { archivedSessions }: { scrollToBottom?: boolean; archivedSessions?: Session[] } = {},
-): Promise<void> {
+): Promise<PendingToolCall | null> {
   if (session === null && archivedSessions) {
     // Archive summary: show list of archived sessions
     const lines: string[] = [
@@ -307,13 +503,13 @@ export async function updatePreview(
     }
     lastPlainText = "";
     box.setContent(lines.join("\n"));
-    return;
+    return null;
   }
 
   if (session === null) {
     lastPlainText = "";
     box.setContent("");
-    return;
+    return null;
   }
 
   // Header: repo/branch · summary
@@ -334,18 +530,83 @@ export async function updatePreview(
   // Try JSONL-based rendering
   const sessionPath = getSessionPath(session);
   let body = "";
+  let pendingResult: PendingToolCall | null = null;
 
   if (sessionPath) {
     const messages = await readPreviewMessages(sessionPath, 3);
 
     if (messages.length > 0) {
+      // Decision-first layout for waiting sessions
+      if (session.status === "waiting") {
+        const pending = await readPendingToolCall(sessionPath);
+        pendingResult = pending;
+
+        // Build decision block (goes at TOP) — mirrors Claude Code's permission UI
+        const dl: string[] = [];
+
+        if (pending?.question) {
+          // AskUserQuestion — show question with numbered options
+          const q = pending.question;
+          dl.push(`{bold}${esc(q.header || "Question")}{/bold}`);
+          dl.push("");
+          const qText = q.question.length > contentWidth * 2
+            ? q.question.slice(0, contentWidth * 2 - 1) + "…"
+            : q.question;
+          dl.push(`  ${esc(qText)}`);
+          dl.push("");
+          for (let i = 0; i < q.options.length; i++) {
+            const label = q.options[i].label;
+            const trunc = label.length > contentWidth - 8
+              ? label.slice(0, contentWidth - 9) + "…"
+              : label;
+            const prefix = i === 0 ? "❯" : " ";
+            dl.push(`{${C.peach}-fg}${prefix} ${i + 1}. ${esc(trunc)}{/${C.peach}-fg}`);
+          }
+        } else if (pending) {
+          // Tool permission prompt — mimic Claude Code format
+          const title = toolTitle(pending.name);
+          dl.push(`{bold}${esc(title)}{/bold}`);
+          dl.push("");
+
+          // Call details
+          dl.push(...renderToolDetails(pending, contentWidth));
+
+          // "Do you want to proceed?" + numbered options
+          dl.push("");
+          dl.push("Do you want to proceed?");
+          dl.push(`{${C.peach}-fg}❯ 1. Yes{/${C.peach}-fg}`);
+          dl.push(`{${C.muted}-fg}  2. Yes, don't ask again for this session{/${C.muted}-fg}`);
+          dl.push(`{${C.muted}-fg}  3. No{/${C.muted}-fg}`);
+        } else {
+          dl.push(`{bold}Waiting for input{/bold}`);
+          dl.push("");
+          dl.push("Do you want to proceed?");
+          dl.push(`{${C.peach}-fg}❯ 1. Yes{/${C.peach}-fg}`);
+          dl.push(`{${C.muted}-fg}  2. No{/${C.muted}-fg}`);
+        }
+
+        // History below, dimmed
+        const historyParts: string[] = [];
+        for (const msg of messages) {
+          historyParts.push(dimContent(renderMessage(msg, contentWidth)));
+        }
+
+        body = dl.join("\n") + "\n\n" + historyParts.join("\n\n");
+        lastPlainText = buildPlainText(messages);
+
+        const content = `${header}\n\n${body}`;
+        box.setContent(content);
+        box.setScrollPerc(0); // Decision at top
+        return pendingResult;
+      }
+
       const renderedParts: string[] = [];
 
       for (const msg of messages) {
         renderedParts.push(renderMessage(msg, contentWidth));
       }
 
-      // Add "Generating..." indicator for running sessions
+      // Add status indicator for running sessions
       if (session.status === "running") {
         renderedParts.push(`{${C.mint}-fg}⦿ Generating…{/${C.mint}-fg}`);
       }
@@ -367,4 +628,5 @@ export async function updatePreview(
   // Always scroll to bottom — content is chronological, most recent at bottom.
   // Users can scroll up with u/d keys; next refresh re-snaps to bottom.
   box.setScrollPerc(100);
+  return pendingResult;
 }

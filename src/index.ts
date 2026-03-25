@@ -1,11 +1,12 @@
+import blessed from "blessed";
 import { createLayout } from "./ui/layout";
 import { renderStatusBar } from "./ui/status-bar";
 import { buildDisplayRows, renderSessionList, moveSelection, moveToGroup, getSelectableIndices } from "./ui/session-list";
 import { handleTextInputKey, renderTextWithCursor } from "./ui/text-input";
-import { updatePreview, getPreviewPlainText, renderMessage } from "./ui/preview-pane";
+import { updatePreview, getPreviewPlainText, renderMessage, getSessionPath } from "./ui/preview-pane";
 import { discoverSessions, groupSessions, seedPaneSessionCache } from "./core/sessions";
-import { readPreviewMessages } from "./core/jsonl-reader";
-import { switchToPane, getMainSession, killPane } from "./core/tmux";
+import { readPreviewMessages, type PendingToolCall } from "./core/jsonl-reader";
+import { switchToPane, getMainSession, killPane, sendKeys, sendTextAndEnter } from "./core/tmux";
 import { loadNameCache, getSessionName, generateAIName, saveNameCache, type NameCache } from "./core/names";
 import { loadConfig } from "./core/config";
 import { loadState, saveState, loadPaneSessions } from "./core/state";
@@ -14,6 +15,7 @@ import { discoverRepos, listBranches } from "./core/git";
 import { initWizard, renderWizard, renderWizardPreview, renderWizardStatusBar, handleWizardKey, worktreeDirName } from "./ui/wizard";
 import { loadAllSessions, filterAndRankEntries, type SearchEntry } from "./core/search";
 import { renderSearchResults } from "./ui/search-list";
+import { createSpaceMenuState, renderSpaceMenu, handleSpaceMenuKey, getMenuDimensions, type SpaceMenuState } from "./ui/space-menu";
 import { C } from "./ui/colors";
 import type { DisplayRow, Session, CsmConfig, WizardState, WizardRepo, GlobalSearchState } from "./types";
 import { resolve } from "path";
@@ -65,6 +67,22 @@ const attentionTypes = new Map<string, "blocked" | "turnComplete">();
 let pendingKillPaneId: string | null = null;
 let killConfirmTimer: ReturnType<typeof setTimeout> | null = null;
 
+// Space menu state (null = not in menu mode)
+let spaceMenu: SpaceMenuState | null = null;
+let menuBox: blessed.Widgets.BoxElement | null = null;
+// Flag: true while keypress handler is processing a space menu key this tick.
+// Prevents screen.key() handlers from acting on a key the menu already consumed.
+let spaceMenuHandledKey = false;
+
+// Cached pending tool call from last preview update
+let cachedPendingToolCall: PendingToolCall | null = null;
+
+// Inline text input state for custom answers (t key)
+let customInputState: { text: string; cursor: number } | null = null;
+
+// Guard against async double-fire (e.g. Enter pressed twice before first completes)
+let isExiting = false;
+
 // Attention state — populated from monitor's state.json each refresh
 const needsAttention = new Set<string>();
 // Persists across refreshes. Entries cleaned up when monitor clears the attention.
@@ -89,8 +107,106 @@ function getWindowFlags(session: Session, sessions: Session[]): { hasAttention: 
 function updateStatusBar() {
   if (wizardState) return; // Don't overwrite wizard status bar
   if (globalSearch) return; // Don't overwrite search bar
+  if (spaceMenu) return; // Don't overwrite while menu is open
   if (flashTimer) return; // Don't overwrite active flash messages
-  renderStatusBar(statusBar, getSelectedSession()?.status, showArchived);
+  if (customInputState) return; // Don't overwrite inline text input
+  const session = getSelectedSession();
+  renderStatusBar(statusBar, session?.status, showArchived,
+    session?.status === "waiting" ? cachedPendingToolCall : null);
+}
+
+// --- Space menu helpers ---
+
+function getOrCreateMenuBox() {
+  if (!menuBox) {
+    menuBox = blessed.box({
+      parent: screen,
+      bottom: 2,
+      left: 2,
+      width: 24,
+      height: 8,
+      border: { type: "line" },
+      tags: true,
+      hidden: true,
+      style: {
+        bg: C.surface,
+        fg: C.muted,
+        border: { fg: C.dim, bg: C.surface },
+      },
+      padding: { left: 1, right: 1 },
+    });
+  }
+  return menuBox!;
+}
+
+function updateMenuBox() {
+  if (!spaceMenu) return;
+  const box = getOrCreateMenuBox();
+  const dims = getMenuDimensions(spaceMenu);
+  box.width = dims.width;
+  box.height = dims.height;
+  box.setContent(renderSpaceMenu(spaceMenu));
+}
+
+function openSpaceMenu() {
+  spaceMenu = createSpaceMenuState();
+  const box = getOrCreateMenuBox();
+  updateMenuBox();
+  box.show();
+  screen.render();
+}
+
+function closeSpaceMenu() {
+  spaceMenu = null;
+  const box = getOrCreateMenuBox();
+  box.hide();
+  updateStatusBar();
+  screen.render();
+}
+
+async function handleCopy() {
+  const text = getPreviewPlainText();
+  if (!text) {
+    flashStatusMessage(`{${C.dim}-fg}Nothing to copy{/${C.dim}-fg}`);
+    return;
+  }
+  try {
+    const proc = Bun.spawn(["pbcopy"], { stdin: "pipe" });
+    proc.stdin.write(text);
+    proc.stdin.end();
+    await proc.exited;
+    flashStatusMessage(`{${C.mint}-fg}Copied to clipboard{/${C.mint}-fg}`);
+  } catch {
+    flashStatusMessage(`{${C.red}-fg}Copy failed{/${C.red}-fg}`);
+  }
+}
+
+function handleRename() {
+  const session = getSelectedSession();
+  if (!session || !session.firstPrompt) {
+    flashStatusMessage(`{${C.dim}-fg}No prompt to generate name from{/${C.dim}-fg}`);
+    return;
+  }
+  if (session.status === "archived") {
+    flashStatusMessage(`{${C.dim}-fg}AI naming disabled for archived sessions{/${C.dim}-fg}`);
+    return;
+  }
+  flashStatusMessage(`{${C.muted}-fg}Generating name\u2026{/${C.muted}-fg}`);
+  const sessionId = session.id;
+  const sessionSummary = session.summary;
+  const sessionFirstPrompt = session.firstPrompt;
+  delete nameCache.names[sessionId];
+  delete nameCache.sources[sessionId];
+  generateAIName(sessionFirstPrompt, sessionSummary, session.branch).then(async (name) => {
+    if (name) {
+      nameCache.names[sessionId] = name;
+      nameCache.sources[sessionId] = sessionSummary || sessionFirstPrompt;
+      await saveNameCache(nameCache);
+      await refresh();
+    } else {
+      flashStatusMessage(`{${C.dim}-fg}Name generation failed{/${C.dim}-fg}`);
+    }
+  });
 }
 
 function renderSearchBar() {
@@ -229,8 +345,12 @@ async function safeUpdatePreview(
   opts?: { scrollToBottom?: boolean; archivedSessions?: Session[] },
 ): Promise<boolean> {
   const gen = ++previewGeneration;
-  await updatePreview(previewBox, session, opts);
-  return gen === previewGeneration;
+  const pending = await updatePreview(previewBox, session, opts);
+  if (gen === previewGeneration) {
+    cachedPendingToolCall = pending ?? null;
+    return true;
+  }
+  return false;
 }
 
 async function refresh(opts?: { skipArchivedSummaries?: boolean }) {
@@ -413,6 +533,8 @@ async function handleGroupSelect(direction: 1 | -1) {
 async function handleEnter() {
   const session = getSelectedSession();
   if (!session?.tmuxPane) return;
+  if (isExiting) return;
+  isExiting = true;
 
   const { paneId, sessionName, windowIndex } = session.tmuxPane;
   const key = paneId;
@@ -442,6 +564,8 @@ async function handleResume() {
   const session = getSelectedSession();
   if (!session) return;
   if (!session.id) return;
+  if (isExiting) return;
+  isExiting = true;
 
   const targetSession = await getMainSession();
   if (!targetSession) return;
@@ -515,11 +639,13 @@ async function handleKill() {
 async function handleFork() {
   const session = getSelectedSession();
   if (!session) return;
+  if (isExiting) return;
 
   if (!session.id) {
     flashStatusMessage(`{${C.dim}-fg}No session ID to fork{/${C.dim}-fg}`);
     return;
   }
+  isExiting = true;
 
   const targetSession = await getMainSession();
   if (!targetSession) return;
@@ -543,17 +669,164 @@ function cleanup() {
   screen.destroy();
 }
 
-// Key bindings (guarded: no-op when wizard or search is active)
-screen.key(["j", "down"], () => { if (wizardState || globalSearch) return; handleSelect(1); });
-screen.key(["k", "up"], () => { if (wizardState || globalSearch) return; handleSelect(-1); });
-screen.key(["S-j"], () => { if (wizardState || globalSearch) return; handleGroupSelect(1); });
-screen.key(["S-k"], () => { if (wizardState || globalSearch) return; handleGroupSelect(-1); });
-screen.key(["enter"], () => { if (wizardState || wizardHandledKey || globalSearch) return; handleEnterContextual(); });
-screen.key(["r"], () => { if (wizardState || globalSearch) return; refresh(); });
-screen.key(["x"], () => { if (wizardState || globalSearch) return; handleKill(); });
-screen.key(["f"], () => { if (wizardState || globalSearch) return; handleFork(); });
+// --- Auto-advance and optimistic approve ---
+
+/** Find and select the next waiting session, wrapping around. Returns true if found. */
+async function advanceToNextWaiting(): Promise<boolean> {
+  const selectable = getSelectableIndices(rows);
+  if (selectable.length === 0) return false;
+
+  const startPos = selectable.indexOf(selectedIndex);
+  if (startPos < 0) return false;
+
+  for (let offset = 1; offset < selectable.length; offset++) {
+    const idx = selectable[(startPos + offset) % selectable.length];
+    const row = rows[idx];
+    if (row.type === "session" && row.session.status === "waiting") {
+      selectedIndex = idx;
+      saveSelection();
+      renderSessionList(listBox, rows, selectedIndex, needsAttention);
+      updateStatusBar();
+      const isCurrent = await safeUpdatePreview(cachedSession, { scrollToBottom: true });
+      if (isCurrent) screen.render();
+      return true;
+    }
+  }
+  return false;
+}
+
+/** Optimistically flip session to running and clear cached pending call */
+function optimisticApprove(session: Session) {
+  session.status = "running";
+  cachedPendingToolCall = null;
+  renderSessionList(listBox, rows, selectedIndex, needsAttention);
+  updateStatusBar();
+}
+
+/** Render inline text input bar for custom answers */
+function renderCustomInputBar() {
+  if (!customInputState) return;
+  const text = renderTextWithCursor(customInputState.text, customInputState.cursor);
+  statusBar.setContent(
+    `  {${C.peach}-fg}❯{/${C.peach}-fg} ${text}` +
+    `  {${C.dim}-fg}Enter send · Esc cancel{/${C.dim}-fg}`,
+  );
+}
+
+// --- Contextual key handler (y/Y/1-9/t for waiting sessions) ---
+
+screen.on("keypress", async (_ch: string, key: any) => {
+  if (!key || wizardState || globalSearch || spaceMenu) return;
+
+  const keyName = key.full || key.name || "";
+  const ch = _ch || "";
+
+  // --- Inline text input mode ---
+  if (customInputState) {
+    // Mark key as consumed
+    spaceMenuHandledKey = true;
+    queueMicrotask(() => { spaceMenuHandledKey = false; });
+
+    if (keyName === "escape") {
+      customInputState = null;
+      updateStatusBar();
+      screen.render();
+      return;
+    }
+
+    if (keyName === "enter" || keyName === "return") {
+      const text = customInputState.text;
+      customInputState = null;
+      const session = getSelectedSession();
+      if (session?.tmuxPane && text.trim()) {
+        await sendTextAndEnter(session.tmuxPane.paneId, text);
+        optimisticApprove(session);
+        await advanceToNextWaiting();
+        screen.render();
+      } else {
+        updateStatusBar();
+        screen.render();
+      }
+      return;
+    }
+
+    // Delegate to text input handler
+    const result = handleTextInputKey(customInputState.text, customInputState.cursor, keyName, ch);
+    if (result.handled) {
+      customInputState.text = result.text;
+      customInputState.cursor = result.cursor;
+      renderCustomInputBar();
+      screen.render();
+    }
+    return;
+  }
+
+  // --- Top-level contextual keys (only for waiting sessions) ---
+  const session = getSelectedSession();
+  if (!session || session.status !== "waiting" || !session.tmuxPane) return;
+
+  const paneId = session.tmuxPane.paneId;
+
+  // y = approve (Enter)
+  if (ch === "y" && !key.shift && !key.ctrl && !key.meta) {
+    spaceMenuHandledKey = true;
+    queueMicrotask(() => { spaceMenuHandledKey = false; });
+    await sendKeys(paneId, ["Enter"]);
+    optimisticApprove(session);
+    await advanceToNextWaiting();
+    screen.render();
+    return;
+  }
+
+  // Y = approve, don't ask again (Down + Enter)
+  if (ch === "Y" || (key.shift && ch === "y")) {
+    spaceMenuHandledKey = true;
+    queueMicrotask(() => { spaceMenuHandledKey = false; });
+    await sendKeys(paneId, ["Down", "Enter"]);
+    optimisticApprove(session);
+    await advanceToNextWaiting();
+    screen.render();
+    return;
+  }
+
+  // 1-9 = answer question option
+  const num = parseInt(ch, 10);
+  if (num >= 1 && num <= 9) {
+    if (cachedPendingToolCall?.question) {
+      const options = cachedPendingToolCall.question.options;
+      if (num <= options.length) {
+        spaceMenuHandledKey = true;
+        queueMicrotask(() => { spaceMenuHandledKey = false; });
+        await sendTextAndEnter(paneId, String(num));
+        optimisticApprove(session);
+        await advanceToNextWaiting();
+        screen.render();
+        return;
+      }
+    }
+  }
+
+  // t = type custom answer
+  if (ch === "t" && !key.ctrl && !key.meta) {
+    spaceMenuHandledKey = true;
+    queueMicrotask(() => { spaceMenuHandledKey = false; });
+    customInputState = { text: "", cursor: 0 };
+    renderCustomInputBar();
+    screen.render();
+    return;
+  }
+});
+
+// Key bindings (guarded: no-op when wizard, search, or space menu is active)
+screen.key(["j", "down"], () => { if (wizardState || globalSearch || spaceMenu || customInputState) return; handleSelect(1); });
+screen.key(["k", "up"], () => { if (wizardState || globalSearch || spaceMenu || customInputState) return; handleSelect(-1); });
+screen.key(["S-j"], () => { if (wizardState || globalSearch || spaceMenu || customInputState) return; handleGroupSelect(1); });
+screen.key(["S-k"], () => { if (wizardState || globalSearch || spaceMenu || customInputState) return; handleGroupSelect(-1); });
+screen.key(["enter"], () => { if (wizardState || wizardHandledKey || globalSearch || spaceMenu || spaceMenuHandledKey || customInputState) return; handleEnterContextual(); });
+screen.key(["x"], () => { if (wizardState || globalSearch || spaceMenu || spaceMenuHandledKey || customInputState) return; handleKill(); });
+screen.key(["f"], () => { if (wizardState || globalSearch || spaceMenu || spaceMenuHandledKey || customInputState) return; handleFork(); });
 screen.key(["c"], async () => {
-  if (wizardState || globalSearch) return;
+  if (wizardState || globalSearch || spaceMenu || customInputState) return;
   const session = getSelectedSession();
   if (!session?.repoPath) {
     flashStatusMessage(`{${C.dim}-fg}No repo path{/${C.dim}-fg}`);
@@ -566,78 +839,35 @@ screen.key(["c"], async () => {
     flashStatusMessage(`{${C.red}-fg}Failed to open Cursor{/${C.red}-fg}`);
   }
 });
-screen.key(["s"], () => {
-  if (wizardState || globalSearch) return;
-  const session = getSelectedSession();
-  if (!session || !session.firstPrompt) {
-    flashStatusMessage(`{${C.dim}-fg}No prompt to generate name from{/${C.dim}-fg}`);
-    return;
-  }
-  if (session.status === "archived") {
-    flashStatusMessage(`{${C.dim}-fg}AI naming disabled for archived sessions{/${C.dim}-fg}`);
-    return;
-  }
-  flashStatusMessage(`{${C.muted}-fg}Generating name…{/${C.muted}-fg}`);
-  const sessionId = session.id;
-  const sessionSummary = session.summary;
-  const sessionFirstPrompt = session.firstPrompt;
-  generateAIName(sessionFirstPrompt, sessionSummary).then(async (name) => {
-    if (name) {
-      nameCache.names[sessionId] = name;
-      nameCache.sources[sessionId] = sessionSummary || sessionFirstPrompt;
-      await saveNameCache(nameCache);
-      await refresh();
-    } else {
-      flashStatusMessage(`{${C.dim}-fg}Name generation failed{/${C.dim}-fg}`);
-    }
-  });
-});
 screen.key(["a"], () => {
-  if (wizardState || globalSearch) return;
+  if (wizardState || globalSearch || spaceMenu || customInputState) return;
   showArchived = !showArchived;
   refresh();
 });
-screen.key(["y"], async () => {
-  if (wizardState || globalSearch) return;
-  const text = getPreviewPlainText();
-  if (!text) {
-    flashStatusMessage(`{${C.dim}-fg}Nothing to copy{/${C.dim}-fg}`);
-    return;
-  }
-  try {
-    const proc = Bun.spawn(["pbcopy"], { stdin: "pipe" });
-    proc.stdin.write(text);
-    proc.stdin.end();
-    await proc.exited;
-    flashStatusMessage(`{${C.mint}-fg}Copied to clipboard{/${C.mint}-fg}`);
-  } catch {
-    flashStatusMessage(`{${C.red}-fg}Copy failed{/${C.red}-fg}`);
-  }
-});
 screen.key(["u"], () => {
-  if (wizardState || globalSearch) return;
+  if (wizardState || globalSearch || spaceMenu || customInputState) return;
   previewBox.scroll(-6);
   screen.render();
 });
 screen.key(["d"], () => {
-  if (wizardState || globalSearch) return;
+  if (wizardState || globalSearch || spaceMenu || customInputState) return;
   previewBox.scroll(6);
   screen.render();
 });
 screen.key(["q"], () => {
-  if (wizardState || wizardHandledKey || globalSearch) return;
+  if (wizardState || wizardHandledKey || globalSearch || spaceMenu || spaceMenuHandledKey || customInputState) return;
   cleanup();
   process.exit(0);
 });
 screen.key(["escape"], () => {
-  if (wizardState || wizardHandledKey || globalSearch) return;
+  if (wizardState || wizardHandledKey || globalSearch || spaceMenu || spaceMenuHandledKey || customInputState) return;
   cleanup();
   process.exit(0);
 });
 
 // Quick new session in selected repo (`N` / Shift+N)
 screen.key(["S-n"], async () => {
-  if (wizardState || globalSearch) return;
+  if (wizardState || globalSearch || spaceMenu || customInputState) return;
 
   const session = getSelectedSession();
   if (!session?.repoPath) {
@@ -666,7 +896,7 @@ screen.key(["S-n"], async () => {
 
 // New Session wizard (`n` key)
 screen.key(["n"], async () => {
-  if (wizardState || globalSearch) return;
+  if (wizardState || globalSearch || spaceMenu || customInputState) return;
 
   // Pause refresh loop
   if (refreshTimer) { clearInterval(refreshTimer); refreshTimer = null; }
@@ -717,9 +947,15 @@ screen.key(["n"], async () => {
 // keypress handler from also processing `/` as text input in the same event.
 let searchJustActivated = false;
 
+// Space key opens action menu
+screen.key(["space"], () => {
+  if (wizardState || globalSearch || spaceMenu || customInputState) return;
+  openSpaceMenu();
+});
+
 // `/` key activates global search mode
 screen.on("keypress", (_ch: string, key: any) => {
-  if (!key || wizardState || globalSearch) return;
+  if (!key || wizardState || globalSearch || spaceMenu) return;
   if (_ch === "/" && !key.ctrl && !key.meta) {
     preSearchIndex = selectedIndex;
     globalSearch = {
@@ -759,6 +995,8 @@ screen.on("keypress", (_ch: string, key: any) => {
 async function handleSearchEnter() {
   const entry = getSelectedSearchEntry();
   if (!entry) return;
+  if (isExiting) return;
+  isExiting = true;
 
   if (entry.isActive && entry.activePaneId && entry.activeSessionName != null && entry.activeWindowIndex != null) {
     const paneId = entry.activePaneId;
@@ -811,6 +1049,94 @@ async function handleSearchEnter() {
   }
   process.exit(0);
 }
+
+// Space menu keypress handler (intercepts all keys when menu is active)
+screen.on("keypress", async (_ch: string, key: any) => {
+  if (!spaceMenu || !key) return;
+
+  const keyName = key.full || key.name || "";
+  const ch = _ch || "";
+
+  const action = handleSpaceMenuKey(spaceMenu, keyName, ch);
+
+  // Mark key as consumed so screen.key() handlers don't also fire
+  spaceMenuHandledKey = true;
+  queueMicrotask(() => { spaceMenuHandledKey = false; });
+
+  switch (action.type) {
+    case "noop":
+      break;
+    case "render":
+      updateMenuBox();
+      screen.render();
+      break;
+    case "close":
+      closeSpaceMenu();
+      break;
+    case "back":
+      if (spaceMenu.level === "root") {
+        closeSpaceMenu();
+      } else {
+        // Restore to root
+        spaceMenu.level = "root";
+        spaceMenu.previousLevel = undefined;
+        spaceMenu.messageText = "";
+        spaceMenu.messageCursor = 0;
+        updateMenuBox();
+        screen.render();
+      }
+      break;
+    case "exec":
+      closeSpaceMenu();
+      switch (action.command) {
+        case "copy":
+          handleCopy();
+          break;
+        case "rename":
+          handleRename();
+          break;
+        case "kill":
+          handleKill();
+          break;
+        case "fork":
+          handleFork();
+          break;
+      }
+      break;
+    case "send-keys": {
+      const session = getSelectedSession();
+      const keys = action.keys;
+      closeSpaceMenu(); // Close before await to prevent double-fire
+      if (!session?.tmuxPane) {
+        flashStatusMessage(`{${C.dim}-fg}No active pane{/${C.dim}-fg}`);
+        break;
+      }
+      await sendKeys(session.tmuxPane.paneId, keys);
+      flashStatusMessage(`{${C.mint}-fg}Sent{/${C.mint}-fg}`);
+      break;
+    }
+    case "start-input":
+      spaceMenu.level = "send-message";
+      spaceMenu.previousLevel = "root";
+      spaceMenu.messageText = "";
+      spaceMenu.messageCursor = 0;
+      updateMenuBox();
+      screen.render();
+      break;
+    case "send-text": {
+      const session = getSelectedSession();
+      const text = action.text;
+      closeSpaceMenu(); // Close before await to prevent double-fire
+      if (!session?.tmuxPane) {
+        flashStatusMessage(`{${C.dim}-fg}No active pane{/${C.dim}-fg}`);
+        break;
+      }
+      await sendTextAndEnter(session.tmuxPane.paneId, text);
+      flashStatusMessage(`{${C.mint}-fg}Sent{/${C.mint}-fg}`);
+      break;
+    }
+  }
+});
 
 // Search keypress handler (intercepts all keys when search is active)
 screen.on("keypress", async (_ch: string, key: any) => {
@@ -953,6 +1279,8 @@ async function handleWizardLaunch(
   branch: { name: string; isRemote: boolean; isCurrent: boolean },
   worktreeName: string,
 ): Promise<string | null> {
+  if (isExiting) return null;
+  isExiting = true;
   const targetSession = await getMainSession();
   if (!targetSession) {
     return "No tmux session found";
