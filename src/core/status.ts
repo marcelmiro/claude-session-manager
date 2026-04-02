@@ -35,6 +35,7 @@ const QUESTION_UI_PATTERNS = [
 const SEPARATOR_RE = /^[─━═─\-▪][─━═─\-\s▪]{3,}/;
 const TIP_RE = /^⎿\s+Tip:/;  // UI tip lines shown during running — skip like separators
 const TASK_RE = /^(?:⎿\s+)?[✔◼◻☐]\s/;  // Task list items (completed/in-progress/pending) — skip to reach spinner
+const TASK_SUMMARY_RE = /^…\s+\+\d+/;  // Collapsed task summary (e.g. "… +6 completed") — skip to reach spinner
 
 /**
  * Extract content lines immediately above the ❯ prompt.
@@ -65,8 +66,12 @@ export function getAbovePrompt(lines: string[]): { statusLine: string; nearbyLin
   // Collect non-empty, non-separator lines above the prompt
   const above: string[] = [];
   for (let i = promptIdx - 1; i >= Math.max(0, promptIdx - 20); i--) {
-    const trimmed = lines[i].trim();
-    if (!trimmed || SEPARATOR_RE.test(trimmed) || TASK_RE.test(trimmed)) continue;
+    const line = lines[i];
+    const trimmed = line.trim();
+    if (!trimmed || SEPARATOR_RE.test(trimmed) || TASK_RE.test(trimmed) || TASK_SUMMARY_RE.test(trimmed)) continue;
+    // Skip right-aligned decorative content (e.g. Mottlex companion art)
+    const leadingSpaces = line.length - line.trimStart().length;
+    if (leadingSpaces > line.length * 0.6 && trimmed.length < 30) continue;
     if (TIP_RE.test(trimmed)) {
       // Tip line found — discard any continuation lines we already collected
       // (in narrow panes, tips wrap and continuations appear between tip header and separator)
