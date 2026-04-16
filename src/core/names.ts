@@ -2,6 +2,26 @@ import { homedir } from "os";
 
 const NAMING_LOCK = `${homedir()}/.config/csm/naming.lock`;
 
+/** Resolve the full path to `claude` CLI, searching common install locations beyond PATH. */
+function resolveClaudePath(): string {
+  const found = Bun.which("claude");
+  if (found) return found;
+  // tmux #() inherits a limited PATH — check common install locations
+  const home = homedir();
+  const candidates = [
+    `${home}/.local/bin`,
+    `${home}/.claude/bin`,
+    "/usr/local/bin",
+  ];
+  for (const dir of candidates) {
+    const path = Bun.which("claude", { PATH: dir });
+    if (path) return path;
+  }
+  return "claude"; // fallback — will fail at spawn
+}
+
+const CLAUDE_PATH = resolveClaudePath();
+
 export async function acquireNamingLock(): Promise<boolean> {
   try {
     const file = Bun.file(NAMING_LOCK);
@@ -83,7 +103,7 @@ Bad: implement-authentication-flow, packages-api-src, update-index-ts
 Reply with ONLY the kebab-case name, nothing else.
 
 ${contextParts.join("\n")}`;
-    const proc = Bun.spawn(["claude", "-p", "--model", "haiku", "--no-session-persistence"], {
+    const proc = Bun.spawn([CLAUDE_PATH, "-p", "--model", "haiku", "--no-session-persistence"], {
       stdin: new Response(namePrompt),
       stdout: "pipe",
       stderr: "ignore",
