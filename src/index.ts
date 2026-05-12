@@ -195,12 +195,13 @@ function handleRename() {
   const sessionId = session.id;
   const sessionSummary = session.summary;
   const sessionFirstPrompt = session.firstPrompt;
+  const sessionLastPrompt = session.lastPrompt;
   delete nameCache.names[sessionId];
   delete nameCache.sources[sessionId];
-  generateAIName(sessionFirstPrompt, sessionSummary, session.branch).then(async (name) => {
+  generateAIName(sessionFirstPrompt, sessionSummary, session.branch, sessionLastPrompt).then(async (name) => {
     if (name) {
       nameCache.names[sessionId] = name;
-      nameCache.sources[sessionId] = sessionSummary || sessionFirstPrompt;
+      nameCache.sources[sessionId] = sessionLastPrompt || sessionSummary || sessionFirstPrompt;
       await saveNameCache(nameCache);
       await refresh();
     } else {

@@ -130,14 +130,17 @@ function hasTerminalNotifier(): boolean {
  *  Uses terminal-notifier when available for clickable notifications that focus
  *  Ghostty and switch to the correct tmux window/pane.
  *  Falls back to osascript (no click action).
- *  Skips if Ghostty is the frontmost app. */
+ *  When Ghostty is frontmost, plays sound only (no visual notification). */
 function sendNativeNotification(
   title: string,
   body: string,
   pane?: { sessionName: string; windowIndex: number; paneId: string },
 ): void {
   try {
-    const frontCheck = `front=$(osascript -e 'tell application "System Events" to return name of first application process whose frontmost is true' 2>/dev/null); [ "$front" = "ghostty" ] && exit 0`;
+    // If Ghostty is frontmost: play sound only, skip visual notification.
+    // Otherwise: full notification with sound (terminal-notifier or osascript).
+    const soundOnly = `afplay /System/Library/Sounds/Ping.aiff >/dev/null 2>&1 &`;
+    const frontCheck = `front=$(osascript -e 'tell application "System Events" to return name of first application process whose frontmost is true' 2>/dev/null); if [ "$front" = "ghostty" ]; then ${soundOnly} exit 0; fi`;
 
     if (hasTerminalNotifier() && pane) {
       const switchCmd = `tmux select-window -t '${pane.sessionName}:${pane.windowIndex}' && tmux select-pane -t '${pane.paneId}'`;
@@ -151,11 +154,10 @@ function sendNativeNotification(
       });
     } else {
       const escaped = (s: string) => s.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
-      Bun.spawn(["osascript",
-        "-e", `tell application "System Events" to set frontApp to name of first application process whose frontmost is true`,
-        "-e", `if frontApp is "ghostty" then return`,
-        "-e", `display notification "${escaped(body)}" with title "${escaped(title)}" sound name "Ping"`,
-      ], { stdout: "ignore", stderr: "ignore" });
+      Bun.spawn(["bash", "-c", [
+        frontCheck,
+        `osascript -e 'display notification "${escaped(body)}" with title "${escaped(title)}" sound name "Ping"'`,
+      ].join("; ")], { stdout: "ignore", stderr: "ignore" });
     }
   } catch {
     // Non-fatal

@@ -424,6 +424,7 @@ async function buildActiveSession(
     summary: activeInfo?.summary ?? "",
     modified: activeInfo?.modified ? new Date(activeInfo.modified) : new Date(),
     firstPrompt: activeInfo?.firstPrompt ?? "",
+    lastPrompt: activeInfo?.lastPrompt ?? "",
     name: "",
     tmuxPane: {
       paneId: pane.paneId,
@@ -443,7 +444,7 @@ export async function findActiveSessionInfo(
   projectsDir: string,
   repoPath: string,
   knownSessionId?: string,
-): Promise<{ sessionId: string; messageCount: number; summary: string; modified?: string; firstPrompt: string } | null> {
+): Promise<{ sessionId: string; messageCount: number; summary: string; modified?: string; firstPrompt: string; lastPrompt: string } | null> {
   // Without a known session ID we can't reliably match — enrichment
   // for unmatched sessions happens in enrichUnmatchedSessions() instead
   if (!knownSessionId) return null;
@@ -481,7 +482,7 @@ async function resolveProjectDir(projectsDir: string, encodedPath: string, sessi
 async function readSessionInfo(
   projectDir: string,
   sessionId: string,
-): Promise<{ sessionId: string; messageCount: number; summary: string; modified?: string; firstPrompt: string }> {
+): Promise<{ sessionId: string; messageCount: number; summary: string; modified?: string; firstPrompt: string; lastPrompt: string }> {
   let messageCount = 0;
   let summary = "";
   let modified: string | undefined;
@@ -517,7 +518,9 @@ async function readSessionInfo(
     if (!firstPrompt) firstPrompt = summary;
   }
 
-  return { sessionId, messageCount, summary, modified, firstPrompt };
+  const lastPrompt = await getLatestUserPrompt(jsonlPath);
+
+  return { sessionId, messageCount, summary, modified, firstPrompt, lastPrompt };
 }
 
 /**
@@ -607,6 +610,7 @@ async function discoverArchivedSessions(
           summary,
           modified: new Date(entry.modified),
           firstPrompt: entry.firstPrompt || "",
+          lastPrompt: "",
           name: "",
           tmuxPane: undefined,
         });
@@ -660,6 +664,7 @@ async function discoverArchivedSessions(
             summary,
             modified: new Date(stat.mtimeMs),
             firstPrompt: metadata.firstPrompt || "",
+            lastPrompt: "",
             name: "",
             tmuxPane: undefined,
           });
@@ -886,6 +891,36 @@ async function getFirstUserPrompt(sessionPath: string): Promise<string> {
       }
     }
 
+    return "";
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * Scan a JSONL session file for the most recent `"type":"last-prompt"` entry.
+ * Claude Code writes one of these on each user turn, so this reflects the
+ * current conversation direction (unlike firstPrompt, which is frozen).
+ * Returns a truncated string (first 200 chars) or empty string on failure.
+ */
+async function getLatestUserPrompt(sessionPath: string): Promise<string> {
+  try {
+    const raw = await Bun.file(sessionPath).text();
+    const lines = raw.split("\n");
+    for (let i = lines.length - 1; i >= 0; i--) {
+      const line = lines[i];
+      if (!line || !line.includes('"type":"last-prompt"')) continue;
+      try {
+        const parsed = JSON.parse(line);
+        if (parsed.type !== "last-prompt") continue;
+        const text: string = parsed.lastPrompt || "";
+        if (!text) continue;
+        const clean = text.replace(/\s+/g, " ").trim();
+        return clean.length > 200 ? clean.slice(0, 200) + "..." : clean;
+      } catch {
+        continue;
+      }
+    }
     return "";
   } catch {
     return "";

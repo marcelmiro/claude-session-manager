@@ -129,6 +129,7 @@ async function quickDiscoverActive(): Promise<{ sessions: Session[]; allPanes: P
         summary: "",
         modified: new Date(),
         firstPrompt: "",
+        lastPrompt: "",
         name: stripAllPrefixes(pane.windowName),
         lastCapture: plain,
         tmuxPane: {
@@ -422,18 +423,20 @@ async function phase2(
     }
   }
 
-  // Also clear skips for sessions that now have names
-  for (const sid of Object.keys(namingSkips)) {
-    if (nameCache.names[sid]) {
-      delete namingSkips[sid];
-      skipsDirty = true;
-    }
-  }
+  // namingSkips doubles as a post-rename cooldown so summary churn doesn't
+  // thrash regenerations. Don't auto-clear it when a name exists.
 
   const unnamed = sessions.find(s => {
     if (!s.tmuxPane) return false;
     const sessionId = paneSessionMap[s.tmuxPane.paneId];
-    return sessionId && !nameCache.names[sessionId] && !namingSkips[sessionId];
+    if (!sessionId || namingSkips[sessionId]) return false;
+    if (!nameCache.names[sessionId]) return true;
+    // Regenerate when the freshest convo signal (lastPrompt > summary) diverges
+    // from the source we last named off of. lastPrompt is needed because Claude
+    // doesn't always update its summary after /rewind or topic shifts.
+    const cachedSource = nameCache.sources[sessionId] || "";
+    const currentSignal = s.lastPrompt || s.summary || "";
+    return !!currentSignal && currentSignal !== cachedSource;
   });
 
   if (unnamed?.tmuxPane) {
@@ -444,15 +447,20 @@ async function phase2(
         const info = await findActiveSessionInfo(projectsDir, unnamed.repoPath, sessionId);
         const firstPrompt = info?.firstPrompt ?? "";
         const summary = info?.summary ?? "";
-        if (firstPrompt || summary) {
+        const lastPrompt = info?.lastPrompt ?? "";
+        if (firstPrompt || summary || lastPrompt) {
           // Get branch for naming context
           let branch = "";
           try { branch = (await Bun.$`git -C ${unnamed.repoPath} branch --show-current`.quiet().text()).trim(); } catch {}
-          const name = await generateAIName(firstPrompt, summary, branch);
+          const name = await generateAIName(firstPrompt, summary, branch, lastPrompt);
           if (name) {
             nameCache.names[sessionId] = name;
-            nameCache.sources[sessionId] = summary || firstPrompt;
+            // Store the freshest signal we used so future drift checks compare apples-to-apples
+            nameCache.sources[sessionId] = lastPrompt || summary || firstPrompt;
             await saveNameCache(nameCache);
+            // Cooldown — prevents re-running claude -p on every minor summary edit
+            namingSkips[sessionId] = now;
+            skipsDirty = true;
             await debugLog(`phase2: named session ${sessionId} → "${name}"`);
 
             // Apply name to window immediately (with current prefix)

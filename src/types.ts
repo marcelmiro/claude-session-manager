@@ -17,6 +17,8 @@ export interface Session {
   summary: string;
   modified: Date;
   firstPrompt: string;
+  /** Most recent user prompt from JSONL `last-prompt` entries — reflects current convo direction after /rewind */
+  lastPrompt: string;
   name: string;
   tmuxPane?: TmuxPane;
   /** Cached pane capture from status detection — reused by preview to avoid a duplicate tmux call */

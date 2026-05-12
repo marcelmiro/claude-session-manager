@@ -80,20 +80,27 @@ export function extractPlanTitle(prompt: string): string {
  * AI-powered name generation using `claude -p`.
  * Returns kebab-case name or empty string on failure.
  */
-export async function generateAIName(firstPrompt: string, summary?: string, branch?: string): Promise<string> {
-  if (!firstPrompt && !summary) return "";
+export async function generateAIName(firstPrompt: string, summary?: string, branch?: string, lastPrompt?: string): Promise<string> {
+  if (!firstPrompt && !summary && !lastPrompt) return "";
 
   try {
-    const planTitle = extractPlanTitle(firstPrompt || "");
     const contextParts: string[] = [];
-    if (summary) contextParts.push(`Summary: "${summary}"`);
+    // Always anchor on firstPrompt — it's the most reliable signal of intent.
+    // Dropping it when summary/lastPrompt exist caused hallucinated names from
+    // vague follow-ups like "IDK, go check that".
+    const planTitle = extractPlanTitle(firstPrompt || "");
     if (planTitle) contextParts.push(`Plan title: "${planTitle}"`);
+    if (firstPrompt) contextParts.push(`First message: "${firstPrompt.slice(0, 300)}"`);
+    const usefulSummary = summary && summary !== firstPrompt ? summary : "";
+    if (usefulSummary) contextParts.push(`Summary: "${usefulSummary}"`);
+    if (lastPrompt && lastPrompt !== firstPrompt) {
+      contextParts.push(`Most recent user message: "${lastPrompt.slice(0, 300)}"`);
+    }
     if (branch) {
       // Strip ticket prefix (e.g. "ENG-2687-") for naming context
       const branchContext = branch.replace(/^[a-zA-Z]{2,6}-\d{2,}-?/, "");
       if (branchContext) contextParts.push(`Branch: "${branchContext}"`);
     }
-    contextParts.push(`First message: "${(firstPrompt || "").slice(0, 300)}"`);
 
     const namePrompt = `Name this coding session in 1-3 words, kebab-case. Be extremely compact: "impl" not "implement", "cfg" not "config", "auth" not "authentication", "perf" not "performance", "refactor" not "refactoring". Drop filler words (the, a, for, with, to). Focus on the ACTION and GOAL, not file paths or locations.
 
