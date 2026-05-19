@@ -42,30 +42,47 @@ const TASK_SUMMARY_RE = /^…\s+\+\d+/;  // Collapsed task summary (e.g. "… +6
  * Claude Code TUI layout (bottom of screen):
  *   [content lines]         ← conversation/tool output
  *   [status line]           ← spinner or completion indicator
+ *   [queued message UI]     ← optional, when user types while Claude is running
  *   ────────────────────    ← separator
  *   ❯ [user input]         ← prompt
  *   ────────────────────    ← separator
  *   stats line              ← context %, model, branch
  *   toolbar                 ← accept edits, etc.
+ *   [subagent list UI]      ← optional ❯ ◯-prefixed items shown on hover
  *
  * Returns { statusLine, nearbyLines } where:
- *   statusLine = the first non-empty, non-separator line above the prompt (spinner/completion)
+ *   statusLine = the spinner line if found within range, else the first content line above the prompt
  *   nearbyLines = up to 3 such lines (for multi-line waiting prompts)
  */
 export function getAbovePrompt(lines: string[]): { statusLine: string; nearbyLines: string } {
-  // Find the last ❯ line (current input prompt)
+  // Find the real ❯ input prompt: a ❯ line whose preceding non-empty line is a separator.
+  // This excludes subagent list items ("❯ ◯ .plan-reviewer") that appear below the prompt.
   let promptIdx = -1;
   for (let i = lines.length - 1; i >= 0; i--) {
-    if (lines[i].includes("❯")) {
+    if (!lines[i].includes("❯")) continue;
+    let prev = -1;
+    for (let j = i - 1; j >= 0 && j >= i - 3; j--) {
+      if (lines[j].trim()) { prev = j; break; }
+    }
+    if (prev !== -1 && SEPARATOR_RE.test(lines[prev].trim())) {
       promptIdx = i;
       break;
     }
   }
+  // Fallback: last ❯ (handles edge cases where the separator is missing or off-screen)
+  if (promptIdx === -1) {
+    for (let i = lines.length - 1; i >= 0; i--) {
+      if (lines[i].includes("❯")) { promptIdx = i; break; }
+    }
+  }
   if (promptIdx === -1) return { statusLine: "", nearbyLines: "" };
 
-  // Collect non-empty, non-separator lines above the prompt
+  // Collect non-empty, non-separator lines above the prompt.
+  // Scan a wider window than `above.length >= 3` would normally allow, so we can
+  // find a spinner sitting above a queued-message UI between it and the prompt.
   const above: string[] = [];
-  for (let i = promptIdx - 1; i >= Math.max(0, promptIdx - 20); i--) {
+  let spinnerLine = "";
+  for (let i = promptIdx - 1; i >= Math.max(0, promptIdx - 25); i--) {
     const line = lines[i];
     const trimmed = line.trim();
     if (!trimmed || SEPARATOR_RE.test(trimmed) || TASK_RE.test(trimmed) || TASK_SUMMARY_RE.test(trimmed)) continue;
@@ -76,14 +93,19 @@ export function getAbovePrompt(lines: string[]): { statusLine: string; nearbyLin
       // Tip line found — discard any continuation lines we already collected
       // (in narrow panes, tips wrap and continuations appear between tip header and separator)
       above.length = 0;
+      spinnerLine = "";
       continue;
     }
+    if (!spinnerLine && RUNNING_PATTERNS.some(p => p.test(trimmed))) {
+      spinnerLine = trimmed;
+    }
     above.push(trimmed);
-    if (above.length >= 3) break;
+    if (spinnerLine && above.length >= 3) break;
+    if (above.length >= 8) break;
   }
   return {
-    statusLine: above[0] ?? "",
-    nearbyLines: above.join("\n"),
+    statusLine: spinnerLine || above[0] || "",
+    nearbyLines: above.slice(0, 3).join("\n"),
   };
 }
 
