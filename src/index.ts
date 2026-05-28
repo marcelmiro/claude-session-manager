@@ -1290,18 +1290,24 @@ async function handleWizardLaunch(
   wizardState = null;
   cleanup();
   try {
-    // Build compound command: git operations (if needed) then claude
+    // Build compound command: git operations (if needed) then claude.
+    // For remote branches, fetch first so we branch off the latest upstream state
+    // rather than whatever `origin/<branch>` happened to point at from the last fetch.
+    const fetchPrefix = branch.isRemote
+      ? `git fetch origin ${shellQuote(branch.name)} && `
+      : "";
     let cmd: string;
     if (worktreeName) {
       const wtPath = worktreeDirName(repo.name, worktreeName);
       const wtAbsPath = resolve(repo.path, wtPath);
       const baseRef = branch.isRemote ? `origin/${branch.name}` : branch.name;
-      cmd = `git worktree add ${shellQuote(wtAbsPath)} -b ${shellQuote(worktreeName)} ${shellQuote(baseRef)} 2>/dev/null || git worktree add ${shellQuote(wtAbsPath)} ${shellQuote(worktreeName)} && cd ${shellQuote(wtAbsPath)} && claude`;
+      // Braces group the create-or-fallback so the fetch's && short-circuits the whole worktree step on failure.
+      cmd = `${fetchPrefix}{ git worktree add ${shellQuote(wtAbsPath)} -b ${shellQuote(worktreeName)} ${shellQuote(baseRef)} 2>/dev/null || git worktree add ${shellQuote(wtAbsPath)} ${shellQuote(worktreeName)}; } && cd ${shellQuote(wtAbsPath)} && claude`;
     } else if (!branch.isCurrent) {
       const checkout = branch.isRemote
-        ? `git checkout -b ${shellQuote(branch.name)} --track origin/${shellQuote(branch.name)} 2>/dev/null || git checkout ${shellQuote(branch.name)}`
+        ? `{ git checkout -b ${shellQuote(branch.name)} --track origin/${shellQuote(branch.name)} 2>/dev/null || git checkout ${shellQuote(branch.name)}; }`
         : `git checkout ${shellQuote(branch.name)}`;
-      cmd = `${checkout} && claude`;
+      cmd = `${fetchPrefix}${checkout} && claude`;
     } else {
       cmd = "claude";
     }
