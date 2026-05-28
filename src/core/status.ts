@@ -97,10 +97,15 @@ export function getAbovePrompt(lines: string[]): { statusLine: string; nearbyLin
       continue;
     }
     if (!spinnerLine && RUNNING_PATTERNS.some(p => p.test(trimmed))) {
+      // Spinner marks the bottom of the active region — older content above it
+      // is pre-spinner history (past assistant messages, user answers, etc.) and
+      // must not pollute nearbyLines, or stray "do you want to" text from
+      // earlier in the conversation will falsely trigger the waiting check.
       spinnerLine = trimmed;
+      above.push(trimmed);
+      break;
     }
     above.push(trimmed);
-    if (spinnerLine && above.length >= 3) break;
     if (above.length >= 8) break;
   }
   return {
