@@ -3,6 +3,10 @@
 > **Status:** DRAFT — for agent iteration.
 > **Depends on:** Implementation 2 (stable, headless `core/` API).
 > **Unblocks:** the actual goal — using sessions from the iPhone.
+>
+> **⛔ Gate:** Do not write code until **Gate C** in
+> [`04-verification-gates.md`](./04-verification-gates.md) is 🟢. See the
+> Enforcement protocol in [`00-overview.md`](./00-overview.md).
 
 ## Goal
 

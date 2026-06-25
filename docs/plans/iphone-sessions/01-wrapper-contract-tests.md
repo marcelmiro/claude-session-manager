@@ -3,6 +3,10 @@
 > **Status:** DRAFT — for agent iteration.
 > **Depends on:** nothing (this is the foundation).
 > **Unblocks:** Implementation 2 (the failing tests define its target contract).
+>
+> **⛔ Gate:** Do not write code until **Gate A (items A1–A5)** and **Gate B** in
+> [`04-verification-gates.md`](./04-verification-gates.md) are 🟢. See the
+> Enforcement protocol in [`00-overview.md`](./00-overview.md).
 
 ## Goal
 

@@ -3,6 +3,11 @@
 > **Status:** DRAFT — for agent iteration.
 > **Depends on:** Implementation 1 (contract tests define the target).
 > **Unblocks:** Implementation 3 (provides a stable, reliable internal API).
+>
+> **⛔ Gate:** Do not write code until **Gate A** in
+> [`04-verification-gates.md`](./04-verification-gates.md) is 🟢 — especially
+> **A6 (blocking-hook approval semantics)**, the highest-risk assumption in this
+> implementation. See the Enforcement protocol in [`00-overview.md`](./00-overview.md).
 
 ## Goal
 

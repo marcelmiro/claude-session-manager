@@ -111,7 +111,36 @@ The work is three large, sequential implementations. Each unblocks the next.
 | [`01-wrapper-contract-tests.md`](./01-wrapper-contract-tests.md) | #1 | Contract tests + fixtures + version-drift canary |
 | [`02-camp1-hooks-jsonl.md`](./02-camp1-hooks-jsonl.md) | #2 | Hooks, event-status, transcript reader, approval IPC |
 | [`03-monorepo-mobile-app.md`](./03-monorepo-mobile-app.md) | #3 | Monorepo layout, bridge server, PWA, push, security |
+| [`04-verification-gates.md`](./04-verification-gates.md) | all | Pre-implementation gates that must be 🟢 before any code |
 | [`90-references.md`](./90-references.md) | all | Verified Claude Code facts + competitor research + URLs |
+
+## Enforcement protocol (read before implementing anything)
+
+Each implementation has a **Verification Gate** in
+[`04-verification-gates.md`](./04-verification-gates.md): a checklist of
+falsifiable assumptions (especially about how Claude Code wraps — hook payloads,
+transcript shapes, blocking-hook approval) that must be empirically confirmed
+*before* implementation begins. The gate exists so an implementation agent never
+has to deviate from a plan mid-build because reality differed from an assumption.
+
+**Three rules, enforced:**
+
+1. **Gate-first.** Do not write implementation code for an implementation until
+   its gate is 🟢 (Verified & plan reconciled) **and committed**. An agent
+   assigned an implementation must first check the gate; if it is not 🟢, the
+   agent's task becomes *running the verification spike*, not implementing.
+2. **Contradiction rule.** Any verification result that conflicts with a plan
+   (⚠️/❌) means: **stop, amend the plan doc to match reality, note the change,
+   then re-evaluate the gate.** Plans bend to findings; code does not start until
+   they agree.
+3. **Auditable artifact.** A verification spike is its own commit and produces
+   committed evidence: filled Result slots in `04-verification-gates.md` plus the
+   pinned `test/fixtures/SCHEMA.md`. "We verified" must be provable.
+
+Enforcement is documentation-driven (agents follow the plan), so the gate is
+loud and linked from every plan. An optional *hard* enforcement — a guard test
+that keeps `bun test` red until a required gate is 🟢 — is described in the gates
+doc; enable it per-implementation if you want a mechanical stop.
 
 ## Conventions for agents iterating on these docs
 
