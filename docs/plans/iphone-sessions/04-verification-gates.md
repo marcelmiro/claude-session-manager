@@ -28,10 +28,43 @@ re-architect).
    with Result slots filled, plus `test/fixtures/SCHEMA.md` for the schema items.
    Throwaway probe scripts go under a scratch dir and are not shipped.
 
-> **Optional hard enforcement:** add a guard test (e.g.
-> `verification-gate.test.ts`) that reads a `verification.json` status file and
-> fails `bun test` while any required gate is not 🟢. This makes the gate a red
-> test instead of a convention. Decide per-implementation whether to enable it.
+> **Hard enforcement — DECIDED: enabled (built as part of Impl #1).** A guard
+> test makes the gate a red test instead of a convention. Skipping it then
+> requires *deleting a test*, which is loud in a reviewed diff. Spec below.
+
+### Hard-enforcement spec (deliverable of Impl #1)
+
+Machine-readable source of truth lives next to these docs as
+`verification.json`; the 🔴/🟢 statuses in this file are the human-readable
+mirror and must be kept in sync.
+
+```jsonc
+// docs/plans/iphone-sessions/verification.json
+{
+  "gates": {
+    "A": { "title": "Claude Code wrapping",     "status": "unverified", "enforce": false },
+    "B": { "title": "Test harness",             "status": "unverified", "enforce": false },
+    "C": { "title": "Monorepo + mobile app",    "status": "unverified", "enforce": false }
+  }
+}
+// status ∈ "unverified" | "partial" | "verified"
+```
+
+`verification-gate.test.ts` (runs under `bun test`):
+- Reads `verification.json`.
+- **Fails for any gate where `enforce: true` and `status !== "verified"`**, with a
+  message naming the gate and pointing here.
+- Gates with `enforce: false` are ignored, so unrelated work is never blocked.
+
+**This makes the gate self-enforcing:** the first step of starting an
+implementation is to flip `enforce: true` for its required gate(s) — Gate A for
+Impl #1 & #2, Gate B for Impl #1, Gate C for Impl #3 — in its own commit. The
+suite immediately goes red and stays red until the verification spike records
+`status: "verified"`. Only then does `bun test` pass and implementation begin.
+
+> Until Impl #1 exists there is no `bun test`, so the guard test is created there
+> (see `01-wrapper-contract-tests.md` §Test infrastructure tasks). Before that,
+> the documentation-level gate (banners + Enforcement protocol) applies.
 
 ---
 

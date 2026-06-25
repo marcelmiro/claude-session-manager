@@ -185,6 +185,12 @@ unit tests so the default `bun test` stays hermetic and fast.
       fixtures as *inputs*, not as golden outputs.
 - [ ] Ensure tests run with no tmux / no `claude` present (hermetic) except the
       gated Contract D.
+- [ ] **Build the verification-gate guard test** (decided enforcement). Create
+      `docs/plans/iphone-sessions/verification.json` and
+      `verification-gate.test.ts` per the spec in
+      [`04-verification-gates.md`](./04-verification-gates.md) §Hard-enforcement
+      spec: `bun test` fails for any gate with `enforce: true` and
+      `status !== "verified"`. This is itself gated behind Gate B passing first.
 
 ## Acceptance criteria
 

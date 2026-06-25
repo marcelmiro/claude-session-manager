@@ -138,9 +138,11 @@ has to deviate from a plan mid-build because reality differed from an assumption
    pinned `test/fixtures/SCHEMA.md`. "We verified" must be provable.
 
 Enforcement is documentation-driven (agents follow the plan), so the gate is
-loud and linked from every plan. An optional *hard* enforcement — a guard test
-that keeps `bun test` red until a required gate is 🟢 — is described in the gates
-doc; enable it per-implementation if you want a mechanical stop.
+loud and linked from every plan. On top of that, **hard enforcement is enabled**
+(decided): a guard test keeps `bun test` red until each enforced gate is 🟢, so
+skipping the gate requires deleting a test — loud in a reviewed diff. The guard
+is built as part of Impl #1 (it needs the test harness to exist first); see the
+Hard-enforcement spec in [`04-verification-gates.md`](./04-verification-gates.md).
 
 ## Conventions for agents iterating on these docs
 
