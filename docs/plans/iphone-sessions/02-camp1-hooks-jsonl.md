@@ -21,6 +21,13 @@ This implementation is **internal to CSM**. It ships no mobile app. Its output i
 structured view of each session's conversation and pending prompts, and (c) an
 internal API surface that Implementation 3's bridge will consume.
 
+> **Dogfood checkpoint (Resolved decisions, doc 00): STOP here.** This is the
+> point to *stop and use CSM through real Mac coding sessions* until the
+> scraper→JSONL migration is boringly reliable — before any bridge/app work. Do
+> not start Implementation 3 until status no longer flips on scroll-up,
+> transcript-driven preview/answers are correct, and desk approval via the IPC
+> works in daily use.
+
 ## What changes, in one line
 
 `capture-pane`-regex is demoted from "the status source" to "an optional
@@ -80,10 +87,15 @@ events.
   the event log against live panes on each refresh; an event log with no live
   pane = archived.
 - Hooks fire edges, not a continuous heartbeat. "running" is inferred from
-  "`PreToolUse`/`UserPromptSubmit` seen, no terminal edge yet." Decide a
-  staleness timeout (e.g. if the newest event is a `PreToolUse` from >N minutes
-  ago with no `PostToolUse`, treat as possibly-stuck and optionally fall back to
-  a CPU/process check). Record the chosen heuristic.
+  "`PreToolUse`/`UserPromptSubmit` seen, no terminal edge yet."
+  **Decided heuristic (Resolved decisions, doc 00) — transcript as cross-check:**
+  trust the last event edge as primary; gate "running" on pane/proc liveness each
+  refresh (already free); for a *dropped* terminal edge, demote running→ready only
+  when a secondary signal confirms — a `tool_result` appeared in the transcript
+  *after* the `PreToolUse`, or transcript mtime has gone quiet past a generous
+  threshold (~2–3 min). **No CPU sampling** (too noisy). This means
+  `event-status.ts` also reads the transcript for the missed-edge backstop — a
+  small, deliberate coupling that avoids any eternal-stuck "running" state.
 
 ### 1b.2 — Live transcript reader
 
@@ -104,24 +116,32 @@ events.
 
 Two **distinct** paths — keeping them separate is what makes the UX clean:
 
-**(a) Tool approval → blocking `PreToolUse` hook** (the good path; avoids the
-`send-keys` y/n race the research flagged as fragile):
+**(a) Tool approval → attach-aware blocking `PreToolUse` hook** (the good path;
+avoids the `send-keys` y/n race the research flagged as fragile):
 
 1. `PreToolUse` hook fires with `tool_name` + `tool_input`.
-2. Hook writes the request to `~/.config/csm/pending/<sessionId>.json` and
-   **blocks**, polling for a decision file (ccgram uses this file-IPC pattern).
+2. **The hook checks tmux attach state** (`tmux list-clients -t <target>`):
+   - **Client attached (you're at the desk) → exit neutral immediately.** The
+     normal interactive TUI prompt appears with no dead air. (A blocking hook
+     halts Claude's loop, so the TUI prompt can't render until the hook returns —
+     blocking unconditionally would add seconds of lag to *every desk approval*.
+     This branch is what preserves the desk UX.)
+   - **Detached (you're away) → block-and-poll.** The hook writes the request to
+     `~/.config/csm/pending/<sessionId>.json` and **blocks**, polling for a
+     decision file (ccgram uses this file-IPC pattern).
 3. A consumer (CSM TUI now; the bridge later) reads pending requests and writes
    the decision; hook returns the Claude Code permission decision
    (`{ permissionDecision: "allow" | "deny", ... }`).
-4. **Timeout fallback:** if no decision arrives within N seconds, the hook exits
-   neutral (no decision) → the normal interactive TUI prompt appears for whoever
-   is at the Mac. This preserves desk-side approval AND enables remote approval.
+4. **Timeout fallback:** if no decision arrives within a *long* timeout, the hook
+   exits neutral → the normal interactive TUI prompt appears. Because the
+   block-and-poll branch only runs when detached, the desk and the phone are never
+   both live approval surfaces for the same prompt (no double-approval race).
 
-   > **Open question (verify in 1b.0):** confirm that a blocking `PreToolUse`
-   > hook returning a decision actually *suppresses* the TUI prompt, and that a
-   > neutral exit cleanly falls through to it. If not, fall back to send-keys for
-   > approval and document the race-mitigation (only send when status is
-   > `waiting`).
+   > **Verify in 1b.0 / Gate A6:** (a) a blocking decision actually *suppresses*
+   > the TUI prompt; (b) a neutral exit cleanly falls through to it; (c) the block
+   > doesn't destabilize Claude; (d) the hook can cheaply read attach state and
+   > branch. If (a)/(b) fail, fall back to send-keys for approval and document the
+   > race-mitigation (only send when status is `waiting`).
 
 - **`core/approval.ts`**: the request/decision IPC (write pending, await
   decision, expose pending list). Used by both the TUI's existing Space-menu

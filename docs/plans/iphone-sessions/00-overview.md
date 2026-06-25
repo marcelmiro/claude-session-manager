@@ -10,8 +10,11 @@
 
 Access and continue Claude Code sessions from an iPhone, so work is no longer
 tied to carrying the Mac. The plan is to run the existing setup (tmux + zsh +
-`claude`) on an always-on EC2 box, keep CSM running there, and build a small
-single-user companion app that lists and drives those sessions from the phone.
+`claude`) on an always-on host — **the Mac, reached over Tailscale, for the MVP;
+migrating to an always-on EC2 box as a later iteration** — keep CSM running
+there, and build a small single-user companion app that lists and drives those
+sessions from the phone. (See §Resolved decisions for why Mac-first and what
+that defers.)
 
 The naive alternative — SSH via Tailscale + Termius into raw tmux — is rejected:
 the Claude Code TUI is keyboard-centric and miserable on a touch keyboard. The
@@ -100,7 +103,9 @@ The work is three large, sequential implementations. Each unblocks the next.
   canary against Claude Code version drift.
 - Migration second because the mobile app should consume a *stable, reliable*
   internal API. Building the app on top of the current scraper would bake the
-  fragility into the product.
+  fragility into the product. **Dogfood gate: stop after #2 and validate the
+  scraper→JSONL migration through real Mac coding sessions before starting #3**
+  (see §Resolved decisions).
 - Monorepo + app last because it depends on a settled `core` API surface from #2
   and is mostly additive (new packages) rather than a change to existing logic.
 
@@ -143,6 +148,89 @@ loud and linked from every plan. On top of that, **hard enforcement is enabled**
 skipping the gate requires deleting a test — loud in a reviewed diff. The guard
 is built as part of Impl #1 (it needs the test harness to exist first); see the
 Hard-enforcement spec in [`04-verification-gates.md`](./04-verification-gates.md).
+
+## Resolved decisions (MVP scope) — read before iterating
+
+These were settled in a design review and **supersede the corresponding "Open
+question" / default lines in the per-impl docs.** Where a doc still phrases one
+of these as open, treat it as closed per this list and reconcile on next edit.
+
+**Substrate & roadmap**
+- **Mac-first substrate.** Run the sessions on the Mac (kept awake), reached over
+  Tailscale. EC2 is a *later* iteration, not the MVP. EC2 is Linux → keep all
+  Darwin-only calls (`pbcopy`, `caffeinate`, Ghostty, `ps`/TTY quirks) out of
+  `core/` and `src/bridge/` so the eventual EC2 move is a config change, not a
+  port. The "detached pane" verification (Gate A9) must be exercised **in the Mac
+  phase** (test with no tmux client attached), not deferred to EC2.
+- **Dogfood checkpoint — STOP after Implementation 2.** Land the Camp 1 migration
+  *internal to CSM* and use it through real Mac coding sessions until it is
+  boringly reliable (status never flips on scroll-up; transcript-driven
+  preview/answers correct; desk approval via the IPC works) **before** building
+  any bridge/app. The migration is validated as a CSM-internal change, while it's
+  still cheap to iterate, before product depends on it.
+- **MVP slice = mobile web page, not a PWA.** First shippable product is a
+  mobile-Safari web page (Preact) hitting `src/bridge/` over Tailscale,
+  manual-open, delivering the five interactions (see status / read output or
+  question / approve a tool / answer a question / send a message). PWA install
+  and push are *optional next iterations*, not MVP.
+- **Optional iterations, in order:** (1) **push** via ntfy (contentless — see
+  below); (2) **PWA install** (service worker / add-to-home-screen — resolves the
+  iOS secure-context / `tailscale serve` HTTPS question in isolation);
+  (3) **monorepo split** (codebase cleanliness, behavior-neutral); (4) **EC2**.
+  Session-launch-from-phone stays out of scope until after all of these.
+
+**Architecture & mechanism**
+- **Approval = attach-aware blocking `PreToolUse` hook.** The hook queries tmux
+  attach state (`tmux list-clients -t <target>`): **client attached → exit
+  neutral immediately** (instant desk TUI prompt, no dead air); **detached →
+  block-and-poll** a decision file with a long timeout (real remote-approval
+  window). This also arbitrates the double-approval race — desk and phone are
+  never both live approval surfaces for the same prompt. (Adds a sub-assumption to
+  Gate A6.)
+- **"running" staleness uses the transcript as cross-check.** Trust the last hook
+  event edge; gate "running" on pane/proc liveness each refresh (already free);
+  for a dropped terminal edge, demote running→ready only when a secondary signal
+  confirms (a `tool_result` appeared in the transcript after the `PreToolUse`, or
+  transcript mtime went quiet). No CPU sampling. `event-status` therefore reads
+  the transcript too for the missed-edge backstop.
+- **Answer / message = index-based `send-keys`, status-gated, stream-confirmed.**
+  `AskUserQuestion` answers via `send-keys` arrow-to-index + Enter using the
+  option index from Contract B (a hook-based answer is an *optimization* to
+  confirm in A8, not the baseline; the bridge `/answer` takes an option index
+  regardless). Free-text `/message` is enabled only when event-status is `ready` /
+  waiting-for-input. Every send is confirmed via the event stream, never
+  optimistically.
+
+**Bridge / app / ops**
+- **No monorepo for MVP.** Build the bridge as `src/bridge/server.ts` importing
+  `src/core/*` directly (same shape as `monitor.ts`). Guard the core boundary with
+  a lint rule / tiny test banning `blessed`/`ui` imports under `core/`. The
+  `packages/*` workspace split is optional iteration #3.
+- **Transport = SSE**, driven by a debounced watch of the events dir (no polling).
+  WS only if a genuinely bidirectional feature (e.g. a terminal fallback) appears.
+- **App stack = Preact + `@preact/signals` + `htm`, no build step**, served as
+  ES modules.
+- **Push = hosted ntfy, contentless.** The push carries only a non-sensitive label
+  + a deep link (`sessionId` → app route); **never** the tool input, diff,
+  command, or question text — the app fetches those from the bridge over
+  Tailscale. Self-hosted ntfy only if a session label itself ever feels too
+  revealing.
+- **Auth = bind-to-tailnet (the real wall) + fail-closed + static bearer token.**
+  The bridge refuses to start bound to a non-loopback/non-tailnet address; the
+  token is constant-time compared, env-supplied, never logged. Assume
+  `tailscale serve` HTTPS for the iOS secure-context requirement (confirm during
+  the PWA-install iteration); plain HTTP over the tailnet is a nice-if-true
+  simplification.
+
+**Test scope (MVP)**
+- **Keep Contracts A + B** (event-status truth table + scroll-up regression;
+  transcript parsing) as the executable definition-of-done. **Cut Contract C**
+  (characterizing the soon-to-be-demoted scraper — it never signals "done").
+  **Defer Contract D** (live drift canary — a future regression alarm, not a
+  completion gate).
+- **Gate guard scoped to Gate A only** for MVP. Keep the `verification.json`
+  structure intact so `enforce: true` can be flipped on B/C later without
+  rebuilding anything.
 
 ## Conventions for agents iterating on these docs
 

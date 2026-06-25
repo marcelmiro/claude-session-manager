@@ -18,6 +18,24 @@ This implementation should be **mostly additive**. The hard problems (status,
 transcript, approval) were solved in Implementation 2; here we expose them over
 HTTP/WS and render them on a phone.
 
+> **⚠️ MVP reframe (Resolved decisions, doc 00) — read first.** The title of this
+> doc is now aspirational. For the MVP:
+> - **No monorepo.** Build the bridge as `src/bridge/server.ts` importing
+>   `src/core/*` directly (same shape as `monitor.ts`). The `packages/*` workspace
+>   split below is an *optional later iteration*, not MVP. Guard the core boundary
+>   with a lint rule / tiny test banning `blessed`/`ui` imports under `core/`.
+> - **MVP product = a plain mobile-Safari web page**, manual-open over Tailscale,
+>   delivering the five interactions. **PWA install (service worker / push) and
+>   ntfy are optional next iterations**, not MVP.
+> - **Transport = SSE** (decided). **App stack = Preact + `@preact/signals` +
+>   `htm`, no build** (decided). **Push = hosted ntfy, contentless** (decided).
+> - Optional-iteration order: (1) push (ntfy, contentless), (2) PWA install,
+>   (3) monorepo split, (4) EC2.
+>
+> The "Monorepo layout" and "Migration steps" sections below apply only to
+> optional iteration #3; everything else (bridge, app screens, ntfy, deployment)
+> is reconciled inline.
+
 ## Why last
 
 - The mobile app must consume the *stable* internal API from Impl #2. Building it
@@ -66,10 +84,12 @@ csm/                          # repo root
 > Recommended: split first (steps 1–3) as its own reviewable change, then build
 > the bridge and app on the clean package boundary.
 
-## Bridge server (`packages/bridge`)
+## Bridge server (`src/bridge/` for MVP; `packages/bridge` only after the split)
 
-Thin Bun (`Bun.serve`) server. Imports `@csm/core`; adds **no** Claude-wrapping
-logic. Runs on the EC2 box alongside the sessions.
+Thin Bun (`Bun.serve`) server. For MVP it lives at `src/bridge/server.ts` and
+imports `src/core/*` directly (after the optional monorepo split it becomes
+`@csm/bridge` importing `@csm/core`). Adds **no** Claude-wrapping logic. Runs on
+the **Mac** alongside the sessions for MVP (the EC2 box later).
 
 **Endpoints (initial):**
 
@@ -85,35 +105,61 @@ logic. Runs on the EC2 box alongside the sessions.
 | `GET` | `/stream` (SSE or WS) | watch events dir → push updates |
 | `POST` | `/sessions/:id/kill`, `/rename` | reuse `tmux.ts` (optional) |
 
-**Cross-cutting:**
-- **Auth:** static bearer token (env var), checked on every request. Single user.
-- **Transport:** SSE is simplest for one-way updates; use WS if bidirectional
-  later. Push on event-log change rather than polling.
+**Cross-cutting (decided — Resolved decisions, doc 00):**
+- **Transport: SSE** (not WS), driven by a **debounced watch of the events dir**
+  (no polling). The live channel is strictly server→client; all actions are plain
+  `POST`. SSE's built-in auto-reconnect matters for a phone that sleeps/wakes/roams
+  on Tailscale. Add a WS endpoint only if a genuinely bidirectional feature (e.g. a
+  terminal fallback) appears.
+- **Auth:** bind-to-tailnet is the real wall; static bearer token (env var) is
+  defense-in-depth, **constant-time** compared, never logged. The bridge
+  **fails closed** — refuses to start if asked to bind to a non-loopback /
+  non-tailnet address, so a future copy-paste can't expose RCE publicly.
 - **Security:** the `decision` / `message` / `answer` endpoints are
   remote-code-execution by design. Bind to the Tailscale interface only; never
-  expose publicly. Token is defense-in-depth, not the only layer.
+  expose publicly.
+- **iOS secure-context:** plain HTTP over the tailnet is fine for a non-installed
+  web page (MVP). The service worker / PWA install (optional iteration #2) may
+  require a secure context → plan for **`tailscale serve` HTTPS**, confirmed during
+  that iteration (Gate C5).
 
-## Push notifications (the "I'm at the gym" feature)
+## Push notifications (optional iteration #1 — the "I'm at the gym" feature)
+
+> **Not MVP.** The MVP web page is manual-open; push is the first optional
+> iteration because it delivers the actual remote-control value. It doesn't need
+> PWA install — the ntfy iOS app delivers the alert and the deep link opens Safari.
 
 - Drive from the `Notification` hook and `core/notifications.ts` transition
   detection (running→waiting = "blocked", running→ready = "turn complete").
-- Use **ntfy.sh**: HTTP POST to a topic; the ntfy iOS app subscribes. No APNs, no
-  Apple Developer account, no App Store. Self-host ntfy later if desired.
-- Payload: session label + what it needs (permission for `<tool>` / question /
-  done) + a deep link into the PWA for that session.
+- Use **hosted ntfy.sh**: HTTP POST to a topic; the ntfy iOS app subscribes. No
+  APNs, no Apple Developer account, no App Store.
+- **Contentless payload (decided — Resolved decisions, doc 00):** carry only a
+  non-sensitive label + a deep link (`sessionId` → app route) — e.g.
+  *"`csm/fix-auth` needs permission"* / *"`api` has a question"* / *"… turn
+  complete"*. **Never** include the tool input, diff, command, or question text;
+  the app fetches those from the bridge **over Tailscale** when you tap. The push
+  traverses ntfy.sh + Apple APNs (third parties), so no private dev content may
+  cross it. Self-host ntfy only if a session *label* itself ever feels too
+  revealing.
 
-## Mobile app (`apps/mobile`)
+## Mobile app (`src/bridge/` static assets for MVP; `apps/mobile` only after the split)
 
-A **PWA**, installed to the home screen. Rationale: no App Store review, no
-native toolchain, instant iteration, and the interaction set (lists, buttons,
-text box) needs no native capability. Native iOS is explicitly out of scope
-unless a hard requirement (e.g. a true interactive terminal fallback) forces it —
-and even then, the right move is `ttyd`/`wetty` streaming a specific pane
-*alongside* the button UI, not instead of it.
+**MVP = a plain mobile-Safari web page**, manual-open over Tailscale (no service
+worker). Installability (add-to-home-screen + service worker) is **optional
+iteration #2**, not MVP — that's where the iOS secure-context / `tailscale serve`
+HTTPS question gets resolved in isolation. Rationale for web-first: the
+*interactions* (the UX being tested) are identical installed or not, so opening in
+Safari fully validates "remote control with great UX" without the ntfy/APNs/SW
+surface. Native iOS is out of scope unless a hard requirement (e.g. a true
+interactive terminal fallback) forces it — and even then the right move is
+`ttyd`/`wetty` streaming a specific pane *alongside* the button UI, not instead.
 
-**Stack:** keep it minimal. Vanilla + a tiny lib (e.g. Lit/Preact) over a heavy
-framework, consistent with CSM's low-dependency ethos. Inline assets; mobile-first
-CSS; one service worker for installability.
+**Stack (decided — Resolved decisions, doc 00): Preact + `@preact/signals` +
+`htm`, no build step**, served as ES modules. Signals map 1:1 onto SSE pushes (an
+SSE message updates a signal → the list/detail re-render), which is the whole
+interaction model; `htm` avoids a JSX compiler so there's no toolchain. ~5KB,
+consistent with CSM's low-dependency ethos. Inline assets; mobile-first CSS. The
+service worker is added only in optional iteration #2.
 
 **Screens:**
 1. **Session list** — status dots (event-sourced), repo grouping (reuse grouping
@@ -127,14 +173,19 @@ CSS; one service worker for installability.
 **Offline/connectivity:** assume Tailscale is up; degrade gracefully when the
 bridge is unreachable (show last-known state, queue nothing dangerous).
 
-## Deployment / ops (EC2)
+## Deployment / ops
 
-- Always-on EC2 instance running tmux + zsh + `claude` + `@csm/cli` +
-  `@csm/bridge` (e.g. under a process manager or a tmux window / systemd service).
-- Tailscale on EC2 and iPhone; bridge bound to the tailnet address.
-- `csm setup` (extended in Impl #2) installs the hooks on this box.
-- Document the bring-up runbook: instance, Tailscale join, `claude` auth, hook
-  install, bridge service, ntfy topic.
+**MVP (Mac):**
+- The Mac, kept awake (`caffeinate` / never-sleep), running tmux + zsh + `claude`
+  + CSM + the `src/bridge` server (e.g. a tmux window or a `launchd` agent).
+- Tailscale on Mac and iPhone; bridge bound to the tailnet address (fail-closed).
+- `csm setup` (extended in Impl #2) installs the hooks.
+
+**Optional iteration #4 (EC2):**
+- Always-on Linux EC2 instance running the same stack. Keep Darwin-only calls out
+  of `core/`/`bridge/` so this is a config change, not a port (doc 00).
+- Document the bring-up runbook: instance, Tailscale join, headless `claude` auth,
+  hook install, bridge service, ntfy topic.
 
 ## Acceptance criteria
 
@@ -148,13 +199,18 @@ bridge is unreachable (show last-known state, queue nothing dangerous).
 
 ## Open questions
 
-- [ ] PWA framework choice (Lit vs Preact vs vanilla) — pick the smallest that
-      makes the live-updating list pleasant.
-- [ ] SSE vs WebSocket for `/stream`.
-- [ ] ntfy.sh hosted vs self-hosted (privacy of prompt text in notifications).
+**Resolved (see Resolved decisions, doc 00) — kept for traceability:**
+- ~~PWA framework choice~~ → **Preact + `@preact/signals` + `htm`, no build.**
+- ~~SSE vs WebSocket~~ → **SSE**, debounced events-dir watch.
+- ~~ntfy hosted vs self-hosted~~ → **hosted, contentless payload**; self-host only
+  if a session label is too revealing.
+- ~~Monorepo tooling~~ → **no monorepo for MVP**; bridge as `src/bridge/`. If/when
+  the split happens (optional iteration #3), default to plain Bun workspaces.
+- ~~Session launch from the phone~~ → **out of scope** until after all optional
+  iterations; MVP is "continue existing sessions."
+
+**Still open:**
 - [ ] Do we want a read-only "big terminal" fallback (ttyd) for the rare case the
       button UI can't express something? Defer unless needed.
-- [ ] Session *launch* from the phone (new wizard equivalent) — in scope for v1
-      or later? Probably later; v1 is "continue existing sessions."
-- [ ] Monorepo tooling: plain Bun workspaces vs adding Turborepo/nx. Default to
-      plain Bun workspaces (low dep ethos).
+- [ ] Exact iOS secure-context behavior over the tailnet (plain HTTP vs
+      `tailscale serve` HTTPS) — resolve during optional iteration #2 (PWA install).

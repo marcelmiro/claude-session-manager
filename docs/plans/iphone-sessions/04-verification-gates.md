@@ -48,6 +48,9 @@ mirror and must be kept in sync.
   }
 }
 // status ∈ "unverified" | "partial" | "verified"
+// MVP scope (Resolved decisions, doc 00): only Gate A is flipped to
+// `enforce: true`. B and C stay `enforce: false` and are kept in the file so
+// they can be enforced later without rebuilding the guard.
 ```
 
 `verification-gate.test.ts` (runs under `bun test`):
@@ -57,10 +60,16 @@ mirror and must be kept in sync.
 - Gates with `enforce: false` are ignored, so unrelated work is never blocked.
 
 **This makes the gate self-enforcing:** the first step of starting an
-implementation is to flip `enforce: true` for its required gate(s) — Gate A for
-Impl #1 & #2, Gate B for Impl #1, Gate C for Impl #3 — in its own commit. The
-suite immediately goes red and stays red until the verification spike records
-`status: "verified"`. Only then does `bun test` pass and implementation begin.
+implementation is to flip `enforce: true` for its required gate(s) in its own
+commit. The suite immediately goes red and stays red until the verification spike
+records `status: "verified"`. Only then does `bun test` pass and implementation
+begin.
+
+> **MVP scope (Resolved decisions, doc 00):** only **Gate A** is enforced for the
+> MVP (it protects against the un-iterable unknowns — Claude's hook/transcript
+> payloads and the blocking-hook semantics). Gate B's checks are simple harness
+> facts and Gate C is past the dogfood checkpoint, so neither is enforced as a red
+> test for MVP; flip them on later if desired.
 
 > Until Impl #1 exists there is no `bun test`, so the guard test is created there
 > (see `01-wrapper-contract-tests.md` §Test infrastructure tasks). Before that,
@@ -86,10 +95,10 @@ file, register it for all events, and drive a real session through each scenario
 | A3 | A pending `tool_use` is written to the transcript **before** approval | Trigger a permission-required tool; `tail -f` the transcript; check before answering | A `tool_use` record appears pre-decision | _(fill)_ | ⬜ |
 | A4 | `AskUserQuestion` question + options are structured `tool_input` in the transcript | Trigger an AskUserQuestion; inspect the transcript record | `{ question, options:[{label, description}] }`-ish structure | _(fill)_ | ⬜ |
 | A5 | Real transcript line discriminators (kills the inferred `user_message`/etc. names) | Inspect raw transcript lines for user/assistant/tool_use/tool_result | Documented exact `type` tags + nesting | _(fill)_ | ⬜ |
-| A6 | **Blocking `PreToolUse` hook controls approval** (HIGHEST RISK) | Write a `PreToolUse` hook that blocks N s then returns `permissionDecision`; test: (a) a decision suppresses the TUI prompt, (b) a neutral/timeout exit falls through to the TUI prompt, (c) the block doesn't destabilize Claude | All three hold | _(fill)_ | ⬜ |
+| A6 | **Attach-aware blocking `PreToolUse` hook controls approval** (HIGHEST RISK) | Write a `PreToolUse` hook that blocks N s then returns `permissionDecision`; test: (a) a decision suppresses the TUI prompt, (b) a neutral/timeout exit falls through to the TUI prompt, (c) the block doesn't destabilize Claude, (d) the hook can cheaply read tmux attach state (`tmux list-clients -t <target>`) and branch — **exit neutral when a client is attached** (instant desk prompt), **block-and-poll when detached** | All four hold | _(fill)_ | ⬜ |
 | A7 | Event-writer hook latency is negligible | Time a session with the writer hook installed vs not | < ~50ms added per event | _(fill)_ | ⬜ |
 | A8 | `AskUserQuestion` can be answered programmatically (hook) or via `send-keys` | Attempt hook-supplied answer; else `send-keys` arrow-to-index + Enter | One reliable method identified | _(fill)_ | ⬜ |
-| A9 | `tmux send-keys` (text + keys) lands correctly in a **headless/detached** tmux pane (no attached client) | On EC2, send to a detached pane; confirm receipt | Input received reliably | _(fill)_ | ⬜ |
+| A9 | `tmux send-keys` (text + keys) lands correctly in a **headless/detached** tmux pane (no attached client) | On the **target host (the Mac in the MVP phase — exercise it with no tmux client attached)**, send to a detached pane; confirm receipt | Input received reliably | _(fill)_ | ⬜ |
 | A10 | The `encoded-cwd → transcript path` mapping is known | Derive a live session's transcript path from its cwd; confirm file match | Deterministic mapping documented | _(fill)_ | ⬜ |
 
 **Blocks:** Impl #1 (fixtures/contracts depend on A1–A5), Impl #2 (all). Until
@@ -113,7 +122,16 @@ file, register it for all events, and drive a real session through each scenario
 ## Gate C — Monorepo + mobile app (Impl #3)
 
 **Gate status:** 🔴 Unverified
-**Prerequisite:** Impl #2 complete (stable `core/` API).
+**Prerequisite:** Impl #2 complete (stable `core/` API) **and the dogfood
+checkpoint passed** (Resolved decisions, doc 00).
+
+> **MVP scope note (Resolved decisions, doc 00):** the MVP product is a plain
+> mobile-Safari **web page** over Tailscale (no service worker), so **C1 is
+> dropped** (no monorepo for MVP) and **C5/C6 + the iOS secure-context /
+> `tailscale serve` HTTPS question move to the PWA-install iteration**, where C4
+> (SSE — WS is not used) and C5 are verified in isolation. For the MVP only C2
+> (phone reaches the bridge over Tailscale) and C4 (SSE from iOS Safari) are
+> load-bearing.
 
 | ID | Assumption | How to verify | Expected | Result | Status |
 |----|------------|---------------|----------|--------|--------|

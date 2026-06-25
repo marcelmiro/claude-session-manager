@@ -147,7 +147,15 @@ the structured output:
 - Robust to partial/truncated last line (transcript is appended live).
 - Returns the last assistant message for the preview/notification text.
 
-### Contract C — Current scraper characterization (document, don't fix)
+### Contract C — Current scraper characterization (CUT for MVP)
+
+> **Decision (Resolved decisions, doc 00): CUT.** Characterizing the scraper we're
+> about to demote never signals "the new implementation is done" — the single
+> scroll-up regression in Contract A already measures the migration. Skipped for
+> MVP. The one exception worth keeping is the paired scroll-up characterization
+> noted in Contract A (current `detectStatus` returns `ready` for the scrolled-up
+> fixture), since it documents the exact bug the project fixes. Everything below is
+> retained only as a record of the original intent.
 
 Tests for the existing `status.ts` that **lock in current behavior**, including
 its failures, so the migration can be measured and so we notice if the scraper
@@ -163,7 +171,12 @@ test("scraper misreports scrolled-up running session as ready", () => {
 });
 ```
 
-### Contract D — Version-drift canary (optional integration test)
+### Contract D — Version-drift canary (DEFERRED past MVP)
+
+> **Decision (Resolved decisions, doc 00): DEFER.** This is a future "new Claude
+> version broke us" alarm, not a completion gate — a different axis from the
+> definition-of-done. Build it once the tool is a daily dependency. Spec retained
+> below for when that time comes.
 
 A test, gated behind an env flag (e.g. `CSM_LIVE_CLAUDE=1`) so it does not run in
 normal CI without a `claude` binary, that:
@@ -185,12 +198,14 @@ unit tests so the default `bun test` stays hermetic and fast.
       fixtures as *inputs*, not as golden outputs.
 - [ ] Ensure tests run with no tmux / no `claude` present (hermetic) except the
       gated Contract D.
-- [ ] **Build the verification-gate guard test** (decided enforcement). Create
-      `docs/plans/iphone-sessions/verification.json` and
-      `verification-gate.test.ts` per the spec in
+- [ ] **Build the verification-gate guard test** (decided enforcement, **scoped to
+      Gate A only for MVP**). Create `docs/plans/iphone-sessions/verification.json`
+      and `verification-gate.test.ts` per the spec in
       [`04-verification-gates.md`](./04-verification-gates.md) §Hard-enforcement
       spec: `bun test` fails for any gate with `enforce: true` and
-      `status !== "verified"`. This is itself gated behind Gate B passing first.
+      `status !== "verified"`. For MVP only **Gate A** is `enforce: true`; keep the
+      B/C entries in `verification.json` (`enforce: false`) so they can be flipped
+      on later without rebuilding. This is itself gated behind Gate B passing first.
 
 ## Acceptance criteria
 
