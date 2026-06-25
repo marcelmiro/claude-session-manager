@@ -1,0 +1,16 @@
+{
+  "session_id": "f481ae9b-f4c3-4d47-9037-84d9a37bdb3e",
+  "transcript_path": "/Users/throxy/.claude/projects/-private-tmp/f481ae9b-f4c3-4d47-9037-84d9a37bdb3e.jsonl",
+  "cwd": "/private/tmp",
+  "permission_mode": "default",
+  "effort": {
+    "level": "medium"
+  },
+  "hook_event_name": "PreToolUse",
+  "tool_name": "Bash",
+  "tool_input": {
+    "command": "touch /tmp/spike-perm-test.txt",
+    "description": "Create empty test file"
+  },
+  "tool_use_id": "toolu_01LqXQE97KmTJoTDuPPqkBLA"
+}

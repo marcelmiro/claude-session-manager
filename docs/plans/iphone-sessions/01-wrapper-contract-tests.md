@@ -98,18 +98,23 @@ Before writing assertions, capture ground truth from a live session on the Mac
 5. Distill the observed shapes into `test/fixtures/SCHEMA.md`.
 
 **Resolve these specific unknowns and record the answer in SCHEMA.md** (the prior
-research cited capabilities from docs but some field names were inferred):
+research cited capabilities from docs but some field names were inferred).
+**RESOLVED 2026-06-25 (claude v2.1.191) — see `test/fixtures/SCHEMA.md`:**
 
-- [ ] Exact `Notification` payload, and how `permission_prompt` vs `idle_prompt`
-      is represented (field name + values).
-- [ ] Does a pending `tool_use` appear in the transcript *before* approval? In
-      what record shape?
-- [ ] `AskUserQuestion` — are the question text + options in the transcript as
-      structured `tool_input`? Exact shape of each option (label/description/…)?
-- [ ] Real transcript line discriminators (e.g. `{"type":"user", ...}` vs the
-      inferred `user_message`) — pin the actual keys.
-- [ ] `PreToolUse` payload fields available for an approval card (`tool_name`,
-      `tool_input`, `cwd`, `session_id`, `transcript_path`).
+- [x] `Notification`: discriminator is `notification_type` ∈ {`permission_prompt`,
+      `idle_prompt`} (messages "Claude needs your permission" / "…waiting for your input").
+- [x] Pending `tool_use` does **NOT** appear in the transcript before approval —
+      it is written only post-decision. Pending data lives in the `PreToolUse` hook.
+- [x] `AskUserQuestion` is `tool_input.questions[]` (plural array), each
+      `{question, header, multiSelect, options:[{label, description}]}` — **not**
+      a singular `{question, options}`.
+- [x] Transcript discriminators: `type:"user"`/`"assistant"` with nested
+      `message.content[]` blocks (`text`/`thinking`/`tool_use`/`tool_result`);
+      meta types (`mode`, `permission-mode`, `attachment`, `last-prompt`,
+      `file-history-snapshot`, `system`, `ai-title`) ignored. The inferred
+      `user_message` name is dead.
+- [x] `PreToolUse` provides `tool_name`, `tool_input`, `tool_use_id`, `cwd`,
+      `session_id`, `transcript_path`, `permission_mode` — the full approval-card data.
 
 ## The contracts
 
@@ -124,7 +129,7 @@ Tests for `event-status.ts` (created in impl #2). Given a sequence of hook event
 | `UserPromptSubmit` then nothing | `running` |
 | `PreToolUse` with no matching `PostToolUse`/`Stop` | `running` |
 | `Notification:permission_prompt` | `waiting` (approval) |
-| `Notification:idle_prompt` | `waiting` (input) |
+| `Notification:idle_prompt` | `ready` (idle ~60s post-turn, not blocked — mapping to `waiting` would fire a false attention ping on the ready→idle_prompt transition) |
 | `Stop` | `ready` / turn-complete |
 | `PreToolUse` → `PostToolUse` → (no Stop) | `running` |
 
@@ -141,9 +146,14 @@ Tests for `transcript.ts` (created in impl #2). Given a `*.jsonl` fixture, asser
 the structured output:
 
 - Parses into ordered turns (user / assistant text / tool_use / tool_result).
-- A pending tool call surfaces as `{ pending: true, tool, input }`.
-- An `AskUserQuestion` surfaces as `{ question, options: [{label, description}] }`
-  — the data the mobile app renders as buttons.
+- A pending tool call surfaces as `{ pending: true, tool, input }` — **sourced
+  from the `PreToolUse` hook, NOT the transcript** (verified A3: a pending tool is
+  absent from the transcript until approved; see SCHEMA.md). This bullet therefore
+  belongs to the hook reader / Contract A, not transcript parsing.
+- A resolved `AskUserQuestion` `tool_use.input` surfaces as
+  `{ questions: [{ question, header, multiSelect, options:[{label, description}] }] }`
+  — **plural `questions` array** (verified A4; corrected from the original
+  singular guess) — the data the mobile app renders as buttons.
 - Robust to partial/truncated last line (transcript is appended live).
 - Returns the last assistant message for the preview/notification text.
 
@@ -220,10 +230,13 @@ unit tests so the default `bun test` stays hermetic and fast.
 
 ## Open questions
 
-- [ ] Can `AskUserQuestion` be *answered* via a hook return value, or only via
-      `send-keys` selection? This affects whether Contract B needs an
-      "answer round-trip" test here or in impl #2. (Resolve during Schema
-      Pinning.)
+- [x] **RESOLVED (A8, 2026-06-25):** `AskUserQuestion` is answered reliably via
+      `send-keys` index nav — single-select `↓`×idx + `Enter`; multiSelect `Space`
+      to toggle each + `→` to Submit + `Enter`. Confirmed on the event stream
+      (`PostToolUse.tool_response.answers`). A hook-supplied answer is unnecessary.
+      The pending question (options to render) comes from `PreToolUse.tool_input`,
+      not the transcript — so the round-trip belongs to impl #2's hook/bridge path,
+      not Contract B (transcript = resolved history only).
 - [ ] How stable are transcript line shapes across `claude` minor versions?
       Decide whether the parser should be tolerant (ignore unknown keys) — it
       should — and test that tolerance explicitly.

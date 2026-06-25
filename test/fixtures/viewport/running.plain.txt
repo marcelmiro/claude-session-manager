@@ -1,0 +1,50 @@
+
+╭─── Claude Code v2.1.191 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│                                                    │ Tips for getting started                                                                                           │
+│                Welcome back Claudio!               │ Run /init to create a CLAUDE.md file with instructions for Claude                                                  │
+│                                                    │ ────────────────────────────────────────────────────────────────────────────────────────────────────────────────── │
+│                       ▐▛███▜▌                      │ What's new                                                                                                         │
+│                      ▝▜█████▛▘                     │ Added `/rewind` support for resuming a conversation from before `/clear` was run                                   │
+│                        ▘▘ ▝▝                       │ Fixed scroll position jumping to the bottom while reading earlier output during a streaming response               │
+│   Opus 4.8 (1M context) with me… · Claude Max ·    │ Fixed background agents resurrecting after being stopped — stopping an agent from the tasks panel is now permanent │
+│   vibes.claudio1@throxy.us's Organization          │ /release-notes for more                                                                                            │
+│                    /private/tmp                    │                                                                                                                    │
+╰─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+
+❯ Run this exact bash command: sleep 20 && echo done
+
+  Running 1 shell command…
+  ⎿  $ sleep 20 && echo done
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+✽ Optimus Priming… (6s · ↓ 90 tokens)
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯  
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  30.5k/1000k (3%) •  • Opus 4.8 (1M context) • thinking
+  ⏵⏵ accept edits on (shift+tab to cycle) · ← for agents

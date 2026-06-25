@@ -60,8 +60,13 @@ on this — even Camp 1 tools read the JSONL transcript + hooks and treat
    edges**, which are independent of what is on screen.
 2. **Answering questions / sending messages is poor UX.** Today the answer UI is
    reconstructed by regexing `☐` glyphs off the screen. Fix: `AskUserQuestion`
-   options and pending tool calls are **structured data in the JSONL transcript**
-   — render real buttons from real data.
+   options and pending tool calls are **structured data in the `PreToolUse` hook
+   payload** (`tool_input` — verified 2026-06-25, see `test/fixtures/SCHEMA.md` A3)
+   — render real buttons from real data. *Correction from the original plan: a
+   tool/question awaiting approval is **not** in the JSONL transcript until the
+   decision is made; the transcript carries only resolved history, so pending UI
+   must be sourced from the hook, not the transcript.* The `AskUserQuestion` shape
+   is `input.questions[]` (a plural array), not a singular `{question, options}`.
 
 ## The three implementations
 

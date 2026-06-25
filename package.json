@@ -8,7 +8,8 @@
   "scripts": {
     "start": "bun run src/index.ts",
     "dev": "bun --watch src/index.ts",
-    "status": "bun run src/monitor.ts"
+    "status": "bun run src/monitor.ts",
+    "test": "bun test"
   },
   "dependencies": {
     "blessed": "^0.1.81"

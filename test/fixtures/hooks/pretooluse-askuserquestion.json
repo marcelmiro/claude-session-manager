@@ -1,0 +1,35 @@
+{
+  "session_id": "0af7252d-dc52-415d-a4c8-30f09a6cae89",
+  "transcript_path": "/Users/throxy/.claude/projects/-private-tmp/0af7252d-dc52-415d-a4c8-30f09a6cae89.jsonl",
+  "cwd": "/private/tmp",
+  "permission_mode": "acceptEdits",
+  "effort": {
+    "level": "medium"
+  },
+  "hook_event_name": "PreToolUse",
+  "tool_name": "AskUserQuestion",
+  "tool_input": {
+    "questions": [
+      {
+        "question": "Pick a fruit",
+        "header": "Fruit",
+        "options": [
+          {
+            "label": "Apple",
+            "description": "Choose an apple."
+          },
+          {
+            "label": "Banana",
+            "description": "Choose a banana."
+          },
+          {
+            "label": "Cherry",
+            "description": "Choose a cherry."
+          }
+        ],
+        "multiSelect": false
+      }
+    ]
+  },
+  "tool_use_id": "toolu_017qQwTYpzg8d65MoEjqtPj8"
+}

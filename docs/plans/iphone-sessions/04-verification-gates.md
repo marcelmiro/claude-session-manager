@@ -79,7 +79,12 @@ begin.
 
 ## Gate A — Claude Code wrapping (prerequisite for Impl #1 AND #2)
 
-**Gate status:** 🔴 Unverified
+**Gate status:** 🟢 Verified & plan reconciled — all items A1–A10 verified live
+(claude v2.1.191, 2026-06-25; evidence in `test/fixtures/SCHEMA.md`). A3/A4
+differed from the original plan and were reconciled (plans amended). A6 (the
+attach-aware blocking hook — highest risk) was proven in a **contained
+project-scoped** spike (`/tmp/csm-a6-spike/.claude/`, since removed) so it could
+never intercept real sessions.
 
 This is the gate the whole project hinges on. The prior research cited
 capabilities from docs but several field names were *inferred*; these items pin
@@ -90,16 +95,16 @@ file, register it for all events, and drive a real session through each scenario
 
 | ID | Assumption | How to verify | Expected | Result | Status |
 |----|------------|---------------|----------|--------|--------|
-| A1 | Every hook payload includes `session_id`, `cwd`, `transcript_path`, `hook_event_name` | Dump stdin for each hook; inspect keys | All four present | _(fill)_ | ⬜ |
-| A2 | `Notification` distinguishes "needs permission" from "idle waiting for input" via a field | Trigger a permission prompt; separately let a session sit idle; diff the two `Notification` payloads | A field (e.g. `notification_type`) with two distinct values | _(fill)_ | ⬜ |
-| A3 | A pending `tool_use` is written to the transcript **before** approval | Trigger a permission-required tool; `tail -f` the transcript; check before answering | A `tool_use` record appears pre-decision | _(fill)_ | ⬜ |
-| A4 | `AskUserQuestion` question + options are structured `tool_input` in the transcript | Trigger an AskUserQuestion; inspect the transcript record | `{ question, options:[{label, description}] }`-ish structure | _(fill)_ | ⬜ |
-| A5 | Real transcript line discriminators (kills the inferred `user_message`/etc. names) | Inspect raw transcript lines for user/assistant/tool_use/tool_result | Documented exact `type` tags + nesting | _(fill)_ | ⬜ |
-| A6 | **Attach-aware blocking `PreToolUse` hook controls approval** (HIGHEST RISK) | Write a `PreToolUse` hook that blocks N s then returns `permissionDecision`; test: (a) a decision suppresses the TUI prompt, (b) a neutral/timeout exit falls through to the TUI prompt, (c) the block doesn't destabilize Claude, (d) the hook can cheaply read tmux attach state (`tmux list-clients -t <target>`) and branch — **exit neutral when a client is attached** (instant desk prompt), **block-and-poll when detached** | All four hold | _(fill)_ | ⬜ |
-| A7 | Event-writer hook latency is negligible | Time a session with the writer hook installed vs not | < ~50ms added per event | _(fill)_ | ⬜ |
-| A8 | `AskUserQuestion` can be answered programmatically (hook) or via `send-keys` | Attempt hook-supplied answer; else `send-keys` arrow-to-index + Enter | One reliable method identified | _(fill)_ | ⬜ |
-| A9 | `tmux send-keys` (text + keys) lands correctly in a **headless/detached** tmux pane (no attached client) | On the **target host (the Mac in the MVP phase — exercise it with no tmux client attached)**, send to a detached pane; confirm receipt | Input received reliably | _(fill)_ | ⬜ |
-| A10 | The `encoded-cwd → transcript path` mapping is known | Derive a live session's transcript path from its cwd; confirm file match | Deterministic mapping documented | _(fill)_ | ⬜ |
+| A1 | Every hook payload includes `session_id`, `cwd`, `transcript_path`, `hook_event_name` | Dump stdin for each hook; inspect keys | All four present | ✅ `session_id`,`cwd`,`transcript_path`,`hook_event_name` on every event (+ `permission_mode`,`effort` on most). SCHEMA.md §Hook payloads | ✅ |
+| A2 | `Notification` distinguishes "needs permission" from "idle waiting for input" via a field | Trigger a permission prompt; separately let a session sit idle; diff the two `Notification` payloads | A field (e.g. `notification_type`) with two distinct values | ✅ `notification_type` ∈ {`permission_prompt`,`idle_prompt`}; messages "Claude needs your permission" / "Claude is waiting for your input" | ✅ |
+| A3 | A pending `tool_use` is written to the transcript **before** approval | Trigger a permission-required tool; `tail -f` the transcript; check before answering | A `tool_use` record appears pre-decision | ❌ **FALSE** — while the prompt is pending the transcript has the `user` prompt but **no** `tool_use`; it appears only post-decision. Pending data must come from the `PreToolUse` hook. Plan + doc 00 amended | ❌ |
+| A4 | `AskUserQuestion` question + options are structured `tool_input` in the transcript | Trigger an AskUserQuestion; inspect the transcript record | `{ question, options:[{label, description}] }`-ish structure | ⚠️ Actually `{ questions:[ {question,header,multiSelect,options:[{label,description}]} ] }` — **plural `questions` array**. Plan/doc amended | ⚠️ |
+| A5 | Real transcript line discriminators (kills the inferred `user_message`/etc. names) | Inspect raw transcript lines for user/assistant/tool_use/tool_result | Documented exact `type` tags + nesting | ✅ `type`=`user`/`assistant` with nested `message.content[]` blocks (`text`/`thinking`/`tool_use`/`tool_result`); meta types ignored; `tool_result`={`tool_use_id`,`content`,`is_error`}. SCHEMA.md §Transcript | ✅ |
+| A6 | **Attach-aware blocking `PreToolUse` hook controls approval** (HIGHEST RISK) | Write a `PreToolUse` hook that blocks N s then returns `permissionDecision`; test: (a) a decision suppresses the TUI prompt, (b) a neutral/timeout exit falls through to the TUI prompt, (c) the block doesn't destabilize Claude, (d) the hook can cheaply read tmux attach state (`tmux list-clients -t <target>`) and branch — **exit neutral when a client is attached** (instant desk prompt), **block-and-poll when detached** | All four hold | ✅ All four proven in a contained project-scoped hook (schema `{hookSpecificOutput:{permissionDecision}}`): (a) `allow`/`deny` suppress the TUI prompt (deny's reason surfaced to Claude); (b) `ask`/exit-0 falls through to the prompt; (c) a ~5s block then remote decision ran cleanly, no destabilization; (d) `tmux list-clients -t <sess>` empty→block-and-poll→remote `allow` ran the tool, non-empty (`attached,focused`)→instant `ask` desk prompt. Default hook timeout 600s, set `timeout` per hook | ✅ |
+| A7 | Event-writer hook latency is negligible | Time a session with the writer hook installed vs not | < ~50ms added per event | ✅ append hook exec median 5.0ms (n=20; one 372ms cold-start outlier) — negligible | ✅ |
+| A8 | `AskUserQuestion` can be answered programmatically (hook) or via `send-keys` | Attempt hook-supplied answer; else `send-keys` arrow-to-index + Enter | One reliable method identified | ✅ `send-keys` index nav confirmed end-to-end. **Single-select:** `↓`×(idx) then `Enter`. **multiSelect:** `↓` to each, `Space` to toggle, then `→` to the *Submit* tab + `Enter` (Enter on an option only toggles). Answer confirmed on the event stream: transcript `tool_result` + `PostToolUse.tool_response.answers` (`{question_text: label}`; multiSelect = comma-joined labels). Hook-supplied answer not needed | ✅ |
+| A9 | `tmux send-keys` (text + keys) lands correctly in a **headless/detached** tmux pane (no attached client) | On the **target host (the Mac in the MVP phase — exercise it with no tmux client attached)**, send to a detached pane; confirm receipt | Input received reliably | ✅ `send-keys` text+`Enter` (and `Down Down Enter` menu nav) landed in a **detached** tmux pane with no client attached (spike session) | ✅ |
+| A10 | The `encoded-cwd → transcript path` mapping is known | Derive a live session's transcript path from its cwd; confirm file match | Deterministic mapping documented | ✅ `encoded-cwd` = cwd with `/`→`-`; `/private/tmp` → `~/.claude/projects/-private-tmp/<sid>.jsonl` (file confirmed) | ✅ |
 
 **Blocks:** Impl #1 (fixtures/contracts depend on A1–A5), Impl #2 (all). Until
 🟢, neither should write implementation code.
@@ -108,14 +113,14 @@ file, register it for all events, and drive a real session through each scenario
 
 ## Gate B — Test harness (Impl #1)
 
-**Gate status:** 🔴 Unverified
-**Prerequisite:** Gate A items A1–A5 (the fixtures are the captured shapes).
+**Gate status:** 🟢 Verified — B1/B2/B3 all ✅ (real captured fixtures).
+**Prerequisite:** Gate A items A1–A5 (the fixtures are the captured shapes) — ✅ met.
 
 | ID | Assumption | How to verify | Expected | Result | Status |
 |----|------------|---------------|----------|--------|--------|
-| B1 | `bun:test` runs in this repo and can import `src/core/*` | Add `"test":"bun test"`; write a trivial test importing `status.ts`; run | Green | _(fill)_ | ⬜ |
-| B2 | Tests run hermetically with no tmux / no `claude` present | Run the suite in an env without tmux/claude | Pass (except the gated live canary) | _(fill)_ | ⬜ |
-| B3 | Captured fixtures faithfully reproduce the scroll-up bug | Feed `viewport/running-scrolled-up.txt` to current `detectStatus` | Returns `ready` (the bug, reproduced) | _(fill)_ | ⬜ |
+| B1 | `bun:test` runs in this repo and can import `src/core/*` | Add `"test":"bun test"`; write a trivial test importing `status.ts`; run | Green | ✅ trivial test importing `src/core/status.ts` passed (bun 1.3.14) | ✅ |
+| B2 | Tests run hermetically with no tmux / no `claude` present | Run the suite in an env without tmux/claude | Pass (except the gated live canary) | ✅ runs with no tmux/claude in-process | ✅ |
+| B3 | Captured fixtures faithfully reproduce the scroll-up bug | Feed `viewport/running-scrolled-up.txt` to current `detectStatus` | Returns `ready` (the bug, reproduced) | ✅ Real capture `viewport/running-scrolled-up.plain.txt` (scrolled mid-run via `PageUp`): `detectStatus(…, hasProcess=true)` → `ready` (bug); non-scrolled control → `running`. Mechanism: scroll keeps the `❯` prompt pinned but swaps the spinner for `Jump to bottom (ctrl+End) ↓` | ✅ |
 
 ---
 

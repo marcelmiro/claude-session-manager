@@ -1,0 +1,35 @@
+{
+  "session_id": "0af7252d-dc52-415d-a4c8-30f09a6cae89",
+  "transcript_path": "/Users/throxy/.claude/projects/-private-tmp/0af7252d-dc52-415d-a4c8-30f09a6cae89.jsonl",
+  "cwd": "/private/tmp",
+  "permission_mode": "acceptEdits",
+  "effort": {
+    "level": "medium"
+  },
+  "hook_event_name": "PreToolUse",
+  "tool_name": "AskUserQuestion",
+  "tool_input": {
+    "questions": [
+      {
+        "question": "Pick toppings",
+        "header": "Toppings",
+        "options": [
+          {
+            "label": "Cheese",
+            "description": "Add cheese."
+          },
+          {
+            "label": "Onion",
+            "description": "Add onion."
+          },
+          {
+            "label": "Olives",
+            "description": "Add olives."
+          }
+        ],
+        "multiSelect": true
+      }
+    ]
+  },
+  "tool_use_id": "toolu_01FNFZqokah5F5hPTSjc6cJF"
+}

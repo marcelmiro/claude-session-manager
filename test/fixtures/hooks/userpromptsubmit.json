@@ -1,0 +1,8 @@
+{
+  "session_id": "f481ae9b-f4c3-4d47-9037-84d9a37bdb3e",
+  "transcript_path": "/Users/throxy/.claude/projects/-private-tmp/f481ae9b-f4c3-4d47-9037-84d9a37bdb3e.jsonl",
+  "cwd": "/private/tmp",
+  "permission_mode": "default",
+  "hook_event_name": "UserPromptSubmit",
+  "prompt": "Run the bash command: touch /tmp/spike-perm-test.txt"
+}

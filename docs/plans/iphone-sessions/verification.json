@@ -1,0 +1,8 @@
+{
+  "_comment": "Canonical machine state for the verification gates. The 🔴/🟢 in 04-verification-gates.md is the human mirror. status ∈ unverified|partial|verified. The guard test fails for any gate with enforce:true and status!==verified.",
+  "gates": {
+    "A": { "title": "Claude Code wrapping", "status": "verified", "enforce": true },
+    "B": { "title": "Test harness", "status": "verified", "enforce": false },
+    "C": { "title": "Monorepo + mobile app", "status": "unverified", "enforce": false }
+  }
+}
