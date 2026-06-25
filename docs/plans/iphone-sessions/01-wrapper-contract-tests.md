@@ -79,8 +79,8 @@ fixtures encode our assumptions and defeat the drift-detection purpose.
 
 ## Schema Pinning (the prerequisite task — shared with impl #2 §1b.0)
 
-Before writing assertions, capture ground truth from a live session on the EC2
-box (or any machine with `claude`):
+Before writing assertions, capture ground truth from a live session on the Mac
+(or any machine with `claude`):
 
 1. Install a throwaway hook for every event of interest that appends its stdin
    to a dump file:
@@ -196,8 +196,8 @@ unit tests so the default `bun test` stays hermetic and fast.
 - [ ] Decide fixture-vs-snapshot strategy: prefer explicit assertions over
       `bun:test` snapshots for the contract tests (snapshots hide intent); use
       fixtures as *inputs*, not as golden outputs.
-- [ ] Ensure tests run with no tmux / no `claude` present (hermetic) except the
-      gated Contract D.
+- [ ] Ensure tests run with no tmux / no `claude` present (hermetic). (The only
+      non-hermetic test is the deferred Contract D canary, if/when it is built.)
 - [ ] **Build the verification-gate guard test** (decided enforcement, **scoped to
       Gate A only for MVP**). Create `docs/plans/iphone-sessions/verification.json`
       and `verification-gate.test.ts` per the spec in
@@ -209,14 +209,14 @@ unit tests so the default `bun test` stays hermetic and fast.
 
 ## Acceptance criteria
 
-- `bun test` runs green for Contracts A–C *after Implementation 2*, and the
+- `bun test` runs green for Contracts A + B *after Implementation 2*, and the
   event-sourced status tests are RED before it (proving they specify the target).
 - Every "Open question" in Schema Pinning is closed and recorded in
   `SCHEMA.md` with a real captured example.
 - The scroll-up regression is expressed as a single, named, passing test against
   `event-status.ts`.
-- Contract D fails (loudly, with a diff) when run against a deliberately edited
-  fixture, proving the canary works.
+- *(Deferred — Contract D)* when the drift canary is later built, it fails loudly
+  with a diff against a deliberately edited fixture, proving it works.
 
 ## Open questions
 

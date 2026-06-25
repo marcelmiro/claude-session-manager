@@ -178,7 +178,7 @@ By the end of 1b, `core/` should expose, framework-agnostic and headless:
 - a change-notification primitive (watch the events dir) so the bridge can push
   updates without polling.
 
-Implementation 3 builds the HTTP/WS bridge directly on these — it should add
+Implementation 3 builds the HTTP/SSE bridge directly on these — it should add
 *no* new Claude-wrapping logic.
 
 ## Acceptance criteria

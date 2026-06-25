@@ -9,7 +9,7 @@
 ## How a gate works
 
 Each gate item has: an **assumption**, **how to verify** it (a concrete
-experiment, runnable on the EC2 box or any machine with `claude` + tmux), the
+experiment, runnable on the Mac or any machine with `claude` + tmux), the
 **expected** result, a **Result** slot (filled in when run), and a **status**.
 
 **Item status:** ⬜ not run · ✅ verified as expected · ⚠️ verified but differs
@@ -125,18 +125,19 @@ file, register it for all events, and drive a real session through each scenario
 **Prerequisite:** Impl #2 complete (stable `core/` API) **and the dogfood
 checkpoint passed** (Resolved decisions, doc 00).
 
-> **MVP scope note (Resolved decisions, doc 00):** the MVP product is a plain
-> mobile-Safari **web page** over Tailscale (no service worker), so **C1 is
-> dropped** (no monorepo for MVP) and **C5/C6 + the iOS secure-context /
-> `tailscale serve` HTTPS question move to the PWA-install iteration**, where C4
-> (SSE — WS is not used) and C5 are verified in isolation. For the MVP only C2
-> (phone reaches the bridge over Tailscale) and C4 (SSE from iOS Safari) are
-> load-bearing.
+> **MVP scope note (Resolved decisions, doc 00):** the MVP product
+> ([`03-monorepo-mobile-app.md`](./03-monorepo-mobile-app.md)) is a plain
+> mobile-Safari **web page** over Tailscale (no service worker). For the MVP only
+> **C2** (phone reaches the bridge over Tailscale) and **C4** (SSE from iOS Safari)
+> are load-bearing. The rest belong to optional iterations in
+> [`05-optional-iterations.md`](./05-optional-iterations.md): **C1** → monorepo
+> split (iteration 3); **C3** → push (iteration 1); **C5/C6 + the iOS
+> secure-context / `tailscale serve` HTTPS question** → PWA install (iteration 2).
 
 | ID | Assumption | How to verify | Expected | Result | Status |
 |----|------------|---------------|----------|--------|--------|
 | C1 | Bun workspaces support the split without behavior change | Prototype moving one `core` module to a package; run `bun run start`, `status`, tests | All unchanged | _(fill)_ | ⬜ |
-| C2 | iPhone can reach the EC2 bridge over Tailscale | `curl` a probe endpoint from the phone on the tailnet | 200 OK | _(fill)_ | ⬜ |
+| C2 | iPhone can reach the bridge (the Mac for the MVP) over Tailscale | `curl` a probe endpoint from the phone on the tailnet | 200 OK | _(fill)_ | ⬜ |
 | C3 | ntfy delivers push to the iOS app | POST to an ntfy topic; observe the phone | Notification received | _(fill)_ | ⬜ |
 | C4 | SSE/WS works from iOS Safari (PWA) over Tailscale | Open a stream from a test page on the phone | Live events received | _(fill)_ | ⬜ |
 | C5 | PWA installs to the home screen with a working service worker | Add-to-home-screen; relaunch offline-tolerant | Installs, launches | _(fill)_ | ⬜ |

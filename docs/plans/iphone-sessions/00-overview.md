@@ -88,10 +88,17 @@ The work is three large, sequential implementations. Each unblocks the next.
                                  │ unblocks (stable core API)
                                  ▼
 ┌─────────────────────────────────────────────────────────────────────┐
-│ 3. Monorepo + Mobile App                                              │
-│    Restructure to a monorepo, extract a reusable core package, add a  │
-│    bridge server package and a PWA/mobile app package + push (ntfy).  │
+│ 3. Mobile App MVP (bridge + web page)                                 │
+│    Add a thin `src/bridge` server over the Impl #2 core API and a     │
+│    manual-open mobile web page that drives the five interactions over │
+│    Tailscale. No monorepo/PWA/push/EC2 — those are optional (doc 05). │
 │    → docs: 03-monorepo-mobile-app.md                                  │
+└─────────────────────────────────────────────────────────────────────┘
+                                 │ then, optionally
+                                 ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│ (optional) Iterations: push (ntfy) → PWA install → monorepo → EC2    │
+│    → docs: 05-optional-iterations.md                                  │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -106,8 +113,10 @@ The work is three large, sequential implementations. Each unblocks the next.
   fragility into the product. **Dogfood gate: stop after #2 and validate the
   scraper→JSONL migration through real Mac coding sessions before starting #3**
   (see §Resolved decisions).
-- Monorepo + app last because it depends on a settled `core` API surface from #2
-  and is mostly additive (new packages) rather than a change to existing logic.
+- Mobile app last because it depends on a settled `core` API surface from #2 and
+  is mostly additive (transport + presentation) rather than a change to existing
+  logic. The monorepo split is deferred entirely to the optional iterations
+  ([`05-optional-iterations.md`](./05-optional-iterations.md)).
 
 ## Document index
 
@@ -115,7 +124,8 @@ The work is three large, sequential implementations. Each unblocks the next.
 |-----|----------------|-------|
 | [`01-wrapper-contract-tests.md`](./01-wrapper-contract-tests.md) | #1 | Contract tests + fixtures + version-drift canary |
 | [`02-camp1-hooks-jsonl.md`](./02-camp1-hooks-jsonl.md) | #2 | Hooks, event-status, transcript reader, approval IPC |
-| [`03-monorepo-mobile-app.md`](./03-monorepo-mobile-app.md) | #3 | Monorepo layout, bridge server, PWA, push, security |
+| [`03-monorepo-mobile-app.md`](./03-monorepo-mobile-app.md) | #3 | Mobile App MVP: `src/bridge` server + mobile web page + 5 interactions |
+| [`05-optional-iterations.md`](./05-optional-iterations.md) | post-MVP | Optional iterations: push (ntfy), PWA install, monorepo split, EC2 |
 | [`04-verification-gates.md`](./04-verification-gates.md) | all | Pre-implementation gates that must be 🟢 before any code |
 | [`90-references.md`](./90-references.md) | all | Verified Claude Code facts + competitor research + URLs |
 
@@ -235,14 +245,14 @@ of these as open, treat it as closed per this list and reconcile on next edit.
 ## Conventions for agents iterating on these docs
 
 - **Close open questions empirically.** Where a doc says a field name or hook
-  behavior is "assumed/inferred," verify it against a live session on the EC2
-  box before relying on it. The single most important shared task is *Schema
-  Pinning* (see doc 01 §Fixtures and doc 02 §1b.0).
+  behavior is "assumed/inferred," verify it against a live session on the Mac
+  (or any machine with `claude`) before relying on it. The single most important
+  shared task is *Schema Pinning* (see doc 01 §Fixtures and doc 02 §1b.0).
 - **Keep `capture-pane` as fallback only.** No new feature should depend on
   parsing the rendered viewport as its source of truth.
 - **Single user.** This is a personal tool. No multi-tenancy, no auth beyond a
-  bearer token, no App Store. Prefer a PWA over native unless a hard requirement
-  forces otherwise.
+  bearer token, no App Store. Prefer a web page / PWA over native unless a hard
+  requirement forces otherwise.
 - **No new runtime deps without justification.** CSM's convention is "no
   external deps beyond blessed" and Bun built-ins. The bridge/app may add deps,
   but keep them minimal and document why.
@@ -255,5 +265,6 @@ of these as open, treat it as closed per this list and reconcile on next edit.
   `~/.claude/projects/<encoded-cwd>/<sessionId>.jsonl`.
 - **Event-sourced status** — session status derived from the last hook event
   edge, not from the rendered screen.
-- **Bridge** — the Bun HTTP/WS server on EC2 that the phone talks to.
+- **Bridge** — the Bun HTTP/SSE server (on the Mac for the MVP, EC2 later) that
+  the phone talks to.
 - **Camp 1 / Camp 2** — the two wrapper architectures (see above).
