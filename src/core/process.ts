@@ -1,6 +1,24 @@
 import type { ClaudeProcess } from "../types.ts";
 
 /**
+ * Session id from a claude process command line, or undefined.
+ *
+ * A `--fork-session` resume gets a BRAND-NEW session id — the `--resume` value is
+ * only the source it copied from. Using it would alias the fork onto its parent:
+ * both panes resolve to one session id, read one event log, and render the same
+ * status (the symptom: a running parent makes a `ready` fork show running too).
+ * For a fork we return undefined and let the SessionStart hook supply the fork's
+ * real id (falling back to the pane scraper until it does).
+ */
+export function sessionIdFromCommand(command: string): string | undefined {
+  if (/--fork-session\b/.test(command)) return undefined;
+  const m = command.match(
+    /(?:--resume|-r)[\s=]+([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/,
+  );
+  return m?.[1];
+}
+
+/**
  * Finds running Claude Code CLI processes and maps them to TTYs.
  * Parses `ps -eo pid,tty,command` output to locate processes whose
  * command contains "claude", filtering out grep artifacts and entries
@@ -45,16 +63,13 @@ export async function findClaudeProcesses(): Promise<ClaudeProcess[]> {
       // Skip entries with no associated TTY
       if (tty === "??") continue;
 
-      // Extract session ID from --resume/-r flag if present (fast, no lsof needed)
-      const resumeMatch = command.match(
-        /(?:--resume|-r)[\s=]+([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/,
-      );
-
+      // Extract session ID from --resume/-r (fast, no lsof needed); a fork's
+      // --resume points at its PARENT, so sessionIdFromCommand suppresses it.
       results.push({
         pid: parseInt(pidStr, 10),
         tty,
         command,
-        sessionId: resumeMatch?.[1],
+        sessionId: sessionIdFromCommand(command),
       });
     }
 
