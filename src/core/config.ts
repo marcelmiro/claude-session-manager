@@ -1,7 +1,9 @@
 import { homedir } from "os";
 import type { CsmConfig } from "../types";
 
-const CSM_DIR = `${homedir()}/.config/csm`;
+// CSM_HOME overrides the home root (tests point it at a temp dir; bun's
+// os.homedir() ignores a runtime-set $HOME, so an env seam is the reliable hook).
+const CSM_DIR = `${process.env.CSM_HOME ?? homedir()}/.config/csm`;
 
 export const PATHS = {
   dir: CSM_DIR,

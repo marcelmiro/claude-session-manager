@@ -1,6 +1,12 @@
 import { homedir } from "os";
 import type { WizardRepo, WizardBranch } from "../types";
 
+/** Extract a Linear/Jira-style ticket ID from a branch name (e.g. ENG-2687). */
+export function extractTicketId(branch: string): string | null {
+  const match = branch.match(/(?:^|\/)([a-zA-Z]{2,6}-\d{2,})(?=-|\/|$)/i);
+  return match ? match[1].toUpperCase() : null;
+}
+
 // Persistent cache: worktree path → base repo path (survives across refresh cycles)
 const baseRepoCache = new Map<string, string>();
 

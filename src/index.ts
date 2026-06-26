@@ -6,10 +6,11 @@ import { handleTextInputKey, renderTextWithCursor } from "./ui/text-input";
 import { updatePreview, getPreviewPlainText, renderMessage, getSessionPath } from "./ui/preview-pane";
 import { discoverSessions, groupSessions, seedPaneSessionCache } from "./core/sessions";
 import { readPreviewMessages, type PendingToolCall } from "./core/jsonl-reader";
-import { switchToPane, getMainSession, killPane, sendKeys, sendTextAndEnter } from "./core/tmux";
+import { switchToPane, getMainSession, killPane, sendKeys, sendTextAndEnter, answerQuestion } from "./core/tmux";
 import { loadNameCache, getSessionName, generateAIName, saveNameCache, type NameCache } from "./core/names";
 import { loadConfig } from "./core/config";
 import { loadState, saveState, loadPaneSessions } from "./core/state";
+import { listPendingApprovals, decideApproval } from "./core/approval";
 import { syncWindowPrefix, buildBaseName } from "./core/notifications";
 import { discoverRepos, listBranches } from "./core/git";
 import { initWizard, renderWizard, renderWizardPreview, renderWizardStatusBar, handleWizardKey, worktreeDirName } from "./ui/wizard";
@@ -149,7 +150,10 @@ function updateMenuBox() {
 }
 
 function openSpaceMenu() {
-  spaceMenu = createSpaceMenuState();
+  // Free-text send is only offered at a prompt (Inc5): ready or waiting-input.
+  const status = getSelectedSession()?.status;
+  const canSend = status === "ready" || status === "waiting";
+  spaceMenu = createSpaceMenuState(canSend);
   const box = getOrCreateMenuBox();
   updateMenuBox();
   box.show();
@@ -768,11 +772,18 @@ screen.on("keypress", async (_ch: string, key: any) => {
 
   const paneId = session.tmuxPane.paneId;
 
-  // y = approve (Enter)
+  // y = approve. If this session is blocked on a detached IPC approval (the
+  // blocking PreToolUse hook is polling for a decision), resolve it via the
+  // decision file; otherwise drive the on-screen prompt with Enter (attached).
   if (ch === "y" && !key.shift && !key.ctrl && !key.meta) {
     spaceMenuHandledKey = true;
     queueMicrotask(() => { spaceMenuHandledKey = false; });
-    await sendKeys(paneId, ["Enter"]);
+    const blocked = session.id && listPendingApprovals().some((p) => p.sessionId === session.id);
+    if (blocked) {
+      decideApproval(session.id, "allow");
+    } else {
+      await sendKeys(paneId, ["Enter"]);
+    }
     optimisticApprove(session);
     await advanceToNextWaiting();
     screen.render();
@@ -790,15 +801,17 @@ screen.on("keypress", async (_ch: string, key: any) => {
     return;
   }
 
-  // 1-9 = answer question option
+  // 1-9 = answer question option via A8 index-nav (structured options, not glyphs)
   const num = parseInt(ch, 10);
   if (num >= 1 && num <= 9) {
     if (cachedPendingToolCall?.question) {
-      const options = cachedPendingToolCall.question.options;
-      if (num <= options.length) {
+      const q = cachedPendingToolCall.question;
+      if (num <= q.options.length) {
         spaceMenuHandledKey = true;
         queueMicrotask(() => { spaceMenuHandledKey = false; });
-        await sendTextAndEnter(paneId, String(num));
+        const idx = num - 1;
+        // multiSelect submits via the Submit tab; single-select Enters on the option.
+        await answerQuestion(paneId, q.multiSelect ? [idx] : idx);
         optimisticApprove(session);
         await advanceToNextWaiting();
         screen.render();

@@ -1,8 +1,7 @@
 import { homedir } from "os";
 import type { SessionIndexEntry, SessionIndex, Session } from "../types";
-import { getBaseRepoPath } from "./git";
+import { getBaseRepoPath, extractTicketId } from "./git";
 import { repoNameFromPath } from "./sessions";
-import { extractTicketId } from "../ui/session-list";
 import type { NameCache } from "./names";
 
 const home = homedir();

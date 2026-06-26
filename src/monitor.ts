@@ -9,6 +9,8 @@
 import { listPanes, capturePane, renameWindow } from "./core/tmux";
 import { findClaudeProcesses } from "./core/process";
 import { detectStatus, type SessionStatus } from "./core/status";
+import { eventSourcedStatus } from "./core/hook-events";
+import { reapDeadSessionFiles } from "./core/approval";
 import { loadConfig, PATHS } from "./core/config";
 import { loadState, saveState, computeAggregate, buildSessionStates, loadPaneSessions, savePaneSessions, processHookEvents } from "./core/state";
 import { detectTransitions, dispatchNotifications, syncWindowPrefix, ATTENTION_PREFIX, stripAllPrefixes, desiredPrefix, buildBaseName, NAME_SEPARATOR } from "./core/notifications";
@@ -75,7 +77,9 @@ async function debugLog(msg: string): Promise<void> {
  * Only needs: which panes have Claude, what status are they in.
  * Returns sessions with their current status and all tmux panes.
  */
-async function quickDiscoverActive(): Promise<{ sessions: Session[]; allPanes: PaneInfo[]; resumeIds: Record<string, string> }> {
+async function quickDiscoverActive(
+  paneSessionMap: Record<string, string>,
+): Promise<{ sessions: Session[]; allPanes: PaneInfo[]; resumeIds: Record<string, string> }> {
   const [panes, processes] = await Promise.all([
     listPanes(),
     findClaudeProcesses(),
@@ -114,17 +118,23 @@ async function quickDiscoverActive(): Promise<{ sessions: Session[]; allPanes: P
         .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, "")
         .replace(/\x1b[\x20-\x2f]*[\x30-\x7e]/g, "")
         .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, "");
-      const result = detectStatus(plain, true);
+      const scraper = detectStatus(plain, true);
+
+      // Event-source status (correct on scroll-up) when a hook log exists; else
+      // the scraper. This is what makes status-right + ⚡/🔄 event-driven (Inc7).
+      const sessionId = paneSessionMap[pane.paneId] ?? resumeIds[pane.paneId];
+      const eventStatus = sessionId ? await eventSourcedStatus(sessionId) : null;
 
       const baseRepoPath = await getBaseRepoPath(pane.currentPath);
       return {
-        id: "",
+        id: sessionId ?? "",
         repo: repoNameFromPath(baseRepoPath),
         repoPath: pane.currentPath,
         baseRepoPath,
         branch: "",
-        status: result.status,
-        contextPercent: result.contextPercent ?? 0,
+        status: eventStatus ?? scraper.status,
+        statusSource: eventStatus ? "event" : "scraper",
+        contextPercent: scraper.contextPercent ?? 0,
         messageCount: 0,
         summary: "",
         modified: new Date(),
@@ -211,8 +221,8 @@ async function main(): Promise<void> {
     // Not in tmux context
   }
 
-  // Quick poll active sessions
-  const { sessions, allPanes, resumeIds } = await quickDiscoverActive();
+  // Quick poll active sessions (event-sourced status when a hook log exists)
+  const { sessions, allPanes, resumeIds } = await quickDiscoverActive(paneSessionMap);
   await debugLog(`discovered ${sessions.length} sessions: ${sessions.map((s) => `${s.tmuxPane!.paneId}=${s.status}`).join(", ") || "(none)"}`);
 
   // Seed paneSessionMap with --resume IDs as fallbacks (don't overwrite hook events,
@@ -409,6 +419,10 @@ async function phase2(
   if (mapChanged) {
     await savePaneSessions(paneSessionMap);
   }
+
+  // Reap on-disk files for dead sessions (Inc7 rotation). After the cleanup above,
+  // the map's values are exactly the live sessions — reuse that liveness, no scan.
+  reapDeadSessionFiles(new Set(Object.values(paneSessionMap)));
 
   // AI naming: find one session with a sessionId but no name, skipping recent failures
   const namingSkips = await loadNamingSkips();

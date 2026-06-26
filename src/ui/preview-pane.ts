@@ -2,7 +2,9 @@ import { homedir } from "os";
 import type { Widgets } from "blessed";
 import type { Session } from "../types";
 
-import { readPreviewMessages, readPendingToolCall, type PreviewMessage, type PendingToolCall } from "../core/jsonl-reader";
+import type { PreviewMessage, PendingToolCall, ToolInput } from "../core/jsonl-reader";
+import { readTranscriptTurns, pendingToolCall } from "../core/hook-events";
+import type { TranscriptTurn } from "../core/transcript";
 import { formatTimeAgo } from "../core/status";
 import { markdownToBlessed } from "./markdown";
 import { C } from "./colors";
@@ -202,6 +204,96 @@ export function getSessionPath(session: Session): string | null {
   if (!session.id) return null;
   const encodedPath = encodeProjectPath(session.repoPath);
   return `${homedir()}/.claude/projects/${encodedPath}/${session.id}.jsonl`;
+}
+
+// -- transcript.ts → PreviewMessage adapter (Inc5) --
+// The preview now sources from the JSONL transcript via `transcript.ts` (the
+// contract parser). These adapters map `TranscriptTurn[]` into the existing
+// `PreviewMessage`/`ToolInput` shapes so the render helpers below are unchanged.
+
+/** Extract a tool_use block's structured input into a `ToolInput`. */
+function toolInputFrom(name: string, input: unknown): ToolInput {
+  const inp = (input ?? {}) as Record<string, any>;
+  const ti: ToolInput = { name };
+  if (typeof inp.file_path === "string") ti.filePath = inp.file_path;
+  if (typeof inp.command === "string") ti.command = inp.command;
+  if (typeof inp.description === "string") ti.description = inp.description;
+  if (typeof inp.pattern === "string") ti.pattern = inp.pattern;
+  if (name === "Edit") {
+    if (typeof inp.old_string === "string") ti.oldString = inp.old_string;
+    if (typeof inp.new_string === "string") ti.newString = inp.new_string;
+  } else if (name === "Write") {
+    if (typeof inp.content === "string") ti.content = inp.content.slice(0, 500);
+  } else if (name === "AskUserQuestion" && inp.questions?.[0]) {
+    const q = inp.questions[0];
+    ti.question = {
+      header: q.header || "",
+      text: q.question || "",
+      options: (q.options || []).map((o: any) => ({ label: o.label || "", description: o.description })),
+      multiSelect: q.multiSelect || false,
+    };
+  }
+  return ti;
+}
+
+/** Flatten a tool_result block's content to display text. */
+function toolResultText(content: unknown): string {
+  if (typeof content === "string") return content.trim();
+  if (Array.isArray(content)) {
+    return content.map((c) => (typeof c === "string" ? c : c?.text ?? "")).join("").trim();
+  }
+  return "";
+}
+
+/** Adapt parsed transcript turns into renderable PreviewMessages (chronological). */
+export function transcriptToMessages(turns: TranscriptTurn[]): PreviewMessage[] {
+  const messages: PreviewMessage[] = [];
+  const toolMsgById = new Map<string, PreviewMessage>(); // tool_use_id → its tool-use message
+
+  for (const turn of turns) {
+    if (turn.role === "user") {
+      for (const b of turn.content) {
+        if (b.type === "text" && b.text.trim()) {
+          messages.push({ role: "user", text: b.text.trim() });
+        } else if (b.type === "tool_result") {
+          // Attach the result output to the matching tool-use message.
+          const tm = toolMsgById.get(b.tool_use_id);
+          const out = toolResultText(b.content);
+          if (tm && out) tm.bashOutput = tm.bashOutput ? `${tm.bashOutput}\n${out}` : out;
+        }
+      }
+      continue;
+    }
+
+    // assistant turn: split into an optional text message + an optional tool-use message
+    let text = "";
+    let thinking: string | undefined;
+    const toolNames: string[] = [];
+    const toolInputs: ToolInput[] = [];
+    const toolUseIds: string[] = [];
+    for (const b of turn.content) {
+      if (b.type === "text" && b.text) text += (text ? "\n\n" : "") + b.text;
+      else if (b.type === "thinking" && b.text) thinking = b.text;
+      else if (b.type === "tool_use") {
+        toolNames.push(b.name);
+        toolUseIds.push(b.id);
+        toolInputs.push(toolInputFrom(b.name, b.input));
+      }
+    }
+    if (text) messages.push({ role: "assistant", text, thinking });
+    if (toolNames.length > 0) {
+      const toolMsg: PreviewMessage = {
+        role: "tool-use",
+        text: "",
+        toolNames,
+        toolInputs,
+        thinking: text ? undefined : thinking,
+      };
+      messages.push(toolMsg);
+      for (const id of toolUseIds) toolMsgById.set(id, toolMsg);
+    }
+  }
+  return messages;
 }
 
 /** Render a single PreviewMessage to blessed markup at the given width */
@@ -533,12 +625,18 @@ export async function updatePreview(
   let pendingResult: PendingToolCall | null = null;
 
   if (sessionPath) {
-    const messages = await readPreviewMessages(sessionPath, 3);
+    // Source the preview from the JSONL transcript via transcript.ts (correct
+    // after /rewind; reflects resolved history). Keep the last 3 conversational
+    // messages, mirroring the prior preview depth.
+    const turns = await readTranscriptTurns(sessionPath);
+    const messages = transcriptToMessages(turns).slice(-3);
 
     if (messages.length > 0) {
       // Decision-first layout for waiting sessions
       if (session.status === "waiting") {
-        const pending = await readPendingToolCall(sessionPath);
+        // Pending tool/question comes from the PreToolUse event (A3), not the
+        // transcript. Pre-hook sessions (no event log) fall to the generic block.
+        const pending = session.id ? pendingToolCall(session.id) : null;
         pendingResult = pending;
 
         // Build decision block (goes at TOP) — mirrors Claude Code's permission UI

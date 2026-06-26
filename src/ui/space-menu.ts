@@ -15,6 +15,12 @@ export interface SpaceMenuState {
   /** Text input state for send-message */
   messageText: string;
   messageCursor: number;
+  /**
+   * Whether the send-message action is offered (Inc5). Free-text send is only
+   * safe when the session is at a prompt — `ready` or `waiting` (waiting-input).
+   * Otherwise the item is hidden and `m` is inert (no keystrokes reach the pane).
+   */
+  canSendMessage: boolean;
 }
 
 export type SpaceMenuAction =
@@ -29,11 +35,12 @@ export type SpaceMenuAction =
 
 // --- State lifecycle ---
 
-export function createSpaceMenuState(): SpaceMenuState {
+export function createSpaceMenuState(canSendMessage = true): SpaceMenuState {
   return {
     level: "root",
     messageText: "",
     messageCursor: 0,
+    canSendMessage,
   };
 }
 
@@ -43,14 +50,16 @@ function keyLabel(key: string, label: string): string {
   return `  {${C.peach}-fg}${key}{/${C.peach}-fg}  ${label}`;
 }
 
-function renderRoot(): string {
-  return [
-    keyLabel("m", "send message"),
+function renderRoot(canSendMessage: boolean): string {
+  const lines = [
     keyLabel("c", "copy"),
     keyLabel("r", "rename"),
     keyLabel("x", "kill"),
     keyLabel("f", "fork"),
-  ].join("\n");
+  ];
+  // Send-message only when the session is at a prompt (Inc5).
+  if (canSendMessage) lines.unshift(keyLabel("m", "send message"));
+  return lines.join("\n");
 }
 
 function renderSendMessage(text: string, cursor: number): string {
@@ -66,7 +75,7 @@ function renderSendMessage(text: string, cursor: number): string {
 export function renderSpaceMenu(state: SpaceMenuState): string {
   switch (state.level) {
     case "root":
-      return renderRoot();
+      return renderRoot(state.canSendMessage);
     case "send-message":
       return renderSendMessage(state.messageText, state.messageCursor);
   }
@@ -77,7 +86,7 @@ export function renderSpaceMenu(state: SpaceMenuState): string {
 export function getMenuDimensions(state: SpaceMenuState): { width: number; height: number } {
   switch (state.level) {
     case "root":
-      return { width: 24, height: 7 };
+      return { width: 24, height: state.canSendMessage ? 7 : 6 };
     case "send-message":
       return { width: 42, height: 7 };
   }
@@ -92,15 +101,15 @@ export function handleSpaceMenuKey(
 ): SpaceMenuAction {
   switch (state.level) {
     case "root":
-      return handleRootKey(keyName, ch);
+      return handleRootKey(state, keyName, ch);
     case "send-message":
       return handleSendMessageKey(state, keyName, ch);
   }
 }
 
-function handleRootKey(_keyName: string, ch: string): SpaceMenuAction {
+function handleRootKey(state: SpaceMenuState, _keyName: string, ch: string): SpaceMenuAction {
   switch (ch) {
-    case "m": return { type: "start-input" };
+    case "m": return state.canSendMessage ? { type: "start-input" } : { type: "noop" };
     case "c": return { type: "exec", command: "copy" };
     case "r": return { type: "exec", command: "rename" };
     case "x": return { type: "exec", command: "kill" };

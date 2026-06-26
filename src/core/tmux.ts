@@ -50,6 +50,12 @@ export async function listPanes(): Promise<PaneInfo[]> {
  * Capture the last 50 lines of visible content from the given tmux pane.
  * Pass escapes: true to include ANSI escape sequences (for color rendering).
  * Returns an empty string if the pane doesn't exist or tmux isn't running.
+ *
+ * Scraper-fallback width caveat (Inc7 #4): `detectStatus` patterns assume a wide
+ * enough pane that the spinner/prompt lines don't wrap. CSM launches sessions with
+ * `tmux new-window` (inherits the client width) and must not reflow existing panes,
+ * so there is no `new-session -x 120` site to pin. This only affects pre-hook
+ * sessions on the scraper path; event-status (now primary) is width-independent.
  */
 export async function capturePane(
   paneId: string,
@@ -148,6 +154,51 @@ export async function sendTextAndEnter(paneId: string, text: string): Promise<vo
   } catch {
     // pane may have closed
   }
+}
+
+/**
+ * Answer an on-screen AskUserQuestion via send-keys index navigation (SCHEMA A8).
+ * The menu cursor starts on the first real option (index 0).
+ *
+ * - single-select (`number`): `Down` × index, then `Enter`.
+ * - multiSelect (`number[]`): `Down` to each (sorted) index + `Space` to toggle,
+ *   then `Right` to the Submit tab + `Enter`. `Enter` on an option only toggles —
+ *   submission is the Submit tab, so multiSelect must end on `Right`+`Enter`.
+ *
+ * Keyed by paneId because the caller (TUI) already holds the pane; the Impl #3
+ * bridge resolves sessionId→paneId before calling. Caller gates on event-status.
+ */
+export async function answerQuestion(
+  paneId: string,
+  selection: number | number[],
+): Promise<void> {
+  await sendKeys(paneId, questionAnswerKeys(selection));
+}
+
+/**
+ * Pure key-sequence builder for `answerQuestion` (extracted for testability —
+ * the side-effecting `sendKeys` is the only thing left in the wrapper).
+ *
+ * - single-select (`number`): `Down` × index, then `Enter`.
+ * - multiSelect (`number[]`): de-duped + ascending, `Down`-deltas to each index +
+ *   `Space` to toggle, ending `Right`+`Enter` (A8: Submit tab, not Enter-on-option).
+ */
+export function questionAnswerKeys(selection: number | number[]): string[] {
+  const keys: string[] = [];
+  if (typeof selection === "number") {
+    for (let i = 0; i < selection; i++) keys.push("Down");
+    keys.push("Enter");
+  } else {
+    const sorted = [...new Set(selection)].sort((a, b) => a - b);
+    let cursor = 0;
+    for (const idx of sorted) {
+      for (let d = cursor; d < idx; d++) keys.push("Down");
+      keys.push("Space");
+      cursor = idx;
+    }
+    keys.push("Right", "Enter"); // → Submit tab, then submit
+  }
+  return keys;
 }
 
 /**

@@ -2,12 +2,9 @@ import type { Widgets } from "blessed";
 import type { RepoGroup, DisplayRow, Session } from "../types";
 import { C, statusColor, statusDot } from "./colors";
 import { formatTimeAgo } from "../core/status";
+import { extractTicketId } from "../core/git";
 
-/** Extract a Linear/Jira-style ticket ID from a branch name (e.g. ENG-2687) */
-export function extractTicketId(branch: string): string | null {
-  const match = branch.match(/(?:^|\/)([a-zA-Z]{2,6}-\d{2,})(?=-|\/|$)/i);
-  return match ? match[1].toUpperCase() : null;
-}
+export { extractTicketId };
 
 /** Build a display label: ticket+name > ticket+suffix > name > branch */
 export function buildSessionLabel(session: Session): string {

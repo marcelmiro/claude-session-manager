@@ -23,6 +23,8 @@ export interface Session {
   tmuxPane?: TmuxPane;
   /** Cached pane capture from status detection — reused by preview to avoid a duplicate tmux call */
   lastCapture?: string;
+  /** Where `status` came from: event-sourced hook log vs viewport scraper (Inc4). */
+  statusSource?: "event" | "scraper";
 }
 
 export interface RepoGroup {
@@ -181,4 +183,63 @@ export interface CsmConfig {
   nativeNotification: boolean;
   repoPaths?: string[];       // dirs to scan 1-level deep for git repos
   priorityRepos?: string[];   // repo names pinned at top of list (lowercase)
+}
+
+// --- Hook event log + transcript types (Impl #2 — Camp 1) ---
+
+/**
+ * Raw Claude Code hook payload, verbatim (snake_case). One JSON object per line
+ * in `events/<session_id>.jsonl`. `event-status.test.ts` casts the committed
+ * fixtures (`hooks/*.json`) `as HookEvent` and feeds them straight to
+ * `deriveStatus`, so this IS the on-disk shape — no normalization layer.
+ * Re-exported from `core/event-status.ts` to satisfy the test import path.
+ * Unknown keys are tolerated (forward-compat across claude versions).
+ */
+export interface HookEvent {
+  session_id: string;
+  hook_event_name:
+    | "SessionStart"
+    | "UserPromptSubmit"
+    | "PreToolUse"
+    | "PostToolUse"
+    | "Notification"
+    | "Stop"
+    | "SubagentStop";
+  transcript_path: string; // absolute path to the JSONL transcript (free on every event)
+  cwd: string;
+  permission_mode?: string;
+  effort?: { level: string };
+  tool_name?: string; // PreToolUse / PostToolUse
+  tool_input?: unknown; // PreToolUse (AskUserQuestion → { questions: [...] })
+  tool_use_id?: string;
+  notification_type?: "permission_prompt" | "idle_prompt";
+  message?: string; // Notification
+}
+
+/**
+ * A single block inside a transcript turn's `message.content[]`. Re-exported from
+ * `core/transcript.ts` (the test imports it from "./transcript").
+ */
+export type TranscriptBlock =
+  | { type: "text"; text: string }
+  | { type: "thinking"; text: string }
+  | { type: "tool_use"; id: string; name: string; input: unknown }
+  | { type: "tool_result"; tool_use_id: string; content: unknown };
+
+/**
+ * One conversational turn. Field is `content` (NOT `blocks`) — the contract test
+ * requires `t.content`. A string-valued `message.content` becomes one text block.
+ */
+export interface TranscriptTurn {
+  role: "user" | "assistant";
+  content: TranscriptBlock[];
+}
+
+/** A tool awaiting approval, surfaced from the blocking PreToolUse hook (Inc6). */
+export interface PendingApproval {
+  sessionId: string;
+  ts: number;
+  tool: string;
+  tool_use_id: string;
+  input: unknown;
 }

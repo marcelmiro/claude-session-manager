@@ -15,6 +15,7 @@ import { switchToPane, listPanes, renameWindow, capturePane, displayMessage } fr
 import { syncWindowPrefix, stripAllPrefixes, ATTENTION_PREFIX } from "./core/notifications";
 import { findClaudeProcesses } from "./core/process";
 import { detectStatus } from "./core/status";
+import { eventSourcedStatus } from "./core/hook-events";
 import { loadNameCache } from "./core/names";
 import { PATHS } from "./core/config";
 
@@ -275,9 +276,10 @@ const STATUS_ICONS: Record<string, string> = {
  * Print a text-only list of active Claude sessions.
  */
 export async function list(): Promise<void> {
-  const [panes, processes] = await Promise.all([
+  const [panes, processes, paneSessions] = await Promise.all([
     listPanes(),
     findClaudeProcesses(),
+    loadPaneSessions(),
   ]);
 
   const claudeTtys = new Set(processes.map((p) => p.tty));
@@ -291,7 +293,8 @@ export async function list(): Promise<void> {
     return;
   }
 
-  // Capture and detect status for each pane
+  // Capture and detect status for each pane. Prefer event-sourced status when a
+  // hook log exists (correct on scroll-up); else fall back to the viewport scraper.
   const sessions = await Promise.all(
     claudePanes.map(async (pane) => {
       const captured = await capturePane(pane.paneId);
@@ -300,7 +303,10 @@ export async function list(): Promise<void> {
         .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, "")
         .replace(/\x1b[\x20-\x2f]*[\x30-\x7e]/g, "")
         .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, "");
-      const result = detectStatus(plain, true);
+      const scraper = detectStatus(plain, true);
+
+      const sessionId = paneSessions[pane.paneId];
+      const eventStatus = sessionId ? await eventSourcedStatus(sessionId) : null;
 
       const name = stripAllPrefixes(pane.windowName);
       const repo = pane.currentPath === home
@@ -309,8 +315,9 @@ export async function list(): Promise<void> {
 
       return {
         name,
-        status: result.status,
-        contextPercent: result.contextPercent,
+        status: eventStatus ?? scraper.status,
+        statusSource: eventStatus ? "event" : "scraper",
+        contextPercent: scraper.contextPercent,
         repo,
         needsAttention: pane.windowName.startsWith(ATTENTION_PREFIX),
       };
@@ -329,7 +336,7 @@ export async function list(): Promise<void> {
     const attention = s.needsAttention ? " ⚡" : "";
     const ctx = s.contextPercent ? ` ${s.contextPercent}%` : "";
     console.log(
-      `${icon} ${s.name.padEnd(24)} ${s.status.padEnd(8)} ${s.repo}${ctx}${attention}`,
+      `${icon} ${s.name.padEnd(24)} ${s.status.padEnd(8)} statusSource=${s.statusSource.padEnd(7)} ${s.repo}${ctx}${attention}`,
     );
   }
 }
@@ -425,7 +432,9 @@ function isSubsequence(sub: string, str: string): boolean {
 // csm setup
 // ---------------------------------------------------------------------------
 
-const HOOK_VERSION = 3;
+const HOOK_VERSION = 6;
+
+// SessionStart pane→session mapper (existing; feeds processHookEvents).
 const HOOK_SCRIPT = `#!/bin/bash
 # CSM_HOOK_VERSION=${HOOK_VERSION}
 INPUT=$(cat)
@@ -439,7 +448,121 @@ if [ -n "$SESSION_ID" ] && [ -n "$PANE_ID" ]; then
 fi
 `;
 
-/** Read the CSM_HOOK_VERSION from the installed hook script. Returns 0 if missing or unreadable. */
+// Shared event logger (Inc3). Appends the raw hook payload, one JSON object per
+// line, to events/<session_id>.jsonl. Newlines in the stdin payload are collapsed
+// to spaces so each event is exactly one line — JSON escapes real newlines inside
+// strings (\\n), so this only flattens pretty-print formatting, never string
+// contents. Trim to the last 200 lines ONLY when over budget, via atomic rename
+// (.tmp + mv -f) so the ~3s concurrent readers never see a torn file; the common
+// path stays a bare append (~5ms, A7).
+const LOG_EVENT_SNIPPET = `INPUT=$(cat)
+# Whitespace-tolerant (handles compact AND pretty-printed payloads); cut -f4 yields
+# the value either way. session-start.sh keeps its proven compact-only pattern.
+SESSION_ID=$(printf '%s' "$INPUT" | grep -oE '"session_id"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | cut -d'"' -f4)
+if [ -n "$SESSION_ID" ]; then
+  DIR=~/.config/csm/events
+  mkdir -p "$DIR"
+  F="$DIR/$SESSION_ID.jsonl"
+  LINE=$(printf '%s' "$INPUT" | tr '\\n' ' ')
+  printf '%s\\n' "$LINE" >> "$F"
+  LINES=$(wc -l < "$F")
+  if [ "$LINES" -gt 200 ]; then
+    tail -200 "$F" > "$F.tmp" && mv -f "$F.tmp" "$F"
+  fi
+fi`;
+
+// Non-blocking events (UserPromptSubmit/PostToolUse/Notification/Stop/SubagentStop).
+const EVENT_HOOK_SCRIPT = `#!/bin/bash
+# CSM_HOOK_VERSION=${HOOK_VERSION}
+# CSM event logger — see LOG_EVENT_SNIPPET.
+${LOG_EVENT_SNIPPET}
+`;
+
+// PreToolUse handler. Logs the event (ADR-3b: always before the decision), then
+// attach-aware approval (Inc6, A6): a tmux client attached to the session → exit
+// neutral so the desk TUI prompt appears instantly (no added lag); detached →
+// write pending/<id>.json and block-poll decisions/<id>.json every 500ms up to the
+// 600s hook timeout, emitting the permission decision (or neutral fallthrough on
+// timeout — the desk prompt is always the floor). Pure shell, no jq/new deps; the
+// full tool_input is recovered by listPendingApprovals from the logged event.
+const PRETOOLUSE_HOOK_SCRIPT = `#!/bin/bash
+# CSM_HOOK_VERSION=${HOOK_VERSION}
+# CSM PreToolUse handler — log, then attach-aware blocking approval.
+${LOG_EVENT_SNIPPET}
+
+# Derive the session from \$TMUX_PANE (A6). Outside tmux → neutral, never block.
+[ -z "\$TMUX_PANE" ] && exit 0
+SESS=$(tmux display-message -p -t "\$TMUX_PANE" '#{session_name}' 2>/dev/null)
+[ -z "\$SESS" ] && exit 0
+[ -z "\$SESSION_ID" ] && exit 0
+
+# Attached client → fall through to the instant desk TUI prompt (no lag).
+if [ -n "$(tmux list-clients -t "\$SESS" 2>/dev/null)" ]; then
+  exit 0
+fi
+
+# Detached → register the pending approval and block-poll for a decision.
+TOOL=$(printf '%s' "\$INPUT" | grep -oE '"tool_name"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | cut -d'"' -f4)
+TUID=$(printf '%s' "\$INPUT" | grep -oE '"tool_use_id"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | cut -d'"' -f4)
+
+# ADR-3 fix: don't block on calls Claude would auto-approve anyway, or a detached
+# (autonomous/subagent-heavy) session stalls up to 600s per call. bypassPermissions
+# never prompts; read-only tools never prompt in any mode. Only tools that could
+# actually raise a prompt reach the block-poll below.
+PERM=$(printf '%s' "\$INPUT" | grep -oE '"permission_mode"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | cut -d'"' -f4)
+[ "\$PERM" = "bypassPermissions" ] && exit 0
+case "\$TOOL" in
+  Read|Glob|Grep|NotebookRead|TodoWrite|Task) exit 0 ;;
+esac
+
+TS=$(( $(date +%s) * 1000 ))
+PDIR=~/.config/csm/pending
+DFILE=~/.config/csm/decisions/"\$SESSION_ID".json
+mkdir -p "\$PDIR"
+printf '{"sessionId":"%s","ts":%s,"tool":"%s","tool_use_id":"%s"}\\n' "\$SESSION_ID" "\$TS" "\$TOOL" "\$TUID" > "\$PDIR/\$SESSION_ID".json
+
+i=0
+while [ "\$i" -lt 1200 ]; do          # 1200 × 0.5s = 600s (the hook timeout)
+  if [ -f "\$DFILE" ]; then
+    DECISION=$(grep -oE '"decision"[[:space:]]*:[[:space:]]*"[^"]*"' "\$DFILE" | head -1 | cut -d'"' -f4)
+    REASON=$(grep -oE '"reason"[[:space:]]*:[[:space:]]*"[^"]*"' "\$DFILE" | head -1 | cut -d'"' -f4)
+    rm -f "\$DFILE" "\$PDIR/\$SESSION_ID".json
+    if [ "\$DECISION" = "allow" ]; then
+      printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow"}}\\n'
+      exit 0
+    elif [ "\$DECISION" = "deny" ]; then
+      printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"%s"}}\\n' "\$REASON"
+      exit 0
+    fi
+  fi
+  sleep 0.5
+  i=$(( i + 1 ))
+done
+
+# Timeout → neutral fallthrough to the desk TUI prompt (nothing stranded).
+rm -f "\$PDIR/\$SESSION_ID".json
+exit 0
+`;
+
+/** Hook scripts CSM installs under ~/.config/csm/hooks. */
+const HOOK_SCRIPTS = [
+  { name: "session-start.sh", content: HOOK_SCRIPT },
+  { name: "event.sh", content: EVENT_HOOK_SCRIPT },
+  { name: "pretooluse.sh", content: PRETOOLUSE_HOOK_SCRIPT },
+] as const;
+
+/** Which hook script handles each Claude Code event. PreToolUse blocks (Inc6). */
+const HOOK_REGISTRATIONS: { event: string; script: string; timeout?: number }[] = [
+  { event: "SessionStart", script: "session-start.sh" },
+  { event: "UserPromptSubmit", script: "event.sh" },
+  { event: "PostToolUse", script: "event.sh" },
+  { event: "Notification", script: "event.sh" },
+  { event: "Stop", script: "event.sh" },
+  { event: "SubagentStop", script: "event.sh" },
+  { event: "PreToolUse", script: "pretooluse.sh", timeout: 600 },
+];
+
+/** Read the CSM_HOOK_VERSION from an installed hook script. Returns 0 if missing or unreadable. */
 async function getInstalledHookVersion(hookPath: string): Promise<number> {
   try {
     const content = await Bun.file(hookPath).text();
@@ -451,16 +574,20 @@ async function getInstalledHookVersion(hookPath: string): Promise<number> {
 }
 
 /**
- * Install the SessionStart hook into ~/.claude/settings.json and create the hook script.
- * Safe to run multiple times — reinstalls script if outdated, skips if current.
+ * Install the CSM hooks into ~/.claude/settings.json and create the hook scripts.
+ *
+ * Registers exactly ONE command per event (ADR-3b): SessionStart → pane-map,
+ * the five non-blocking events → `event.sh` (log), PreToolUse → `pretooluse.sh`
+ * (log now; blocking approval in Inc6). Safe to run multiple times — rewrites
+ * outdated scripts and adds only missing registrations, so a second run is a
+ * no-op (exactly one CSM entry per event; user hooks preserved).
  */
 export async function setup(): Promise<void> {
   const { homedir } = await import("os");
-  const home = homedir();
+  const home = process.env.CSM_HOME ?? homedir(); // CSM_HOME: test seam (see config.ts)
   const settingsPath = `${home}/.claude/settings.json`;
   const hookDir = `${home}/.config/csm/hooks`;
-  const hookPath = `${hookDir}/session-start.sh`;
-  const hookMarker = "csm/hooks/session-start";
+  const scriptPath = (name: string) => `${hookDir}/${name}`;
 
   // Load existing settings (or start fresh)
   let settings: Record<string, any> = {};
@@ -469,49 +596,56 @@ export async function setup(): Promise<void> {
   } catch {
     // No settings file or malformed — start fresh
   }
-
   if (!settings.hooks) settings.hooks = {};
-  if (!Array.isArray(settings.hooks.SessionStart)) settings.hooks.SessionStart = [];
 
-  // Check if hook is already registered in settings
-  const alreadyInstalled = settings.hooks.SessionStart.some(
-    (entry: any) => Array.isArray(entry.hooks) &&
-      entry.hooks.some((h: any) => typeof h.command === "string" && h.command.includes(hookMarker)),
-  );
-
-  // Check installed script version
-  const installedVersion = await getInstalledHookVersion(hookPath);
-  const scriptOutdated = installedVersion < HOOK_VERSION;
-
-  if (alreadyInstalled && !scriptOutdated) {
-    console.log("CSM hooks already configured.");
-  } else {
-    // Write the hook script
-    await Bun.$`mkdir -p ${hookDir}`.quiet();
-    await Bun.write(hookPath, HOOK_SCRIPT);
-    await Bun.$`chmod +x ${hookPath}`.quiet();
-
-    if (!alreadyInstalled) {
-      // Add hook entry to settings (omit matcher to match all SessionStart events)
-      settings.hooks.SessionStart.push({
-        hooks: [{ type: "command", command: hookPath }],
-      });
-
-      // Write back settings
-      await Bun.$`mkdir -p ${home}/.claude`.quiet();
-      await Bun.write(settingsPath, JSON.stringify(settings, null, 2) + "\n");
+  // Rewrite any missing/outdated script (version gate is per-script).
+  await Bun.$`mkdir -p ${hookDir}`.quiet();
+  let scriptsWritten = 0;
+  let scriptsUpdated = false;
+  for (const { name, content } of HOOK_SCRIPTS) {
+    const path = scriptPath(name);
+    const installed = await getInstalledHookVersion(path);
+    if (installed < HOOK_VERSION) {
+      await Bun.write(path, content);
+      await Bun.$`chmod +x ${path}`.quiet();
+      scriptsWritten++;
+      if (installed > 0) scriptsUpdated = true;
     }
-
-    if (scriptOutdated && installedVersion > 0) {
-      console.log("CSM SessionStart hook updated.");
-    } else {
-      console.log("CSM SessionStart hook installed.");
-    }
-    console.log(`  Hook script: ${hookPath}`);
-    console.log(`  Settings: ${settingsPath}`);
-    console.log("\nNew Claude Code sessions will now be automatically tracked.");
   }
 
+  // Ensure each event has exactly one CSM registration. Match on the full script
+  // path (a stable idempotency key) so a re-run never duplicates an entry.
+  let settingsChanged = false;
+  for (const { event, script, timeout } of HOOK_REGISTRATIONS) {
+    const path = scriptPath(script);
+    if (!Array.isArray(settings.hooks[event])) settings.hooks[event] = [];
+    const present = settings.hooks[event].some(
+      (entry: any) =>
+        Array.isArray(entry.hooks) &&
+        entry.hooks.some((h: any) => typeof h.command === "string" && h.command.includes(path)),
+    );
+    if (!present) {
+      const hook: Record<string, unknown> = { type: "command", command: path };
+      if (timeout !== undefined) hook.timeout = timeout;
+      settings.hooks[event].push({ hooks: [hook] }); // omit matcher → all events/tools
+      settingsChanged = true;
+    }
+  }
+
+  if (settingsChanged) {
+    await Bun.$`mkdir -p ${home}/.claude`.quiet();
+    await Bun.write(settingsPath, JSON.stringify(settings, null, 2) + "\n");
+  }
+
+  if (!scriptsWritten && !settingsChanged) {
+    console.log("CSM hooks already configured.");
+    return;
+  }
+
+  console.log(scriptsUpdated ? "CSM hooks updated." : "CSM hooks installed.");
+  console.log(`  Hook scripts: ${hookDir}/{session-start,event,pretooluse}.sh`);
+  console.log(`  Settings: ${settingsPath}`);
+  console.log("\nNew Claude Code sessions will now emit status/transcript events.");
 }
 
 // ---------------------------------------------------------------------------

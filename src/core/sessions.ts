@@ -11,6 +11,7 @@ import { detectStatus, estimateContextPercent, type StatusResult } from "./statu
 import { getBaseRepoPath } from "./git";
 import { stripAllPrefixes, extractAIName } from "./notifications";
 import { processHookEvents } from "./state";
+import { eventSourcedStatus } from "./hook-events";
 
 const home = homedir();
 
@@ -412,13 +413,18 @@ async function buildActiveSession(
   const contextPercent = statusResult.contextPercent
     ?? (activeInfo ? estimateContextPercent(activeInfo.messageCount) : 0);
 
+  // Prefer event-sourced status when a hook log exists (ADR-2); else the scraper.
+  // This is the headline fix: events are correct regardless of pane scroll.
+  const eventStatus = resolvedId ? await eventSourcedStatus(resolvedId) : null;
+
   return {
     id: resolvedId,
     repo,
     repoPath,
     baseRepoPath,
     branch,
-    status: statusResult.status,
+    status: eventStatus ?? statusResult.status,
+    statusSource: eventStatus ? "event" : "scraper",
     contextPercent,
     messageCount: activeInfo?.messageCount ?? 0,
     summary: activeInfo?.summary ?? "",
