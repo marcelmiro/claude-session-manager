@@ -88,13 +88,30 @@ test("dropped PostToolUse: open PreToolUse + tool_result on a SETTLED transcript
   expect(await eventSourcedStatus(id)).toBe("ready");
 });
 
-test("open PreToolUse + stale transcript (> QUIET_MS) → ready (mtime demotion)", async () => {
-  const id = "sess-stale";
+test("in-flight tool: open PreToolUse + stale transcript (> QUIET_MS) stays running (long Bash, no false ready)", async () => {
+  // A long build/test/dev-server holds an open PreToolUse and writes nothing to
+  // the transcript for minutes. The mtime-quiet backstop must NOT demote it — the
+  // silence is the tool working, not a dropped edge. (Regression: this used to
+  // flip a working session to `ready` mid-run.)
+  const id = "sess-longtool";
   const tp = `${EVENTS_DIR}/${id}.transcript.jsonl`;
-  // No tool_result so pairing can't demote — only the aged mtime can.
-  writeTranscript(tp, [{ type: "assistant", message: { content: "waiting" } }], 200_000);
+  writeTranscript(tp, [{ type: "assistant", message: { content: "running a long command" } }], 200_000);
   writeLog(id, [
     ev({ hook_event_name: "PreToolUse", tool_name: "Bash", tool_use_id: "tu_1" }, tp),
+  ]);
+  expect(await eventSourcedStatus(id)).toBe("running");
+});
+
+test("stranded turn-end: closed tool + stale transcript (> QUIET_MS), no tool in flight → ready (mtime demotion)", async () => {
+  // PreToolUse closed by PostToolUse (no tool in flight) and no Stop — a dropped
+  // Stop stranded `running`. With nothing actually running, the mtime backstop
+  // still cleans it up.
+  const id = "sess-stranded";
+  const tp = `${EVENTS_DIR}/${id}.transcript.jsonl`;
+  writeTranscript(tp, [{ type: "assistant", message: { content: "tool finished" } }], 200_000);
+  writeLog(id, [
+    ev({ hook_event_name: "PreToolUse", tool_name: "Bash", tool_use_id: "tu_1" }, tp),
+    ev({ hook_event_name: "PostToolUse", tool_name: "Bash", tool_use_id: "tu_1" }, tp),
   ]);
   expect(await eventSourcedStatus(id)).toBe("ready");
 });
@@ -105,6 +122,19 @@ test("Stop edge → ready; no event log → null", async () => {
   writeLog(id, [ev({ hook_event_name: "Stop" }, tp)]);
   expect(await eventSourcedStatus(id)).toBe("ready");
   expect(await eventSourcedStatus("nonexistent-session")).toBeNull();
+});
+
+test("pending AskUserQuestion → waiting, and the backstop never demotes it", async () => {
+  // Even with a long-stale transcript, a session parked at a question stays
+  // `waiting` (edge status isn't `running`, so no backstop runs).
+  const id = "sess-ask-waiting";
+  const tp = `${EVENTS_DIR}/${id}.transcript.jsonl`;
+  writeTranscript(tp, [{ type: "assistant", message: { content: "which option?" } }], 200_000);
+  writeLog(id, [
+    ev({ hook_event_name: "UserPromptSubmit" }, tp),
+    ev({ hook_event_name: "PreToolUse", tool_name: "AskUserQuestion", tool_use_id: "tu_q" }, tp),
+  ]);
+  expect(await eventSourcedStatus(id)).toBe("waiting");
 });
 
 // --- readEvents ----------------------------------------------------------------

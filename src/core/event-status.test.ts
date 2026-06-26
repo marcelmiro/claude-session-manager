@@ -19,7 +19,7 @@
  */
 
 import { test, expect } from "bun:test";
-import { deriveStatus, type HookEvent } from "./event-status";
+import { deriveStatus, toolInFlight, type HookEvent } from "./event-status";
 import { fixtureJson } from "../../test/helpers/fixture";
 
 const sessionStart = fixtureJson("hooks/sessionstart.json") as HookEvent;
@@ -62,6 +62,36 @@ test("Stop → ready", () => {
   expect(
     deriveStatus([sessionStart, userPromptSubmit, preToolUse, postToolUse, stop]),
   ).toBe("ready");
+});
+
+const e = (name: HookEvent["hook_event_name"], tool_use_id?: string): HookEvent =>
+  ({ session_id: "s", hook_event_name: name, transcript_path: "x", cwd: "/", tool_use_id } as HookEvent);
+
+test("pending AskUserQuestion → waiting (not running)", () => {
+  const ask = { ...preToolUse, tool_name: "AskUserQuestion" } as HookEvent;
+  expect(deriveStatus([sessionStart, userPromptSubmit, ask])).toBe("waiting");
+});
+
+test("a non-AskUserQuestion PreToolUse is still running", () => {
+  expect(deriveStatus([sessionStart, userPromptSubmit, preToolUse])).toBe("running");
+});
+
+test("toolInFlight: open PreToolUse with no Stop after it → true", () => {
+  expect(toolInFlight([e("UserPromptSubmit"), e("PreToolUse", "tu_1")])).toBe(true);
+});
+
+test("toolInFlight: a closed PreToolUse is not in flight → false", () => {
+  expect(toolInFlight([e("PreToolUse", "tu_1"), e("PostToolUse", "tu_1")])).toBe(false);
+});
+
+test("toolInFlight: parallel tools — one still open → true", () => {
+  expect(
+    toolInFlight([e("PreToolUse", "tu_a"), e("PreToolUse", "tu_b"), e("PostToolUse", "tu_a")]),
+  ).toBe(true);
+});
+
+test("toolInFlight: a Stop after the open PreToolUse marks it stale → false", () => {
+  expect(toolInFlight([e("PreToolUse", "tu_old"), e("Stop"), e("PreToolUse", "tu_new"), e("PostToolUse", "tu_new")])).toBe(false);
 });
 
 test("headline regression: running event history → running (viewport scroll irrelevant)", () => {

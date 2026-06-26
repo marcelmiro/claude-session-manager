@@ -8,7 +8,8 @@
  * Truth table (see `event-status.test.ts`):
  *   SessionStart                     → idle
  *   UserPromptSubmit                 → running
- *   PreToolUse (no PostToolUse yet)  → running
+ *   PreToolUse (no PostToolUse yet)  → running   (AskUserQuestion → waiting:
+ *                                                 a pending question blocks on the user)
  *   PostToolUse (result in hand,     → running   (still working until Stop/idle —
  *     no Stop)                                     never map a bare PostToolUse to ready)
  *   Notification permission_prompt   → waiting
@@ -63,7 +64,12 @@ function deriveFromEdges(events: HookEvent[]): SessionStatus {
         if (event.notification_type === "idle_prompt") return "ready";
         continue; // unknown notification flavor — look further back
       case "PreToolUse":
-        return "running";
+        // A pending AskUserQuestion is the model blocked on the user — `waiting`,
+        // not `running`. It emits no permission_prompt Notification (it's a tool,
+        // not a permission gate), so this is the only place it can be typed. Any
+        // PostToolUse for it would be a newer edge, so reaching it here means it's
+        // unresolved. Permission-gated tools still flow through Notification above.
+        return event.tool_name === "AskUserQuestion" ? "waiting" : "running";
       case "PostToolUse":
         // The tool finished, but the turn has not (no Stop) — Claude is still
         // working with the result. A bare PostToolUse is `running`, not `ready`.
@@ -80,6 +86,34 @@ function deriveFromEdges(events: HookEvent[]): SessionStatus {
     }
   }
   return "idle";
+}
+
+/**
+ * Whether a tool is genuinely in-flight: there is an unclosed `PreToolUse` with no
+ * `Stop` after it. A long `Bash` (build, test suite, dev server) can hold an open
+ * `PreToolUse` and write nothing to the transcript for minutes — the caller uses
+ * this to keep the mtime-quiet backstop from demoting such a session to `ready`. A
+ * `Stop` after the open `PreToolUse` means the turn ended, so the open edge is a
+ * stale dropped-PostToolUse leftover, not a running tool.
+ */
+export function toolInFlight(events: HookEvent[]): boolean {
+  const closed = new Set<string>();
+  for (const e of events) {
+    if (e.hook_event_name === "PostToolUse" && e.tool_use_id) closed.add(e.tool_use_id);
+  }
+  let preIdx = -1;
+  for (let i = events.length - 1; i >= 0; i--) {
+    const e = events[i];
+    if (e.hook_event_name === "PreToolUse" && e.tool_use_id && !closed.has(e.tool_use_id)) {
+      preIdx = i;
+      break;
+    }
+  }
+  if (preIdx === -1) return false;
+  for (let i = preIdx + 1; i < events.length; i++) {
+    if (events[i].hook_event_name === "Stop") return false; // turn ended → stale, not in-flight
+  }
+  return true;
 }
 
 /** The tool_use_id of the most recent PreToolUse with no matching PostToolUse. */

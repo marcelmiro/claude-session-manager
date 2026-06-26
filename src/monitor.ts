@@ -11,7 +11,8 @@ import { findClaudeProcesses } from "./core/process";
 import { detectStatus, type SessionStatus } from "./core/status";
 import { eventSourcedStatus } from "./core/hook-events";
 import { reapDeadSessionFiles } from "./core/approval";
-import { loadConfig, PATHS } from "./core/config";
+import { loadConfig } from "./core/config";
+import { debugLog } from "./core/debug";
 import { loadState, saveState, computeAggregate, buildSessionStates, loadPaneSessions, savePaneSessions, processHookEvents } from "./core/state";
 import { detectTransitions, dispatchNotifications, syncWindowPrefix, ATTENTION_PREFIX, stripAllPrefixes, desiredPrefix, buildBaseName, NAME_SEPARATOR } from "./core/notifications";
 import { getBaseRepoPath } from "./core/git";
@@ -20,7 +21,6 @@ import { loadNameCache, saveNameCache, generateAIName, acquireNamingLock, releas
 import { findActiveSessionInfo } from "./core/sessions";
 import { homedir } from "os";
 import type { Session, AggregateStatus, PaneInfo, ClaudeProcess } from "./types";
-import { existsSync } from "fs";
 
 // ---------------------------------------------------------------------------
 // Naming skip tracking — persistent across monitor invocations
@@ -48,28 +48,8 @@ async function saveNamingSkips(skips: NamingSkipMap): Promise<void> {
 
 // ---------------------------------------------------------------------------
 // Debug logging — only active when ~/.config/csm/debug.log exists
+// (shared logger in core/debug.ts; see debugLog import)
 // ---------------------------------------------------------------------------
-
-const DEBUG_LOG_PATH = `${PATHS.dir}/debug.log`;
-let debugEnabled: boolean | null = null;
-
-async function debugLog(msg: string): Promise<void> {
-  if (debugEnabled === null) debugEnabled = existsSync(DEBUG_LOG_PATH);
-  if (!debugEnabled) return;
-  try {
-    const ts = new Date().toISOString().slice(11, 23); // HH:MM:SS.mmm
-    const line = `${ts} ${msg}\n`;
-    const file = Bun.file(DEBUG_LOG_PATH);
-    const existing = await file.exists() ? await file.text() : "";
-    // Auto-truncate: keep last 900 lines when over 1000
-    const lines = existing.split("\n");
-    const trimmed = lines.length > 1000 ? lines.slice(-900).join("\n") + "\n" : existing;
-    await Bun.write(DEBUG_LOG_PATH, trimmed + line);
-  } catch {
-    // Non-fatal — disable for rest of this run
-    debugEnabled = false;
-  }
-}
 
 /**
  * Quick-discover active Claude sessions. Much lighter than discoverSessions() —
