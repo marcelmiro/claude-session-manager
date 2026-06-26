@@ -5,6 +5,10 @@
  * Status comes from hook edges, NOT the scraped viewport — so the scroll-up
  * viewport that fools `detectStatus` (status.ts) is irrelevant here.
  *
+ * Status is exactly what the newest determining edge says — a pure edge model,
+ * no transcript backstop. Walks newest → oldest and returns on the first edge
+ * that determines status, so a trailing meta/unknown event never strands it.
+ *
  * Truth table (see `event-status.test.ts`):
  *   SessionStart                     → idle
  *   UserPromptSubmit                 → running
@@ -15,45 +19,24 @@
  *   Notification permission_prompt   → waiting
  *   Notification idle_prompt         → ready
  *   Stop                             → ready
+ *   SubagentStop                     → (non-determining; skip — see below)
  *
- * Inc4 widened the signature to accept `opts.transcript` for the missed-edge
- * backstop (ADR-4): when the edges say `running` but a dropped PostToolUse/Stop
- * could strand us, a `tool_result` already in the transcript for the dangling
- * PreToolUse demotes running→ready. The mtime-quiet half of the backstop lives in
- * the caller (`hook-events.ts`, which has fs access). Absent `opts.transcript`,
- * this derives from edges alone — so the Inc1 no-opts callers are unchanged.
+ * No transcript-based backstop: earlier versions demoted a "running" edge to
+ * "ready" using transcript silence (a timeout) or a dangling PreToolUse's
+ * tool_result (pairing). Both fired on genuinely-working sessions — long
+ * Bash/auto-mode/subagent runs go silent, and a stale dangling tool from a prior
+ * turn made a fresh running turn read "ready" — producing spurious turnComplete
+ * attention pings. A dropped terminal edge is rare and self-heals on the next
+ * event, so trusting the edges is both simpler and more correct.
  */
 
 import type { SessionStatus } from "./status";
-import type { TranscriptTurn } from "./transcript";
 
 // Re-export so `event-status.test.ts` can import `HookEvent` from "./event-status".
 export type { HookEvent } from "../types";
 import type { HookEvent } from "../types";
 
-export function deriveStatus(
-  events: HookEvent[],
-  opts?: { transcript?: TranscriptTurn[] },
-): SessionStatus {
-  const status = deriveFromEdges(events);
-  if (status !== "running" || !opts?.transcript) return status;
-
-  // Missed-edge backstop (pairing half): the edge history ends on an open
-  // PreToolUse, but if the transcript already holds that tool's `tool_result`, the
-  // tool completed and we lost the terminal edge → demote to ready.
-  const danglingId = lastOpenToolUseId(events);
-  if (danglingId && transcriptHasToolResult(opts.transcript, danglingId)) {
-    return "ready";
-  }
-  return status;
-}
-
-/**
- * Derive status from hook edges alone. Walks newest → oldest and returns on the
- * first edge that determines status, so a trailing meta/unknown event never
- * strands the result.
- */
-function deriveFromEdges(events: HookEvent[]): SessionStatus {
+export function deriveStatus(events: HookEvent[]): SessionStatus {
   for (let i = events.length - 1; i >= 0; i--) {
     const event = events[i];
     switch (event.hook_event_name) {
@@ -66,9 +49,8 @@ function deriveFromEdges(events: HookEvent[]): SessionStatus {
       case "PreToolUse":
         // A pending AskUserQuestion is the model blocked on the user — `waiting`,
         // not `running`. It emits no permission_prompt Notification (it's a tool,
-        // not a permission gate), so this is the only place it can be typed. Any
-        // PostToolUse for it would be a newer edge, so reaching it here means it's
-        // unresolved. Permission-gated tools still flow through Notification above.
+        // not a permission gate), so this is the only place it can be typed.
+        // Permission-gated tools still flow through Notification above.
         return event.tool_name === "AskUserQuestion" ? "waiting" : "running";
       case "PostToolUse":
         // The tool finished, but the turn has not (no Stop) — Claude is still
@@ -77,8 +59,12 @@ function deriveFromEdges(events: HookEvent[]): SessionStatus {
       case "UserPromptSubmit":
         return "running";
       case "SubagentStop":
-        // A subagent finished; the parent session is still active.
-        return "running";
+        // NON-determining: a subagent finishing says nothing about whether the
+        // PARENT turn is running — that's decided by the parent's own edges. In
+        // auto-mode / agent sessions a SubagentStop routinely trickles in AFTER the
+        // turn's Stop+idle_prompt; returning "running" here un-finished a done
+        // session (the stuck-running bug). Skip it and read the real status behind.
+        continue;
       case "SessionStart":
         return "idle";
       default:
@@ -86,53 +72,4 @@ function deriveFromEdges(events: HookEvent[]): SessionStatus {
     }
   }
   return "idle";
-}
-
-/**
- * Whether a tool is genuinely in-flight: there is an unclosed `PreToolUse` with no
- * `Stop` after it. A long `Bash` (build, test suite, dev server) can hold an open
- * `PreToolUse` and write nothing to the transcript for minutes — the caller uses
- * this to keep the mtime-quiet backstop from demoting such a session to `ready`. A
- * `Stop` after the open `PreToolUse` means the turn ended, so the open edge is a
- * stale dropped-PostToolUse leftover, not a running tool.
- */
-export function toolInFlight(events: HookEvent[]): boolean {
-  const closed = new Set<string>();
-  for (const e of events) {
-    if (e.hook_event_name === "PostToolUse" && e.tool_use_id) closed.add(e.tool_use_id);
-  }
-  let preIdx = -1;
-  for (let i = events.length - 1; i >= 0; i--) {
-    const e = events[i];
-    if (e.hook_event_name === "PreToolUse" && e.tool_use_id && !closed.has(e.tool_use_id)) {
-      preIdx = i;
-      break;
-    }
-  }
-  if (preIdx === -1) return false;
-  for (let i = preIdx + 1; i < events.length; i++) {
-    if (events[i].hook_event_name === "Stop") return false; // turn ended → stale, not in-flight
-  }
-  return true;
-}
-
-/** The tool_use_id of the most recent PreToolUse with no matching PostToolUse. */
-function lastOpenToolUseId(events: HookEvent[]): string | undefined {
-  const closed = new Set<string>();
-  for (const e of events) {
-    if (e.hook_event_name === "PostToolUse" && e.tool_use_id) closed.add(e.tool_use_id);
-  }
-  for (let i = events.length - 1; i >= 0; i--) {
-    const e = events[i];
-    if (e.hook_event_name === "PreToolUse" && e.tool_use_id && !closed.has(e.tool_use_id)) {
-      return e.tool_use_id;
-    }
-  }
-  return undefined;
-}
-
-function transcriptHasToolResult(turns: TranscriptTurn[], toolUseId: string): boolean {
-  return turns.some((t) =>
-    t.content.some((b) => b.type === "tool_result" && b.tool_use_id === toolUseId),
-  );
 }

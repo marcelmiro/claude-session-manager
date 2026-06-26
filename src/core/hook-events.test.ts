@@ -11,7 +11,7 @@
 
 import "../../test/helpers/home";
 import { test, expect, beforeEach } from "bun:test";
-import { mkdirSync, rmSync, writeFileSync, utimesSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import {
   readEvents,
   eventSourcedStatus,
@@ -32,107 +32,47 @@ function writeLog(sessionId: string, events: HookEvent[]): void {
   writeFileSync(eventLogPath(sessionId), events.map((e) => JSON.stringify(e)).join("\n") + "\n");
 }
 
-/** Write a minimal JSONL transcript and (optionally) age its mtime. */
-function writeTranscript(path: string, turns: object[], ageMs = 0): void {
-  writeFileSync(path, turns.map((t) => JSON.stringify(t)).join("\n") + "\n");
-  if (ageMs > 0) {
-    const when = (Date.now() - ageMs) / 1000;
-    utimesSync(path, when, when);
-  }
-}
-
 function ev(partial: Partial<HookEvent> & { hook_event_name: HookEvent["hook_event_name"] }, transcript: string): HookEvent {
   return { session_id: "s", cwd: "/tmp", transcript_path: transcript, ...partial } as HookEvent;
 }
 
-// --- eventSourcedStatus: missed-edge backstop (Inc4) ---------------------------
+// --- eventSourcedStatus (pure edges: status = newest determining edge) ---------
 
-test("open PreToolUse + fresh transcript with no tool_result → running", async () => {
+test("open PreToolUse → running", async () => {
   const id = "sess-running";
-  const tp = `${EVENTS_DIR}/${id}.transcript.jsonl`;
-  writeTranscript(tp, [{ type: "assistant", message: { content: "working on it" } }]);
   writeLog(id, [
-    ev({ hook_event_name: "UserPromptSubmit" }, tp),
-    ev({ hook_event_name: "PreToolUse", tool_name: "Bash", tool_use_id: "tu_1" }, tp),
+    ev({ hook_event_name: "UserPromptSubmit" }, "x"),
+    ev({ hook_event_name: "PreToolUse", tool_name: "Bash", tool_use_id: "tu_1" }, "x"),
   ]);
   expect(await eventSourcedStatus(id)).toBe("running");
 });
 
-test("in-flight tool: open PreToolUse + tool_result but FRESH transcript → running (no false turnComplete)", async () => {
-  // The bug: between back-to-back tools the transcript holds a tool_result a few ms
-  // before its PostToolUse edge is logged. A fresh transcript means the tool is
-  // in-flight (PostToolUse imminent) — demoting here flips an actively-working
-  // session ready↔running and fires spurious turnComplete pings. Must stay running.
-  const id = "sess-inflight";
-  const tp = `${EVENTS_DIR}/${id}.transcript.jsonl`;
-  writeTranscript(tp, [
-    { type: "user", message: { content: [{ type: "tool_result", tool_use_id: "tu_1", content: "ok" }] } },
-  ]); // ageMs=0 → mtime is now (fresh)
+test("a stale dangling tool from a prior turn does NOT demote a fresh running turn", async () => {
+  // A dropped PostToolUse leaves an open PreToolUse; a new turn then starts
+  // (UserPromptSubmit). The old pairing/timeout backstop read this as `ready` and
+  // re-fired a spurious turnComplete every cycle (the cos-l2 ⚡ bug). Pure edges
+  // keep it `running` — status is whatever the newest edge says.
+  const id = "sess-stale-dangling";
   writeLog(id, [
-    ev({ hook_event_name: "PreToolUse", tool_name: "Bash", tool_use_id: "tu_1" }, tp),
+    ev({ hook_event_name: "PreToolUse", tool_name: "Bash", tool_use_id: "tu_old" }, "x"), // never closed
+    ev({ hook_event_name: "Stop" }, "x"),
+    ev({ hook_event_name: "UserPromptSubmit" }, "x"),
   ]);
   expect(await eventSourcedStatus(id)).toBe("running");
-});
-
-test("dropped PostToolUse: open PreToolUse + tool_result on a SETTLED transcript → ready (pairing demotion)", async () => {
-  const id = "sess-paired";
-  const tp = `${EVENTS_DIR}/${id}.transcript.jsonl`;
-  // Same as in-flight, but the transcript has been quiet past the settle window →
-  // the terminal edge was genuinely dropped, so demotion is correct here.
-  writeTranscript(tp, [
-    { type: "user", message: { content: [{ type: "tool_result", tool_use_id: "tu_1", content: "ok" }] } },
-  ], 30_000);
-  writeLog(id, [
-    ev({ hook_event_name: "PreToolUse", tool_name: "Bash", tool_use_id: "tu_1" }, tp),
-  ]);
-  expect(await eventSourcedStatus(id)).toBe("ready");
-});
-
-test("in-flight tool: open PreToolUse + stale transcript (> QUIET_MS) stays running (long Bash, no false ready)", async () => {
-  // A long build/test/dev-server holds an open PreToolUse and writes nothing to
-  // the transcript for minutes. The mtime-quiet backstop must NOT demote it — the
-  // silence is the tool working, not a dropped edge. (Regression: this used to
-  // flip a working session to `ready` mid-run.)
-  const id = "sess-longtool";
-  const tp = `${EVENTS_DIR}/${id}.transcript.jsonl`;
-  writeTranscript(tp, [{ type: "assistant", message: { content: "running a long command" } }], 200_000);
-  writeLog(id, [
-    ev({ hook_event_name: "PreToolUse", tool_name: "Bash", tool_use_id: "tu_1" }, tp),
-  ]);
-  expect(await eventSourcedStatus(id)).toBe("running");
-});
-
-test("stranded turn-end: closed tool + stale transcript (> QUIET_MS), no tool in flight → ready (mtime demotion)", async () => {
-  // PreToolUse closed by PostToolUse (no tool in flight) and no Stop — a dropped
-  // Stop stranded `running`. With nothing actually running, the mtime backstop
-  // still cleans it up.
-  const id = "sess-stranded";
-  const tp = `${EVENTS_DIR}/${id}.transcript.jsonl`;
-  writeTranscript(tp, [{ type: "assistant", message: { content: "tool finished" } }], 200_000);
-  writeLog(id, [
-    ev({ hook_event_name: "PreToolUse", tool_name: "Bash", tool_use_id: "tu_1" }, tp),
-    ev({ hook_event_name: "PostToolUse", tool_name: "Bash", tool_use_id: "tu_1" }, tp),
-  ]);
-  expect(await eventSourcedStatus(id)).toBe("ready");
 });
 
 test("Stop edge → ready; no event log → null", async () => {
   const id = "sess-stop";
-  const tp = `${EVENTS_DIR}/${id}.transcript.jsonl`;
-  writeLog(id, [ev({ hook_event_name: "Stop" }, tp)]);
+  writeLog(id, [ev({ hook_event_name: "Stop" }, "x")]);
   expect(await eventSourcedStatus(id)).toBe("ready");
   expect(await eventSourcedStatus("nonexistent-session")).toBeNull();
 });
 
-test("pending AskUserQuestion → waiting, and the backstop never demotes it", async () => {
-  // Even with a long-stale transcript, a session parked at a question stays
-  // `waiting` (edge status isn't `running`, so no backstop runs).
+test("pending AskUserQuestion → waiting", async () => {
   const id = "sess-ask-waiting";
-  const tp = `${EVENTS_DIR}/${id}.transcript.jsonl`;
-  writeTranscript(tp, [{ type: "assistant", message: { content: "which option?" } }], 200_000);
   writeLog(id, [
-    ev({ hook_event_name: "UserPromptSubmit" }, tp),
-    ev({ hook_event_name: "PreToolUse", tool_name: "AskUserQuestion", tool_use_id: "tu_q" }, tp),
+    ev({ hook_event_name: "UserPromptSubmit" }, "x"),
+    ev({ hook_event_name: "PreToolUse", tool_name: "AskUserQuestion", tool_use_id: "tu_q" }, "x"),
   ]);
   expect(await eventSourcedStatus(id)).toBe("waiting");
 });

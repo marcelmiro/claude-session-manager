@@ -76,8 +76,22 @@ defined order. Logging and approval for `PreToolUse` are the same handler, so th
 event is always logged before the (possibly blocking) approval decision, with no
 dispatch-ordering assumption.
 
-## ADR-4 — Missed-edge backstop via transcript, no CPU sampling
-**Decision:** Trust the last hook edge as primary; gate "running" on pane/proc
+## ADR-4 — Missed-edge backstop via transcript, no CPU sampling — **REVERSED: pure edges, no backstop**
+**Outcome (post-dogfood):** the entire transcript backstop was **removed**. Status is
+now exactly the newest determining hook edge (`deriveStatus(events)`), no transcript
+read, no timeout, no pairing. Both demotion halves fired on genuinely-working
+sessions: the mtime-quiet (`QUIET_MS`) rule demoted any long-silent running session
+(long Bash, auto-mode, subagent orchestration all go quiet) — a probation log caught
+**351 false demotions in minutes**; the pairing rule demoted a *fresh* running turn
+whenever an **old** dangling `PreToolUse` (dropped `PostToolUse`) from a prior turn
+had its `tool_result` in the transcript. Both produced constant spurious
+`turnComplete` ⚡ pings (the `cos-l2-tickets` report). A dropped *terminal* edge — the
+only thing the backstop guarded — is rare and self-heals on the session's next event,
+so trusting edges is both simpler and more correct. Pinned by `hook-events.test.ts`
+(stale-dangling-tool → still running) + `event-status.test.ts`. The original decision
+is kept below for history.
+
+**Decision (original, superseded):** Trust the last hook edge as primary; gate "running" on pane/proc
 liveness each refresh; demote running→ready only when a secondary signal confirms
 (a `tool_result` after the dangling `PreToolUse`, or transcript mtime quiet ~2–3
 min). `deriveStatus` reads the transcript (`opts.transcript`) for this.

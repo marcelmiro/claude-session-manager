@@ -27,25 +27,3 @@ export async function debugLog(msg: string): Promise<void> {
     debugEnabled = false; // non-fatal — disable for the rest of this run
   }
 }
-
-/**
- * Durable probation log for the `QUIET_MS` demotion (ADR-4 on probation). Unlike
- * `debugLog`, this is ALWAYS written (not gated by debug.log) and lives in its own
- * file, so a rare demotion survives for days instead of being truncated away by
- * routine monitor spam. The event is rare by hypothesis, so the IO is negligible;
- * a high line count means it fires often — itself the answer (fix the hook / keep).
- */
-const QUIET_PROBATION_PATH = `${PATHS.dir}/quiet-demotes.log`;
-
-export async function recordQuietDemote(msg: string): Promise<void> {
-  try {
-    const ts = new Date().toISOString();
-    const file = Bun.file(QUIET_PROBATION_PATH);
-    const existing = (await file.exists()) ? await file.text() : "";
-    const lines = existing.split("\n");
-    const trimmed = lines.length > 2000 ? lines.slice(-1500).join("\n") + "\n" : existing;
-    await Bun.write(QUIET_PROBATION_PATH, `${trimmed}${ts} ${msg}\n`);
-  } catch {
-    // non-fatal — probation logging must never affect status detection
-  }
-}

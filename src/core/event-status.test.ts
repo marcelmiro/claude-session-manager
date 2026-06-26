@@ -10,16 +10,17 @@
  * This file pins event-status.ts's contract, so the interface is specified here:
  * a pure function
  *
- *   deriveStatus(events: HookEvent[], opts?: { transcript?: TranscriptEntry[] }): SessionStatus
+ *   deriveStatus(events: HookEvent[]): SessionStatus
  *
  * where `events` is the ordered hook-event history (each a parsed `hooks/*.json`
- * payload) and the optional `transcript` is the missed-edge backstop (doc 00
- * §Architecture). Status is derived from events, NOT scraped from the viewport —
- * so the scroll-up viewport that fools `detectStatus` is irrelevant here.
+ * payload). Status is the newest determining edge — derived from events, NOT
+ * scraped from the viewport, so the scroll-up viewport that fools `detectStatus`
+ * is irrelevant here. (There is no transcript backstop: it demoted genuinely-
+ * running sessions to `ready` and was removed in favor of trusting the edges.)
  */
 
 import { test, expect } from "bun:test";
-import { deriveStatus, toolInFlight, type HookEvent } from "./event-status";
+import { deriveStatus, type HookEvent } from "./event-status";
 import { fixtureJson } from "../../test/helpers/fixture";
 
 const sessionStart = fixtureJson("hooks/sessionstart.json") as HookEvent;
@@ -64,9 +65,6 @@ test("Stop → ready", () => {
   ).toBe("ready");
 });
 
-const e = (name: HookEvent["hook_event_name"], tool_use_id?: string): HookEvent =>
-  ({ session_id: "s", hook_event_name: name, transcript_path: "x", cwd: "/", tool_use_id } as HookEvent);
-
 test("pending AskUserQuestion → waiting (not running)", () => {
   const ask = { ...preToolUse, tool_name: "AskUserQuestion" } as HookEvent;
   expect(deriveStatus([sessionStart, userPromptSubmit, ask])).toBe("waiting");
@@ -76,22 +74,19 @@ test("a non-AskUserQuestion PreToolUse is still running", () => {
   expect(deriveStatus([sessionStart, userPromptSubmit, preToolUse])).toBe("running");
 });
 
-test("toolInFlight: open PreToolUse with no Stop after it → true", () => {
-  expect(toolInFlight([e("UserPromptSubmit"), e("PreToolUse", "tu_1")])).toBe(true);
-});
-
-test("toolInFlight: a closed PreToolUse is not in flight → false", () => {
-  expect(toolInFlight([e("PreToolUse", "tu_1"), e("PostToolUse", "tu_1")])).toBe(false);
-});
-
-test("toolInFlight: parallel tools — one still open → true", () => {
+test("trailing SubagentStop after Stop+idle does NOT revert a finished session to running", () => {
+  // Auto-mode/agent sessions emit a late SubagentStop after the turn's Stop +
+  // idle_prompt. It must not un-finish the session (the stuck-running bug).
+  const subagentStop = { ...stop, hook_event_name: "SubagentStop" } as HookEvent;
   expect(
-    toolInFlight([e("PreToolUse", "tu_a"), e("PreToolUse", "tu_b"), e("PostToolUse", "tu_a")]),
-  ).toBe(true);
+    deriveStatus([sessionStart, userPromptSubmit, preToolUse, postToolUse, stop, notificationIdle, subagentStop]),
+  ).toBe("ready");
 });
 
-test("toolInFlight: a Stop after the open PreToolUse marks it stale → false", () => {
-  expect(toolInFlight([e("PreToolUse", "tu_old"), e("Stop"), e("PreToolUse", "tu_new"), e("PostToolUse", "tu_new")])).toBe(false);
+test("SubagentStop mid-turn is transparent (status comes from the real edge behind it)", () => {
+  const subagentStop = { ...stop, hook_event_name: "SubagentStop" } as HookEvent;
+  // open PreToolUse behind the SubagentStop → still running
+  expect(deriveStatus([sessionStart, userPromptSubmit, preToolUse, subagentStop])).toBe("running");
 });
 
 test("headline regression: running event history → running (viewport scroll irrelevant)", () => {
