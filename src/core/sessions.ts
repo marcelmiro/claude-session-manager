@@ -860,6 +860,35 @@ async function parseJsonlMetadata(filePath: string): Promise<JsonlMetadata | nul
   }
 }
 
+/** Slash commands that carry no naming intent — they reset/inspect, not work. */
+const META_COMMANDS = new Set([
+  "clear", "compact", "rewind", "resume", "init", "cost", "help", "model", "config",
+]);
+
+/**
+ * Parse a Claude Code slash-command user message into a clean intent string.
+ *
+ * Slash commands are stored as
+ *   <command-name>/implement-plan</command-name>
+ *   <command-args>@.plans/native-status/plan.md</command-args>
+ * blocks. The plain-text extractor skips them (they start with `<`) and returns
+ * the message that follows — which, for skill-launched sessions, is generic skill
+ * boilerplate ("Base directory for this skill: …"), not the user's intent. For
+ * those sessions the command + args is the ONLY place the real goal lives.
+ *
+ * Returns the cleaned `/<name> <args>` string, or null for non-command text and
+ * for meta commands (clear/compact/…) that carry no intent.
+ */
+export function slashCommandIntent(text: string): string | null {
+  const nameMatch = text.match(/<command-name>\s*\/?([\w-]+)\s*<\/command-name>/);
+  if (!nameMatch) return null;
+  const name = nameMatch[1].toLowerCase();
+  if (META_COMMANDS.has(name)) return null;
+  const argsMatch = text.match(/<command-args>([\s\S]*?)<\/command-args>/);
+  const args = (argsMatch?.[1] ?? "").replace(/\s+/g, " ").trim();
+  return args ? `/${name} ${args}` : `/${name}`;
+}
+
 /**
  * Read a JSONL session file and extract the first user prompt.
  * Returns a truncated string (first 200 chars) or empty string on failure.
@@ -886,6 +915,15 @@ async function getFirstUserPrompt(sessionPath: string): Promise<string> {
           if (textBlock?.text) {
             text = textBlock.text;
           }
+        }
+
+        // Slash commands arrive as <command-name>…<command-args>… blocks (they
+        // start with `<`, so the XML-tag skip below would drop them). For
+        // skill-launched sessions the command + args is the real intent — the
+        // following message is generic skill boilerplate. Surface it instead.
+        const intent = slashCommandIntent(text);
+        if (intent) {
+          return intent.length > 200 ? intent.slice(0, 200) + "..." : intent;
         }
 
         // Skip system/meta messages and anything starting with XML tags
