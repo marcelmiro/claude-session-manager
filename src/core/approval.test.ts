@@ -91,3 +91,15 @@ test("reapDeadSessionFiles removes dead ids across all dirs, keeps live", () => 
   expect(existsSync(`${PENDING_DIR}/dead.json`)).toBe(false);
   expect(existsSync(`${DECISIONS_DIR}/dead.json`)).toBe(false);
 });
+
+test("reapDeadSessionFiles leaves in-flight `.tmp` files alone (Stop-hook trim race)", () => {
+  // The Stop hook trims an over-budget log via `tail > <id>.jsonl.tmp && mv`.
+  // The reaper must not delete the temp mid-rename — `<id>` is live, and the
+  // temp name is not a session id, so it must be skipped, not reaped.
+  const tmp = `${eventLogPath("live")}.tmp`;
+  writeFileSync(tmp, "{}\n");
+
+  reapDeadSessionFiles(new Set(["live"]));
+
+  expect(existsSync(tmp)).toBe(true);
+});
