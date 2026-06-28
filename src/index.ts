@@ -6,7 +6,7 @@ import { handleTextInputKey, renderTextWithCursor } from "./ui/text-input";
 import { updatePreview, getPreviewPlainText, renderMessage, getSessionPath } from "./ui/preview-pane";
 import { discoverSessions, groupSessions, seedPaneSessionCache } from "./core/sessions";
 import { readPreviewMessages, type PendingToolCall } from "./core/jsonl-reader";
-import { switchToPane, getMainSession, killPane, sendKeys, sendTextAndEnter, answerQuestion } from "./core/tmux";
+import { switchToPane, getMainSession, killPane, sendKeys, sendKeysSequential, sendTextAndEnter, answerQuestion } from "./core/tmux";
 import { loadNameCache, getSessionName, generateAIName, saveNameCache, type NameCache } from "./core/names";
 import { loadConfig } from "./core/config";
 import { loadState, saveState, loadPaneSessions } from "./core/state";
@@ -790,11 +790,12 @@ screen.on("keypress", async (_ch: string, key: any) => {
     return;
   }
 
-  // Y = approve, don't ask again (Down + Enter)
+  // Y = approve, don't ask again (option 2 = Down + Enter, sent sequentially so the
+  // Down isn't dropped — a batched Down+Enter selected plain "Yes" instead).
   if (ch === "Y" || (key.shift && ch === "y")) {
     spaceMenuHandledKey = true;
     queueMicrotask(() => { spaceMenuHandledKey = false; });
-    await sendKeys(paneId, ["Down", "Enter"]);
+    await sendKeysSequential(paneId, ["Down", "Enter"]);
     optimisticApprove(session);
     await advanceToNextWaiting();
     screen.render();

@@ -157,13 +157,38 @@ export async function sendTextAndEnter(paneId: string, text: string): Promise<vo
 }
 
 /**
- * Answer an on-screen AskUserQuestion via send-keys index navigation (SCHEMA A8).
- * The menu cursor starts on the first real option (index 0).
+ * Send keys ONE AT A TIME with a small gap between them.
  *
- * - single-select (`number`): `Down` × index, then `Enter`.
- * - multiSelect (`number[]`): `Down` to each (sorted) index + `Space` to toggle,
- *   then `Right` to the Submit tab + `Enter`. `Enter` on an option only toggles —
- *   submission is the Submit tab, so multiSelect must end on `Right`+`Enter`.
+ * tmux coalesces a multi-key `send-keys` into a single write, and Claude's TUI
+ * then silently DROPS arrow-key escape sequences (`Down`/`Right` = `\e[B`/`\e[C`)
+ * and mangles rapid digit toggles when they arrive back-to-back — verified live:
+ * batched `Down Down Enter` selected the default option, not the third. Spacing the
+ * keys out makes every one register in order. The 250ms gap is empirically the
+ * floor that reliably lands a multiSelect digit→digit→Right→Enter sequence (130ms
+ * dropped keys; 250ms verified live end-to-end).
+ */
+export async function sendKeysSequential(
+  paneId: string,
+  keys: string[],
+  gapMs = 250,
+): Promise<void> {
+  for (const key of keys) {
+    await sendKeys(paneId, [key]);
+    await Bun.sleep(gapMs);
+  }
+}
+
+/**
+ * Answer an on-screen AskUserQuestion by pressing the option's NUMBER.
+ *
+ * Claude's question menu is numbered (`1. Apple`, `2. Banana`, …), so the digit is
+ * an ABSOLUTE selector — it can't be thrown off by where the cursor starts or by
+ * arrow keys being dropped (the old `Down`×n navigation silently picked the first
+ * option; verified live). Keys go out sequentially via `sendKeysSequential`.
+ *
+ * - single-select (`number`): press the option's digit — it selects AND submits.
+ * - multiSelect (`number[]`): press each option's digit to toggle its checkbox,
+ *   then `Right` (to the Submit tab) + `Enter`.
  *
  * Keyed by paneId because the caller (TUI) already holds the pane; the Impl #3
  * bridge resolves sessionId→paneId before calling. Caller gates on event-status.
@@ -172,33 +197,23 @@ export async function answerQuestion(
   paneId: string,
   selection: number | number[],
 ): Promise<void> {
-  await sendKeys(paneId, questionAnswerKeys(selection));
+  await sendKeysSequential(paneId, questionAnswerKeys(selection));
 }
 
 /**
- * Pure key-sequence builder for `answerQuestion` (extracted for testability —
- * the side-effecting `sendKeys` is the only thing left in the wrapper).
+ * Pure key-sequence builder for `answerQuestion` (extracted for testability).
+ * `selection` is 0-based; the emitted digit is 1-based to match the menu labels.
  *
- * - single-select (`number`): `Down` × index, then `Enter`.
- * - multiSelect (`number[]`): de-duped + ascending, `Down`-deltas to each index +
- *   `Space` to toggle, ending `Right`+`Enter` (A8: Submit tab, not Enter-on-option).
+ * - single-select (`number`): `[String(idx + 1)]` — the digit selects and submits.
+ * - multiSelect (`number[]`): de-duped + ascending digits (toggle each), then
+ *   `Right`+`Enter` (→ Submit tab, then submit).
  */
 export function questionAnswerKeys(selection: number | number[]): string[] {
-  const keys: string[] = [];
   if (typeof selection === "number") {
-    for (let i = 0; i < selection; i++) keys.push("Down");
-    keys.push("Enter");
-  } else {
-    const sorted = [...new Set(selection)].sort((a, b) => a - b);
-    let cursor = 0;
-    for (const idx of sorted) {
-      for (let d = cursor; d < idx; d++) keys.push("Down");
-      keys.push("Space");
-      cursor = idx;
-    }
-    keys.push("Right", "Enter"); // → Submit tab, then submit
+    return [String(selection + 1)];
   }
-  return keys;
+  const sorted = [...new Set(selection)].sort((a, b) => a - b);
+  return [...sorted.map((idx) => String(idx + 1)), "Right", "Enter"];
 }
 
 /**
