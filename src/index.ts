@@ -840,20 +840,6 @@ screen.key(["S-k"], () => { if (wizardState || globalSearch || spaceMenu || cust
 screen.key(["enter"], () => { if (wizardState || wizardHandledKey || globalSearch || spaceMenu || spaceMenuHandledKey || customInputState) return; handleEnterContextual(); });
 screen.key(["x"], () => { if (wizardState || globalSearch || spaceMenu || spaceMenuHandledKey || customInputState) return; handleKill(); });
 screen.key(["f"], () => { if (wizardState || globalSearch || spaceMenu || spaceMenuHandledKey || customInputState) return; handleFork(); });
-screen.key(["c"], async () => {
-  if (wizardState || globalSearch || spaceMenu || customInputState) return;
-  const session = getSelectedSession();
-  if (!session?.repoPath) {
-    flashStatusMessage(`{${C.dim}-fg}No repo path{/${C.dim}-fg}`);
-    return;
-  }
-  try {
-    await Bun.$`open -a Cursor ${session.repoPath}`.quiet();
-    flashStatusMessage(`{${C.mint}-fg}Opened in Cursor{/${C.mint}-fg}`);
-  } catch {
-    flashStatusMessage(`{${C.red}-fg}Failed to open Cursor{/${C.red}-fg}`);
-  }
-});
 screen.key(["a"], () => {
   if (wizardState || globalSearch || spaceMenu || customInputState) return;
   showArchived = !showArchived;

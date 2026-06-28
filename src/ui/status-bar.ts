@@ -34,7 +34,6 @@ export function renderStatusBar(
     `  ${kl("Space", "actions")}` +
     `  ${kl("x", "kill")}` +
     `  ${kl("f", "fork")}` +
-    `  ${kl("c", "cursor")}` +
     `  ${kl("u/d", "scroll")}` +
     `  ${kl("n", "new")}` +
     `  ${kl("a", archiveLabel)}` +

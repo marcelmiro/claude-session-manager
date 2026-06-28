@@ -112,7 +112,6 @@ Archived: resumes via `claude -r {id}` (or `--fork` with `f` key) in new tmux wi
 | `n` | New session wizard (repo → branch → worktree → launch) |
 | `f` | Fork session (`--fork` in new window) |
 | `x` | Kill pane (double-tap to confirm) |
-| `c` | Open repo in Cursor IDE |
 | `u`/`d` | Scroll preview pane ±6 lines |
 | `a` | Toggle archived sessions visibility |
 | `q`/`Esc` | Quit |
