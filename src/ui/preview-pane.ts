@@ -199,6 +199,10 @@ export function ansiToBlessedMarkup(text: string): string {
 
 // -- JSONL-based preview rendering --
 
+/** How many trailing transcript messages to render (scroll-to-bottom keeps the
+ *  most recent visible; older context is reachable by scrolling up). */
+const PREVIEW_MSG_LIMIT = 8;
+
 /** Resolve the JSONL path for a session */
 export function getSessionPath(session: Session): string | null {
   if (!session.id) return null;
@@ -254,10 +258,16 @@ export function transcriptToMessages(turns: TranscriptTurn[]): PreviewMessage[] 
     if (turn.role === "user") {
       for (const b of turn.content) {
         if (b.type === "text" && b.text.trim()) {
-          messages.push({ role: "user", text: b.text.trim() });
+          const text = b.text.trim();
+          // A whole-line bracketed marker (e.g. "[Request interrupted by user…]")
+          // is a system event, not a real user turn.
+          const system = /^\[.*\]$/.test(text);
+          messages.push({ role: "user", text, system });
         } else if (b.type === "tool_result") {
-          // Attach the result output to the matching tool-use message.
+          // Attach the result output to the matching tool-use message. A denied/
+          // errored result flags the tool-use so the renderer styles it as an event.
           const tm = toolMsgById.get(b.tool_use_id);
+          if (tm && b.is_error) tm.toolError = true;
           const out = toolResultText(b.content);
           if (tm && out) tm.bashOutput = tm.bashOutput ? `${tm.bashOutput}\n${out}` : out;
         }
@@ -310,10 +320,15 @@ export function renderMessage(msg: PreviewMessage, maxWidth: number): string {
 
   switch (msg.role) {
     case "user": {
-      // User message — dimmed with ❯ prefix
       const text = msg.text.replace(/\n/g, " ").trim();
-      const maxLen = maxWidth * 3; // Allow a few lines of user text
-      const truncated = text.length > maxLen ? text.slice(0, maxLen - 1) + "…" : text;
+      if (msg.system) {
+        // System marker — compact dim event line, brackets stripped, no ❯.
+        const inner = text.replace(/^\[/, "").replace(/\]$/, "").trim();
+        parts.push(`{${C.dim}-fg}⊘ ${esc(truncateAtWord(inner, maxWidth - 4))}{/${C.dim}-fg}`);
+        break;
+      }
+      // User message — dimmed with ❯ prefix
+      const truncated = truncateAtWord(text, maxWidth * 3); // Allow a few lines
       parts.push(`{${C.dim}-fg}❯ ${esc(truncated)}{/${C.dim}-fg}`);
       break;
     }
@@ -330,13 +345,11 @@ export function renderMessage(msg: PreviewMessage, maxWidth: number): string {
         for (const ti of msg.toolInputs) {
           if (ti.command) {
             // Bash: show command
-            const cmd = ti.command.length > maxWidth - 6
-              ? ti.command.slice(0, maxWidth - 7) + "…"
-              : ti.command;
+            const cmd = truncateAtWord(ti.command, maxWidth - 6);
             parts.push(`{${C.dim}-fg}  ↳ ${esc(ti.name)}{/${C.dim}-fg}`);
             parts.push(`{${C.peach}-fg}    $ ${esc(cmd)}{/${C.peach}-fg}`);
           } else if (ti.filePath) {
-            // Edit/Write: show file path
+            // Edit/Write: show file path (keep the end visible — no word boundaries)
             const fp = ti.filePath.length > maxWidth - 6
               ? "…" + ti.filePath.slice(-(maxWidth - 7))
               : ti.filePath;
@@ -346,15 +359,10 @@ export function renderMessage(msg: PreviewMessage, maxWidth: number): string {
             const q = ti.question;
             const header = q.header || "Question";
             parts.push(`{${C.dim}-fg}  ↳ ${esc(header)}{/${C.dim}-fg}`);
-            const qText = q.text.length > maxWidth - 4
-              ? q.text.slice(0, maxWidth - 5) + "…"
-              : q.text;
+            const qText = truncateAtWord(q.text, maxWidth - 4);
             parts.push(`{${C.muted}-fg}    ${esc(qText)}{/${C.muted}-fg}`);
             for (let i = 0; i < q.options.length; i++) {
-              const label = q.options[i].label;
-              const trunc = label.length > maxWidth - 8
-                ? label.slice(0, maxWidth - 9) + "…"
-                : label;
+              const trunc = truncateAtWord(q.options[i].label, maxWidth - 8);
               parts.push(`{${C.peach}-fg}    ${i + 1}. ${esc(trunc)}{/${C.peach}-fg}`);
             }
           } else {
@@ -368,15 +376,18 @@ export function renderMessage(msg: PreviewMessage, maxWidth: number): string {
         parts.push(`{${C.dim}-fg}  ↳ ${esc(names)}{/${C.dim}-fg}`);
       }
 
-      // Show bash output if available (truncated)
-      if (msg.bashOutput) {
+      // Denied/errored tool result — one compact event marker, suppress the
+      // (often long) denial content entirely.
+      if (msg.toolError) {
+        const name = msg.toolNames?.[0] || "tool";
+        parts.push(`{${C.dim}-fg}  ⊘ ${esc(name)} denied{/${C.dim}-fg}`);
+      } else if (msg.bashOutput) {
+        // Show bash output if available (truncated)
         const outputLines = msg.bashOutput.trim().split("\n");
         const maxOutputLines = 4;
         const shown = outputLines.slice(0, maxOutputLines);
         for (const line of shown) {
-          const truncated = line.length > maxWidth - 4
-            ? line.slice(0, maxWidth - 5) + "…"
-            : line;
+          const truncated = truncateAtWord(line, maxWidth - 4);
           parts.push(`{${C.dim}-fg}    ${esc(truncated)}{/${C.dim}-fg}`);
         }
         if (outputLines.length > maxOutputLines) {
@@ -475,9 +486,7 @@ function renderToolDetails(pending: PendingToolCall, maxWidth: number): string[]
       const contentLines = pending.content.split("\n");
       const maxShow = 8;
       for (let i = 0; i < Math.min(contentLines.length, maxShow); i++) {
-        const trunc = contentLines[i].length > maxWidth - 4
-          ? contentLines[i].slice(0, maxWidth - 5) + "…"
-          : contentLines[i];
+        const trunc = truncateAtWord(contentLines[i], maxWidth - 4);
         lines.push(`  {${C.dim}-fg}${esc(trunc)}{/${C.dim}-fg}`);
       }
       if (contentLines.length > maxShow) {
@@ -502,9 +511,7 @@ function renderToolDetails(pending: PendingToolCall, maxWidth: number): string[]
       lines.push(`  {${C.muted}-fg}${esc(truncPath(pending.filePath, maxWidth - 4))}{/${C.muted}-fg}`);
     }
     if (pending.command) {
-      const cmd = pending.command.length > maxWidth - 6
-        ? pending.command.slice(0, maxWidth - 7) + "…"
-        : pending.command;
+      const cmd = truncateAtWord(pending.command, maxWidth - 6);
       lines.push(`  {${C.peach}-fg}$ ${esc(cmd)}{/${C.peach}-fg}`);
     }
   }
@@ -516,6 +523,12 @@ function renderToolDetails(pending: PendingToolCall, maxWidth: number): string[]
 function truncPath(path: string, maxLen: number): string {
   if (path.length <= maxLen) return path;
   return "…" + path.slice(-(maxLen - 1));
+}
+
+/** Truncate to maxLen on a word boundary, appending "…" (no mid-word cuts). */
+function truncateAtWord(text: string, maxLen: number): string {
+  if (text.length <= maxLen) return text;
+  return wrapText(text, Math.max(1, maxLen - 1))[0] + "…";
 }
 
 /** Wrap text into lines of maxLen, breaking at spaces when possible */
@@ -555,25 +568,21 @@ function renderInlineDiff(oldStr: string, newStr: string, maxWidth: number, maxL
   return diffLines;
 }
 
-/** Replace all blessed color tags with dim color */
-function dimContent(text: string): string {
-  return text
-    .replace(/\{#[0-9A-Fa-f]{6}-fg\}/g, `{${C.dim}-fg}`)
-    .replace(/\{\/#[0-9A-Fa-f]{6}-fg\}/g, `{/${C.dim}-fg}`)
-    .replace(/\{#[0-9A-Fa-f]{6}-bg\}/g, "")
-    .replace(/\{\/#[0-9A-Fa-f]{6}-bg\}/g, "")
-    .replace(/\{bold\}/g, "")
-    .replace(/\{\/bold\}/g, "")
-    .replace(/\{italic\}/g, "")
-    .replace(/\{\/italic\}/g, "");
+// -- Preview rendering --
+
+/** Injectable transcript/pending sources — defaults hit the real files; tests
+ *  pass stubs so the render logic can be exercised without disk or a tmux pane. */
+export interface PreviewDeps {
+  readTurns: (path: string) => Promise<TranscriptTurn[]>;
+  getPending: (sessionId: string) => PendingToolCall | null;
 }
 
-// -- Preview rendering --
+const DEFAULT_DEPS: PreviewDeps = { readTurns: readTranscriptTurns, getPending: pendingToolCall };
 
 export async function updatePreview(
   box: Widgets.BoxElement,
   session: Session | null,
-  { archivedSessions }: { scrollToBottom?: boolean; archivedSessions?: Session[] } = {},
+  { archivedSessions, deps = DEFAULT_DEPS }: { scrollToBottom?: boolean; archivedSessions?: Session[]; deps?: PreviewDeps } = {},
 ): Promise<PendingToolCall | null> {
   if (session === null && archivedSessions) {
     // Archive summary: show list of archived sessions
@@ -587,7 +596,7 @@ export async function updatePreview(
       const summary = s.summary
         ? s.summary.replace(/\{/g, "{open}").replace(/\}/g, "{close}").replace(/\n/g, " ")
         : "";
-      const truncSummary = summary.length > 60 ? summary.slice(0, 59) + "…" : summary;
+      const truncSummary = truncateAtWord(summary, 60);
       lines.push(
         `  {${C.dim}-fg}${branch}{/${C.dim}-fg}  {${C.dim}-fg}${time}{/${C.dim}-fg}` +
         (truncSummary ? `  {${C.dim}-fg}${truncSummary}{/${C.dim}-fg}` : ""),
@@ -615,7 +624,7 @@ export async function updatePreview(
       .replace(/\}/g, "{close}")
       .replace(/\n/g, " ");
     const maxSummaryLen = Math.max(10, contentWidth - repoHeader.length - 5);
-    const truncSummary = escapedSummary.length > maxSummaryLen ? escapedSummary.slice(0, maxSummaryLen - 1) + "…" : escapedSummary;
+    const truncSummary = truncateAtWord(escapedSummary, maxSummaryLen);
     header += ` {${C.dim}-fg}·{/${C.dim}-fg} {${C.muted}-fg}${truncSummary}{/${C.muted}-fg}`;
   }
 
@@ -626,20 +635,21 @@ export async function updatePreview(
 
   if (sessionPath) {
     // Source the preview from the JSONL transcript via transcript.ts (correct
-    // after /rewind; reflects resolved history). Keep the last 3 conversational
-    // messages, mirroring the prior preview depth.
-    const turns = await readTranscriptTurns(sessionPath);
-    const messages = transcriptToMessages(turns).slice(-3);
+    // after /rewind; reflects resolved history). Keep the last few conversational
+    // messages; scroll-to-bottom keeps the most recent visible.
+    const turns = await deps.readTurns(sessionPath);
+    const messages = transcriptToMessages(turns).slice(-PREVIEW_MSG_LIMIT);
 
     if (messages.length > 0) {
-      // Decision-first layout for waiting sessions
+      // Decision-last layout for waiting sessions — mimic Claude Code's scrollback:
+      // chronological history above, the live question/permission at the bottom.
       if (session.status === "waiting") {
         // Pending tool/question comes from the PreToolUse event (A3), not the
         // transcript. Pre-hook sessions (no event log) fall to the generic block.
-        const pending = session.id ? pendingToolCall(session.id) : null;
+        const pending = session.id ? deps.getPending(session.id) : null;
         pendingResult = pending;
 
-        // Build decision block (goes at TOP) — mirrors Claude Code's permission UI
+        // Build decision block (goes at BOTTOM) — mirrors Claude Code's permission UI
         const dl: string[] = [];
 
         if (pending?.question) {
@@ -647,16 +657,10 @@ export async function updatePreview(
           const q = pending.question;
           dl.push(`{bold}${esc(q.header || "Question")}{/bold}`);
           dl.push("");
-          const qText = q.question.length > contentWidth * 2
-            ? q.question.slice(0, contentWidth * 2 - 1) + "…"
-            : q.question;
-          dl.push(`  ${esc(qText)}`);
+          dl.push(`  ${esc(truncateAtWord(q.question, contentWidth * 2))}`);
           dl.push("");
           for (let i = 0; i < q.options.length; i++) {
-            const label = q.options[i].label;
-            const trunc = label.length > contentWidth - 8
-              ? label.slice(0, contentWidth - 9) + "…"
-              : label;
+            const trunc = truncateAtWord(q.options[i].label, contentWidth - 8);
             const prefix = i === 0 ? "❯" : " ";
             dl.push(`{${C.peach}-fg}${prefix} ${i + 1}. ${esc(trunc)}{/${C.peach}-fg}`);
           }
@@ -683,18 +687,18 @@ export async function updatePreview(
           dl.push(`{${C.muted}-fg}  2. No{/${C.muted}-fg}`);
         }
 
-        // History below, dimmed
+        // History above (chronological, normal styling), decision block last.
         const historyParts: string[] = [];
         for (const msg of messages) {
-          historyParts.push(dimContent(renderMessage(msg, contentWidth)));
+          historyParts.push(renderMessage(msg, contentWidth));
         }
 
-        body = dl.join("\n") + "\n\n" + historyParts.join("\n\n");
+        body = historyParts.join("\n\n") + "\n\n" + dl.join("\n");
         lastPlainText = buildPlainText(messages);
 
         const content = `${header}\n\n${body}`;
         box.setContent(content);
-        box.setScrollPerc(0); // Decision at top
+        box.setScrollPerc(100); // Decision at bottom, like Claude's scrollback
         return pendingResult;
       }
 

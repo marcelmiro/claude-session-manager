@@ -28,6 +28,7 @@ interface RawBlock {
   input?: unknown;
   tool_use_id?: string;
   content?: unknown;
+  is_error?: boolean;
 }
 
 /** Parse a raw JSONL transcript into ordered turns (oldest first). */
@@ -80,7 +81,7 @@ function toBlock(block: RawBlock): TranscriptBlock | null {
     case "tool_use":
       return { type: "tool_use", id: block.id ?? "", name: block.name ?? "", input: block.input };
     case "tool_result":
-      return { type: "tool_result", tool_use_id: block.tool_use_id ?? "", content: block.content };
+      return { type: "tool_result", tool_use_id: block.tool_use_id ?? "", content: block.content, is_error: block.is_error };
     default:
       return null; // unknown block type — drop
   }

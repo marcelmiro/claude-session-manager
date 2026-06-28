@@ -224,7 +224,7 @@ export type TranscriptBlock =
   | { type: "text"; text: string }
   | { type: "thinking"; text: string }
   | { type: "tool_use"; id: string; name: string; input: unknown }
-  | { type: "tool_result"; tool_use_id: string; content: unknown };
+  | { type: "tool_result"; tool_use_id: string; content: unknown; is_error?: boolean };
 
 /**
  * One conversational turn. Field is `content` (NOT `blocks`) — the contract test

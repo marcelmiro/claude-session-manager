@@ -36,6 +36,10 @@ export interface PreviewMessage {
   bashOutput?: string;
   /** Thinking block text (truncated) */
   thinking?: string;
+  /** User turn that is a bracketed system marker (e.g. "[Request interrupted…]") */
+  system?: boolean;
+  /** Tool-use message whose paired tool_result was an error/denial */
+  toolError?: boolean;
 }
 
 interface JsonlEntry {

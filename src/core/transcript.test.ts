@@ -79,6 +79,14 @@ test("AskUserQuestion tool_use.input surfaces as { questions: [...] } (plural, A
   expect(typeof q.options[0].description).toBe("string");
 });
 
+test("propagates is_error from a tool_result block (denial/error styling hook)", () => {
+  const raw =
+    '{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_x","is_error":true,"content":"rejected"}]}}';
+  const all = blocks(parseTranscript(raw));
+  const result = all.find((b) => b.type === "tool_result");
+  expect(result?.type === "tool_result" && result.is_error).toBe(true);
+});
+
 test("tolerates a truncated last line and unknown keys", () => {
   const truncated = approved + '\n{"type":"assistant","message":{"role":"assista';
   expect(() => parseTranscript(truncated)).not.toThrow();
