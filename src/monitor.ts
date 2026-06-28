@@ -10,6 +10,7 @@ import { listPanes, capturePane, renameWindow } from "./core/tmux";
 import { findClaudeProcesses } from "./core/process";
 import { detectStatus, type SessionStatus } from "./core/status";
 import { eventSourcedStatus } from "./core/hook-events";
+import { nativeStatus } from "./core/session-state";
 import { reapDeadSessionFiles } from "./core/approval";
 import { loadConfig } from "./core/config";
 import { debugLog } from "./core/debug";
@@ -100,9 +101,11 @@ async function quickDiscoverActive(
         .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, "");
       const scraper = detectStatus(plain, true);
 
-      // Event-source status (correct on scroll-up) when a hook log exists; else
-      // the scraper. This is what makes status-right + ⚡/🔄 event-driven (Inc7).
+      // Status resolution order: Claude's native status file › event-sourced hook
+      // log › scraper. Keeps the monitor (sole window-naming authority) aligned
+      // with the TUI so ⚡/🔄 prefixes track Claude's real state (Inc7).
       const sessionId = paneSessionMap[pane.paneId] ?? resumeIds[pane.paneId];
+      const native = sessionId ? await nativeStatus(sessionId) : null;
       const eventStatus = sessionId ? await eventSourcedStatus(sessionId) : null;
 
       const baseRepoPath = await getBaseRepoPath(pane.currentPath);
@@ -112,8 +115,8 @@ async function quickDiscoverActive(
         repoPath: pane.currentPath,
         baseRepoPath,
         branch: "",
-        status: eventStatus ?? scraper.status,
-        statusSource: eventStatus ? "event" : "scraper",
+        status: native ?? eventStatus ?? scraper.status,
+        statusSource: native ? "native" : eventStatus ? "event" : "scraper",
         contextPercent: scraper.contextPercent ?? 0,
         messageCount: 0,
         summary: "",

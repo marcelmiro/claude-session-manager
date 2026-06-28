@@ -16,6 +16,7 @@ import { syncWindowPrefix, stripAllPrefixes, ATTENTION_PREFIX } from "./core/not
 import { findClaudeProcesses } from "./core/process";
 import { detectStatus } from "./core/status";
 import { eventSourcedStatus } from "./core/hook-events";
+import { nativeStatus } from "./core/session-state";
 import { loadNameCache } from "./core/names";
 import { PATHS } from "./core/config";
 
@@ -306,6 +307,7 @@ export async function list(): Promise<void> {
       const scraper = detectStatus(plain, true);
 
       const sessionId = paneSessions[pane.paneId];
+      const native = sessionId ? await nativeStatus(sessionId) : null;
       const eventStatus = sessionId ? await eventSourcedStatus(sessionId) : null;
 
       const name = stripAllPrefixes(pane.windowName);
@@ -315,8 +317,8 @@ export async function list(): Promise<void> {
 
       return {
         name,
-        status: eventStatus ?? scraper.status,
-        statusSource: eventStatus ? "event" : "scraper",
+        status: native ?? eventStatus ?? scraper.status,
+        statusSource: native ? "native" : eventStatus ? "event" : "scraper",
         contextPercent: scraper.contextPercent,
         repo,
         needsAttention: pane.windowName.startsWith(ATTENTION_PREFIX),

@@ -23,8 +23,8 @@ export interface Session {
   tmuxPane?: TmuxPane;
   /** Cached pane capture from status detection — reused by preview to avoid a duplicate tmux call */
   lastCapture?: string;
-  /** Where `status` came from: event-sourced hook log vs viewport scraper (Inc4). */
-  statusSource?: "event" | "scraper";
+  /** Where `status` came from: Claude's native status file › event-sourced hook log › viewport scraper. */
+  statusSource?: "event" | "scraper" | "native";
 }
 
 export interface RepoGroup {

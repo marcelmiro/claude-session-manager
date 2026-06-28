@@ -12,6 +12,7 @@ import { getBaseRepoPath } from "./git";
 import { stripAllPrefixes, extractAIName } from "./notifications";
 import { processHookEvents } from "./state";
 import { eventSourcedStatus } from "./hook-events";
+import { nativeStatus } from "./session-state";
 
 const home = homedir();
 
@@ -413,8 +414,11 @@ async function buildActiveSession(
   const contextPercent = statusResult.contextPercent
     ?? (activeInfo ? estimateContextPercent(activeInfo.messageCount) : 0);
 
-  // Prefer event-sourced status when a hook log exists (ADR-2); else the scraper.
-  // This is the headline fix: events are correct regardless of pane scroll.
+  // Status resolution order: Claude's native status file › event-sourced hook log
+  // › viewport scraper. Native is authoritative for live sessions and de-latches
+  // the stuck-running case (revert/interrupt emit no hook). Events are correct
+  // regardless of pane scroll; the scraper is the last resort.
+  const native = resolvedId ? await nativeStatus(resolvedId) : null;
   const eventStatus = resolvedId ? await eventSourcedStatus(resolvedId) : null;
 
   return {
@@ -423,8 +427,8 @@ async function buildActiveSession(
     repoPath,
     baseRepoPath,
     branch,
-    status: eventStatus ?? statusResult.status,
-    statusSource: eventStatus ? "event" : "scraper",
+    status: native ?? eventStatus ?? statusResult.status,
+    statusSource: native ? "native" : eventStatus ? "event" : "scraper",
     contextPercent,
     messageCount: activeInfo?.messageCount ?? 0,
     summary: activeInfo?.summary ?? "",
