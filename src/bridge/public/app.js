@@ -44,6 +44,7 @@ const showNewSession = signal(false); // repo picker for launching a new session
 const repos = signal(null); // null = loading, [] = loaded
 const launching = signal(""); // repo name while waiting for a just-launched session to register
 const menuText = signal(null); // long-pressed user message → action sheet (null = closed)
+const sessionMenu = signal(null); // long-pressed session ROW → session action sheet (null = closed)
 const loadingAuth = signal(true); // boot-time auth check + initial session load
 const attachments = signal([]); // images staged in the composer: {blob, url} (object URLs)
 const pendingImageSends = signal([]); // optimistic image bubbles awaiting transcript catch-up: {text, urls}
@@ -390,6 +391,44 @@ async function rewind(mode) {
   });
 }
 
+// Long-press on a session ROW opens the session action sheet (archive). Shares the
+// single lpTimer (one press at a time). lpFired suppresses the tap-to-open click that
+// iOS fires on release, so a long-press never also navigates into the session.
+let lpFired = false;
+function rowPress(s) {
+  return {
+    onPointerDown: () => {
+      lpFired = false;
+      clearTimeout(lpTimer);
+      lpTimer = setTimeout(() => {
+        lpFired = true;
+        sessionMenu.value = s;
+        if (navigator.vibrate) navigator.vibrate(8); // a tap of haptic feedback, like iOS
+      }, 450);
+    },
+    onPointerUp: lpCancel,
+    onPointerMove: lpCancel,
+    onPointerCancel: lpCancel,
+    onClick: (e) => {
+      if (lpFired) {
+        e.preventDefault();
+        lpFired = false;
+        return;
+      }
+      open(s.id);
+    },
+  };
+}
+
+async function archiveSession() {
+  const s = sessionMenu.value;
+  sessionMenu.value = null;
+  if (!s) return;
+  // If we're viewing the session we just archived, drop back to the list.
+  if (selectedId.value === s.id) selectedId.value = null;
+  await action(`/sessions/${encodeURIComponent(s.id)}/archive`, {});
+}
+
 // --- views --------------------------------------------------------------
 
 const DOT = { waiting: "⏸", running: "⦿", ready: "●", idle: "○", archived: "○" };
@@ -574,7 +613,13 @@ function List() {
     const t = listTitle(s);
     const sub = subLine(s) || (titleCounts[t] > 1 ? s.id.slice(0, 8) : "");
     return html`
-      <button type="button" class="row" key=${s.id} onClick=${() => open(s.id)}>
+      <button
+        type="button"
+        class="row"
+        key=${s.id}
+        ...${rowPress(s)}
+        onContextMenu=${(e) => e.preventDefault()}
+      >
         <span class="dot" style=${dotStyle(s)}></span>
         <span class="grow">
           <span class="name">${t}</span>
@@ -818,7 +863,7 @@ function RunningTool({ tool }) {
 // the pane regardless of status; Claude queues input while running, accepts it at the
 // prompt). Sent text shows immediately as an optimistic bubble until the transcript
 // catches up. Enter sends, Shift+Enter / the multiline keyboard inserts a newline.
-function Composer() {
+function Composer({ disabled }) {
   const ref = useRef(null);
   const fileRef = useRef(null);
   const enterArmed = useRef(false); // true after a plain Enter — a second one submits
@@ -942,15 +987,23 @@ function Composer() {
       </div>`}
       <div class="composer">
         <input ref=${fileRef} type="file" accept="image/*" multiple style="display:none" onChange=${onPick} />
-        <button class="attach" onClick=${() => fileRef.current && fileRef.current.click()} aria-label="Attach image">＋</button>
+        <button
+          class="attach"
+          disabled=${disabled}
+          onClick=${() => fileRef.current && fileRef.current.click()}
+          aria-label="Attach image"
+        >
+          ＋
+        </button>
         <textarea
           ref=${ref}
           rows="1"
           placeholder="Message…"
           autocapitalize="none"
+          disabled=${disabled}
           onInput=${grow}
         ></textarea>
-        <button class="send" onClick=${send} aria-label="Send">↑</button>
+        <button class="send" disabled=${disabled} onClick=${send} aria-label="Send">↑</button>
       </div>
     </div>
   `;
@@ -991,6 +1044,10 @@ function Detail() {
   // otherwise it's the free-text composer (this is the "replace the message box with
   // the question/answers" behavior).
   const blocked = question || approval;
+  // An archived session has no live pane: sends/answers would fail with `no-pane`. When it's
+  // not actually blocked (discovery can mislabel a live blocked session as archived — those
+  // stay answerable), lock the composer and show a standing notice instead of a dead end.
+  const archived = status === "archived" && !blocked;
 
   const rootRef = useRef(null); // the Detail screen, translated during the back-swipe
   const scrollRef = useRef(null); // the thread is the ONLY scroll region (app-shell layout)
@@ -1142,7 +1199,9 @@ function Detail() {
       </div>
       <div class="dock">
         <div class="dock-inner">
-          ${flash.value && html`<div class="flash">${flash.value}</div>`}
+          ${archived
+            ? html`<div class="flash archived">Archived — resume from your Mac to continue this session.</div>`
+            : flash.value && html`<div class="flash">${flash.value}</div>`}
           <div class="navbar">
             <button class="iconbtn" onClick=${back} aria-label="Back to sessions">‹</button>
             <div class="navtitle">${session ? session.label || session.repo : "session"}</div>
@@ -1166,7 +1225,7 @@ function Detail() {
             ? html`<${QuestionCard} q=${question} />`
             : approval
               ? html`<${ApprovalCard} approval=${approval} />`
-              : html`<${Composer} />`}
+              : html`<${Composer} disabled=${archived} />`}
         </div>
       </div>
     </div>
@@ -1201,6 +1260,44 @@ function ActionSheet() {
   `;
 }
 
+// Long-press action sheet for a session ROW (home list). A header identifies the session
+// being acted on (status dot + name + repo · subline + age), then the actions. Archive is
+// destructive (kills the live Claude process), so it takes a second tap that swaps the
+// sheet to an explicit confirm — no accidental kills from a fat-fingered long-press.
+function SessionSheet() {
+  const s = sessionMenu.value;
+  const [confirm, setConfirm] = useState(false);
+  if (s == null) return null;
+  const close = () => (sessionMenu.value = null);
+  const sub = subLine(s);
+  return html`
+    <div class="scrim" onClick=${close}>
+      <div class="sheet" onClick=${(e) => e.stopPropagation()}>
+        <div class="sheetgroup">
+          <div class="sheethead">
+            <span class="dot" style=${dotStyle(s)}></span>
+            <span class="grow">
+              <span class="name">${listTitle(s)}</span>
+              <span class="sub">${sub ? `${s.repo} · ${sub}` : s.repo}</span>
+            </span>
+            <span class="age">${formatAge(s.modified)}</span>
+          </div>
+          ${confirm
+            ? html`
+                <div class="sheethint">
+                  End this Claude session? The conversation is saved — you can resume it from your Mac.
+                </div>
+                <button class="danger" onClick=${archiveSession}>Archive session</button>`
+            : html`
+                <button onClick=${() => (close(), open(s.id))}>Open</button>
+                <button class="danger" onClick=${() => setConfirm(true)}>Archive session</button>`}
+        </div>
+        <button class="sheetgroup sheetcancel" onClick=${close}>Cancel</button>
+      </div>
+    </div>
+  `;
+}
+
 function App() {
   if (loadingAuth.value) return html`<${Spinner} />`;
   if (!authed.value) return html`<${Login} />`;
@@ -1209,7 +1306,7 @@ function App() {
     : selectedId.value
       ? html`<${Detail} />`
       : html`<${List} />`;
-  return html`${!connected.value && html`<div class="offline">reconnecting…</div>`}${screen}<${ActionSheet} />`;
+  return html`${!connected.value && html`<div class="offline">reconnecting…</div>`}${screen}<${ActionSheet} /><${SessionSheet} />`;
 }
 
 // Resume sync: iOS suspends backgrounded tabs and standalone PWAs and tears down the SSE

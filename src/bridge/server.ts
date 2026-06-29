@@ -20,6 +20,7 @@ import {
   answerSessionQuestion,
   createSession,
   rewindSession,
+  archiveSession,
   resolveSessionPane,
   readPaneStatusline,
   type SendResult,
@@ -507,6 +508,15 @@ async function route(req: Request): Promise<Response> {
   if (method === "POST" && read) {
     await markSessionRead(decodeURIComponent(read[1]!));
     return json({ ok: true });
+  }
+
+  // Archive (kill the tmux pane, ending the Claude process; conversation stays resumable).
+  const archive = path.match(/^\/sessions\/([^/]+)\/archive$/);
+  if (method === "POST" && archive) {
+    const result = await archiveSession(decodeURIComponent(archive[1]!));
+    sessionsCache = null; // force re-projection — the killed pane drops from the next list
+    broadcast({ type: "session-changed", id: decodeURIComponent(archive[1]!) });
+    return sendResult(result);
   }
 
   return json({ ok: false, reason: "not-found" }, 404);

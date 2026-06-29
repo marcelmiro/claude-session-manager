@@ -2,12 +2,23 @@ import type { PaneInfo } from "../types.ts";
 
 /**
  * Get the "main" tmux session name (i.e. not the popup session).
- * Falls back to the current session if only one exists.
+ *
+ * Prefers the session of an ATTACHED client: the bridge runs as a detached
+ * background process, so `display-message -p '#S'` would resolve to tmux's
+ * most-recently-active session — non-deterministic, and not necessarily the one
+ * the user is sitting in. Targeting the attached client keeps phone-created
+ * sessions landing where the user actually works. Falls back to the current
+ * session when nothing is attached (e.g. the TUI popup, which shares context).
  */
 export async function getMainSession(): Promise<string | null> {
   try {
+    // An attached client's session is the user's real session; the bridge isn't a client.
+    const attached = (await Bun.$`tmux list-clients -F '#{client_session}'`.quiet().text())
+      .trim()
+      .split("\n")
+      .filter(Boolean)[0];
     // Popup runs in the same session context (tmux 3.3+), so current IS the main session
-    const session = (await Bun.$`tmux display-message -p '#S'`.quiet().text()).trim();
+    const session = attached || (await Bun.$`tmux display-message -p '#S'`.quiet().text()).trim();
     if (!session) return null;
     // Return session:windowId so new-window -a inserts after the active window
     const windowId = (await Bun.$`tmux display-message -t ${session} -p '#{window_id}'`.quiet().text()).trim();

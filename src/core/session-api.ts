@@ -27,6 +27,7 @@ import {
   sendKey,
   sendLiteral,
   sendBracketedPaste,
+  killPane,
 } from "./tmux";
 import type { PendingQuestion, PendingToolCall } from "./jsonl-reader";
 import type { TranscriptBlock, TranscriptTurn } from "../types";
@@ -455,6 +456,19 @@ export async function resolveSessionPane(sessionId: string): Promise<string | nu
   if (fromHook) return fromHook;
 
   return paneFromCommandLine(sessionId, await findClaudeProcesses(), panes, paneMap);
+}
+
+/**
+ * Archive a session from the phone: kill its live tmux pane (ending the Claude
+ * process and closing the window), mirroring the TUI's `x` action. The conversation
+ * JSONL is untouched, so the session stays resumable from the Mac (`claude -r`). With
+ * no live pane it's already gone — treat that as success (idempotent).
+ */
+export async function archiveSession(sessionId: string): Promise<SendResult> {
+  const paneId = await resolveSessionPane(sessionId);
+  if (!paneId) return { ok: true }; // no live pane → already archived
+  await killPane(paneId);
+  return { ok: true };
 }
 
 /** True when an AskUserQuestion is open (vs. a permission prompt or no pending tool). */

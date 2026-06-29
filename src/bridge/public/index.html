@@ -325,6 +325,9 @@
       }
       .dock-inner { max-width: 680px; margin: 0 auto; }
       .flash { color: var(--red); font-size: 13px; padding: 2px 4px 8px; }
+      /* standing archived notice (not an error) — muted, not the red flash tone */
+      .flash.archived { color: var(--muted); }
+      .composer textarea:disabled { opacity: 0.5; }
       .composer { display: flex; gap: 8px; align-items: flex-end; }
       .composer textarea {
         font: inherit;
@@ -479,6 +482,10 @@
         word-break: break-word;
       }
       .sheethint { color: var(--dim); font-size: 13px; padding: 14px; text-align: center; }
+      /* session action-sheet header: identifies the row being acted on (dot + name +
+         repo·sub + age), reusing the list-row .name/.sub/.age/.dot type rules */
+      .sheethead { display: flex; align-items: center; gap: 10px; padding: 13px 16px; text-align: left; border-bottom: 0.5px solid var(--sheet-line); }
+      .sheethead .name { font-size: 15px; }
 
       /* card context label (question / approve / running) — was unstyled body text */
       .who { font-size: 11px; text-transform: uppercase; letter-spacing: 0.07em; font-weight: 700; color: var(--muted); margin-bottom: 6px; }
