@@ -303,7 +303,7 @@
 
       /* bottom nav bar (inside the dock — thumb-reachable; carries back, title,
          status/usage, and the attention-jump button) */
-      .navbar { display: flex; align-items: center; gap: 8px; padding-bottom: 8px; margin-bottom: 8px; border-bottom: 1px solid var(--border); }
+      .navbar { display: flex; align-items: center; gap: 8px; padding-bottom: 4px; margin-bottom: 4px; }
       /* ≥44px hit area (Apple HIG) without shifting layout — negative margin offsets the pad */
       .iconbtn { background: none; border: none; padding: 11px 12px; margin: -11px -6px; min-width: 44px; min-height: 44px; display: inline-flex; align-items: center; justify-content: center; color: var(--muted); font-size: 20px; line-height: 1; }
       .navtitle { flex: 1; min-width: 0; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -321,10 +321,10 @@
         /* bottom = half the home-indicator inset: sits the input lower than the full safe
            inset (which felt too high) without dropping it hard against the screen edge.
            Device-scaled via env(); resolves to 0 in-browser where there's no home bar. */
-        padding: 8px 12px calc(env(safe-area-inset-bottom) / 2);
+        padding: 8px 16px calc(env(safe-area-inset-bottom) / 2);
       }
       .dock-inner { max-width: 680px; margin: 0 auto; }
-      .flash { color: var(--peach); font-size: 13px; padding: 2px 4px 8px; }
+      .flash { color: var(--red); font-size: 13px; padding: 2px 4px 8px; }
       .composer { display: flex; gap: 8px; align-items: flex-end; }
       .composer textarea {
         font: inherit;
@@ -420,7 +420,7 @@
       .newbtn:active { background: var(--hover); }
 
       /* live statusline + permission mode, scraped from the pane (shown in the dock) */
-      .statusbar { display: flex; align-items: baseline; flex-wrap: wrap; gap: 6px; padding: 2px 4px 8px; font-size: 11px; color: var(--muted); }
+      .statusbar { display: flex; align-items: baseline; flex-wrap: wrap; gap: 6px; padding: 0 4px 8px; font-size: 11px; color: var(--muted); }
       .modebadge { flex: none; color: var(--mint); border: 1px solid currentColor; border-radius: 10px; padding: 0 7px; font-weight: 600; white-space: nowrap; }
       /* fill the row and right-align so usage+branch hug the right edge, badge stays left */
       .sltext { flex: 1; min-width: 0; text-align: right; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-variant-numeric: tabular-nums; }

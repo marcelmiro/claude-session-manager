@@ -151,7 +151,6 @@ test("getTranscript: unknown session → empty turns, no throw", async () => {
   const t = await getTranscript("never-existed-uuid-xyz");
   expect(t.turns).toEqual([]);
   expect(t.lastAssistant).toBeUndefined();
-  expect(t.full).toBe(true);
 });
 
 // --- slimTurns (payload trimming for the bridge) -------------------------------

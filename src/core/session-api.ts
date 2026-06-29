@@ -13,8 +13,8 @@
 
 import { Glob } from "bun";
 import { homedir } from "os";
-import { lastAssistantMessage } from "./transcript";
-import { pendingToolCall, readTranscriptSince } from "./hook-events";
+import { lastAssistantMessage, parseActiveBranch } from "./transcript";
+import { pendingToolCall } from "./hook-events";
 import { loadPaneSessions } from "./state";
 import { findClaudeProcesses } from "./process";
 import {
@@ -33,8 +33,6 @@ import type { TranscriptBlock, TranscriptTurn } from "../types";
 
 export interface SessionTranscript {
   turns: TranscriptTurn[];
-  cursor?: number; // byte offset to pass back as `?since=` for the next delta fetch
-  full?: boolean; // true = `turns` is the whole conversation (client replaces, not appends)
   lastAssistant?: string;
   pendingTool?: PendingToolCall;
   openQuestion?: PendingQuestion;
@@ -317,23 +315,42 @@ export function buildSessionTranscript(
   return result;
 }
 
+// Per-path cache of the parsed active branch, keyed by the file's size+mtime. Any change
+// to a JSONL — append OR rewind (which still appends a new branch) — grows the file and
+// bumps mtime, so an unchanged (size, mtime) pair means unchanged content: re-use the
+// parse instead of re-reading and re-parsing a multi-MB log on every refresh.
+const branchCache = new Map<string, { size: number; mtimeMs: number; turns: TranscriptTurn[] }>();
+
+async function readActiveBranchCached(path: string): Promise<TranscriptTurn[]> {
+  try {
+    const file = Bun.file(path);
+    const stat = await file.stat();
+    if (!stat) return [];
+    const hit = branchCache.get(path);
+    if (hit && hit.size === stat.size && hit.mtimeMs === stat.mtimeMs) return hit.turns;
+    const turns = parseActiveBranch(await file.text());
+    branchCache.set(path, { size: stat.size, mtimeMs: stat.mtimeMs, turns });
+    return turns;
+  } catch {
+    return []; // missing/unreadable transcript — no turns
+  }
+}
+
 /**
  * Aggregate a live session's transcript view: ordered turns + last assistant text +
  * the pending tool/question (sourced from the hook log, A3 — pending interactions
  * are not in the transcript before they resolve).
  */
-export async function getTranscript(sessionId: string, since = 0): Promise<SessionTranscript> {
+export async function getTranscript(sessionId: string): Promise<SessionTranscript> {
   const path = await resolveTranscriptPath(sessionId);
-  // Append-only delta read: `since: 0` returns the whole (slimmed) conversation for a
-  // first open; a prior cursor returns only the turns appended since, so each refresh
-  // reads a few KB instead of re-parsing a multi-MB log. The slimmed blocks (no
-  // thinking/tool_result, trimmed tool inputs) keep even the full read small.
-  const slice = path
-    ? await readTranscriptSince(path, since)
-    : { turns: [], cursor: 0, fromStart: true };
-  const result = buildSessionTranscript(slimTurns(slice.turns), pendingToolCall(sessionId));
-  result.cursor = slice.cursor;
-  result.full = slice.fromStart;
+  // Reconstruct the ACTIVE conversation branch (see `parseActiveBranch`): the JSONL is a
+  // tree, and a rewind/edit can SHRINK the logical conversation, so an append-only
+  // byte-delta would leak abandoned-branch turns. We read the whole file and rebuild the
+  // leaf→root path each time, always returning a full replacement (no cursor). The full
+  // re-parse is gated behind a size+mtime cache (any change grows the file), so an idle
+  // session re-uses the prior parse instead of re-reading a multi-MB log every refresh.
+  const turns = path ? await readActiveBranchCached(path) : [];
+  const result = buildSessionTranscript(slimTurns(turns), pendingToolCall(sessionId));
   if (path) {
     const usage = await readContextUsage(path);
     if (usage) result.usage = usage;

@@ -23,6 +23,7 @@
 import { test, expect } from "bun:test";
 import {
   parseTranscript,
+  parseActiveBranch,
   lastAssistantMessage,
   type TranscriptBlock,
   type TranscriptTurn,
@@ -121,4 +122,99 @@ test("returns the last assistant message", () => {
   expect(lastAssistantMessage(parseTranscript(approved))).toBe(
     "Done. Created `/tmp/spike-perm-test.txt`.",
   );
+});
+
+// --- parseActiveBranch: the JSONL is a tree; only the active leaf→root path is shown ---
+
+// Build a conversational JSONL record with explicit tree links.
+function rec(opts: {
+  uuid: string;
+  parentUuid: string | null;
+  role: "user" | "assistant";
+  text: string;
+  isSidechain?: boolean;
+}): string {
+  return JSON.stringify({
+    type: opts.role,
+    uuid: opts.uuid,
+    parentUuid: opts.parentUuid,
+    ...(opts.isSidechain ? { isSidechain: true } : {}),
+    message: { role: opts.role, content: [{ type: "text", text: opts.text }] },
+  });
+}
+
+function texts(turns: TranscriptTurn[]): string[] {
+  return turns.flatMap((t) =>
+    t.content
+      .filter((b): b is Extract<TranscriptBlock, { type: "text" }> => b.type === "text")
+      .map((b) => b.text),
+  );
+}
+
+test("parseActiveBranch follows the active leaf→root path (oldest first)", () => {
+  const raw = [
+    rec({ uuid: "a", parentUuid: null, role: "user", text: "first" }),
+    rec({ uuid: "b", parentUuid: "a", role: "assistant", text: "reply" }),
+    rec({ uuid: "c", parentUuid: "b", role: "user", text: "second" }),
+  ].join("\n");
+  expect(texts(parseActiveBranch(raw))).toEqual(["first", "reply", "second"]);
+});
+
+test("parseActiveBranch excludes abandoned (rewound/edited) branches", () => {
+  // User rewinds after "b" and re-sends: "c-old" is abandoned; the new branch is a→b→d.
+  // A linear read would show both "c-old" and "d"; the active branch shows only "d".
+  const raw = [
+    rec({ uuid: "a", parentUuid: null, role: "user", text: "first" }),
+    rec({ uuid: "b", parentUuid: "a", role: "assistant", text: "reply" }),
+    rec({ uuid: "c-old", parentUuid: "b", role: "user", text: "abandoned" }),
+    rec({ uuid: "d", parentUuid: "b", role: "user", text: "kept" }),
+  ].join("\n");
+  expect(texts(parseTranscript(raw))).toEqual(["first", "reply", "abandoned", "kept"]);
+  expect(texts(parseActiveBranch(raw))).toEqual(["first", "reply", "kept"]);
+});
+
+test("parseActiveBranch drops subagent sidechain turns", () => {
+  // A sidechain branches off "a" but is never an ancestor of the main leaf "c".
+  const raw = [
+    rec({ uuid: "a", parentUuid: null, role: "user", text: "main prompt" }),
+    rec({ uuid: "s1", parentUuid: "a", role: "user", text: "subagent prompt", isSidechain: true }),
+    rec({ uuid: "s2", parentUuid: "s1", role: "assistant", text: "subagent reply", isSidechain: true }),
+    rec({ uuid: "b", parentUuid: "a", role: "assistant", text: "main reply" }),
+    rec({ uuid: "c", parentUuid: "b", role: "user", text: "follow up" }),
+  ].join("\n");
+  expect(texts(parseActiveBranch(raw))).toEqual(["main prompt", "main reply", "follow up"]);
+});
+
+test("parseActiveBranch stops at a broken parent link, keeping the intact suffix", () => {
+  // "a" references a parent that was never written (e.g. dropped/rotated head): the walk
+  // stops rather than crashing, yielding the deepest recoverable suffix.
+  const raw = [
+    rec({ uuid: "a", parentUuid: "missing", role: "user", text: "orphaned head" }),
+    rec({ uuid: "b", parentUuid: "a", role: "assistant", text: "reply" }),
+  ].join("\n");
+  expect(texts(parseActiveBranch(raw))).toEqual(["orphaned head", "reply"]);
+});
+
+test("parseActiveBranch on a well-formed linear log matches parseTranscript", () => {
+  const raw = [
+    rec({ uuid: "a", parentUuid: null, role: "user", text: "first" }),
+    rec({ uuid: "b", parentUuid: "a", role: "assistant", text: "reply" }),
+    rec({ uuid: "c", parentUuid: "b", role: "user", text: "second" }),
+  ].join("\n");
+  expect(parseActiveBranch(raw)).toEqual(parseTranscript(raw));
+});
+
+test("parseActiveBranch falls back to linear for pre-tree logs (no uuid records)", () => {
+  // The approved fixture's conversational records pre-date / omit a usable tree in a way
+  // that should still render: with no active leaf, fall back to the linear parse.
+  const noUuid =
+    '{"type":"user","message":{"role":"user","content":[{"type":"text","text":"hi"}]}}\n' +
+    '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"hello"}]}}';
+  expect(parseActiveBranch(noUuid)).toEqual(parseTranscript(noUuid));
+  expect(texts(parseActiveBranch(noUuid))).toEqual(["hi", "hello"]);
+});
+
+test("parseActiveBranch handles an empty/meta-only log", () => {
+  expect(parseActiveBranch("")).toEqual([]);
+  expect(parseActiveBranch('{"type":"system","subtype":"x"}')).toEqual([]);
 });

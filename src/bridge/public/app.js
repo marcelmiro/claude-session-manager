@@ -38,7 +38,7 @@ const selectedId = signal(null);
 const transcript = signal(null);
 const error = signal("");
 const showArchived = signal(false);
-const flash = signal(""); // transient action feedback in the detail view
+const flash = signal(""); // transient FAILURE feedback in the detail view (successes stay silent)
 const pendingSends = signal([]); // optimistic user bubbles awaiting transcript catch-up
 const showNewSession = signal(false); // repo picker for launching a new session
 const repos = signal(null); // null = loading, [] = loaded
@@ -50,11 +50,6 @@ const pendingImageSends = signal([]); // optimistic image bubbles awaiting trans
 const connected = signal(true); // SSE stream health — false shows a "reconnecting" banner
 
 let es = null;
-// Byte cursor into the open session's transcript: the server returns turns appended
-// since this offset, so each refresh ships only new turns. Reset to 0 on open/back so
-// the next fetch pulls the full conversation. Module-level (not a signal) — pure
-// bookkeeping, never rendered.
-let txCursor = 0;
 
 // Text of every user turn already in the transcript — used to retire optimistic
 // bubbles once the real send lands (the transcript lags the pane by a few seconds).
@@ -90,17 +85,13 @@ async function refreshTranscript() {
   const id = selectedId.value;
   if (!id) return;
   try {
-    const r = await fetch(`/sessions/${encodeURIComponent(id)}/transcript?since=${txCursor}`);
+    const r = await fetch(`/sessions/${encodeURIComponent(id)}/transcript`);
     if (!r.ok) return;
     const data = await r.json();
     if (id !== selectedId.value) return; // session switched mid-flight — drop stale response
-    // `full` payloads (first open, or a reset/compacted log) replace; deltas append only
-    // the new turns. Meta (usage, mode, statusline, openQuestion, approval, pendingTool)
-    // is fresh in every response, so it comes straight from `data` either way.
-    const prev = transcript.value;
-    transcript.value =
-      data.full || !prev ? data : { ...data, turns: [...prev.turns, ...data.turns] };
-    if (typeof data.cursor === "number") txCursor = data.cursor;
+    // The server always returns the full active conversation branch (reconstructed
+    // leaf→root), so we replace rather than append — a rewind can shrink the conversation.
+    transcript.value = data;
     // Drop optimistic bubbles that have now materialized as real user turns.
     if (pendingSends.value.length) {
       const seen = userTurnTexts(transcript.value);
@@ -174,20 +165,19 @@ async function login(token) {
   }
 }
 
-// Transient dock feedback that auto-hides, so an "✓ answered: …" toast doesn't linger.
-// "…" (in-flight) stays until its result replaces it; everything else clears after 5s.
+// Transient FAILURE feedback that auto-hides after 5s. Successes are silent (a "✓ sent"
+// toast was just noise); only errors surface, so a silently-failed action isn't invisible.
 let flashTimer = null;
-function setFlash(msg) {
+function flashError(msg) {
   flash.value = msg;
   clearTimeout(flashTimer);
-  if (msg && msg !== "…") flashTimer = setTimeout(() => (flash.value = ""), 5000);
+  if (msg) flashTimer = setTimeout(() => (flash.value = ""), 5000);
 }
 
-// Send an action and SURFACE the result — the bridge gates answer/decision/message
-// server-side and returns {ok,reason}; without this the UI looked identical whether
-// the action worked or silently failed (e.g. the session had no live pane).
-async function action(path, body, okMsg) {
-  setFlash("…");
+// Send an action and report ok/failure to the caller — the bridge gates
+// answer/decision/message server-side and returns {ok,reason}. Failures flash; success
+// is silent (the caller updates the UI optimistically).
+async function action(path, body) {
   try {
     const r = await fetch(path, {
       method: "POST",
@@ -199,23 +189,21 @@ async function action(path, body, okMsg) {
       data = await r.json();
     } catch {}
     if (r.ok && data.ok !== false) {
-      setFlash(okMsg);
       refreshTranscript();
       refreshSessions();
       return true;
     }
-    setFlash(`✗ ${data.reason || r.status}`);
+    flashError(`✗ ${data.reason || r.status}`);
     return false;
   } catch {
-    setFlash("✗ bridge unreachable");
+    flashError("✗ bridge unreachable");
     return false;
   }
 }
 
 // Multipart sibling of action() for image uploads — identical result handling, but lets
 // the browser set the multipart boundary (no JSON content-type header).
-async function actionForm(path, formData, okMsg) {
-  setFlash("…");
+async function actionForm(path, formData) {
   try {
     const r = await fetch(path, { method: "POST", body: formData });
     let data = {};
@@ -223,15 +211,14 @@ async function actionForm(path, formData, okMsg) {
       data = await r.json();
     } catch {}
     if (r.ok && data.ok !== false) {
-      setFlash(okMsg);
       refreshTranscript();
       refreshSessions();
       return true;
     }
-    setFlash(`✗ ${data.reason || r.status}`);
+    flashError(`✗ ${data.reason || r.status}`);
     return false;
   } catch {
-    setFlash("✗ bridge unreachable");
+    flashError("✗ bridge unreachable");
     return false;
   }
 }
@@ -269,8 +256,7 @@ function clearAttachments() {
 function open(id) {
   selectedId.value = id;
   transcript.value = null;
-  txCursor = 0; // pull the full conversation for the newly-opened session
-  setFlash("");
+  flash.value = ""; // drop any stale error from the previously-open session
   pendingSends.value = [];
   clearAttachments();
   refreshTranscript();
@@ -289,7 +275,6 @@ function markRead(id) {
 function back() {
   selectedId.value = null;
   transcript.value = null;
-  txCursor = 0;
   pendingSends.value = [];
   clearAttachments();
 }
@@ -332,14 +317,55 @@ async function launchSession(repo) {
   }
 }
 
+// Copy that works on iPhone across origins. On a secure origin (HTTPS) the native Clipboard
+// API actually writes; over plain http navigator.clipboard is undefined, so we fall back to
+// an execCommand path (see legacyCopy). iOS only honors the clipboard at all over HTTPS.
 async function copyMessage(text) {
-  try {
-    await navigator.clipboard.writeText(text);
-    setFlash("✓ copied");
-  } catch {
-    setFlash("✗ copy failed");
+  let ok = false;
+  // Prefer the native Clipboard API on a secure origin (HTTPS) — it actually writes. iOS
+  // `execCommand` returns true even when it no-ops, so it can't be trusted as the primary.
+  if (navigator.clipboard && window.isSecureContext) {
+    try {
+      await navigator.clipboard.writeText(text);
+      ok = true;
+    } catch {
+      ok = false;
+    }
   }
+  if (!ok) ok = legacyCopy(text); // non-secure origins / older browsers (http desktop)
+  if (!ok) flashError("✗ copy failed");
   menuText.value = null;
+}
+
+// execCommand("copy") via an off-screen field — the only path on a non-secure origin
+// (plain http over Tailscale), where navigator.clipboard is undefined. The iOS recipe
+// (per clipboard.js): a `readonly` textarea (so no keyboard pops up), positioned off-screen
+// rather than hidden via opacity:0 (iOS won't copy from a zero-opacity element), selected
+// with BOTH a Range over the node AND setSelectionRange. 16px font avoids an iOS zoom jump.
+function legacyCopy(text) {
+  try {
+    const el = document.createElement("textarea");
+    el.value = text;
+    el.setAttribute("readonly", "");
+    el.style.cssText = `position:absolute;left:-9999px;top:${window.scrollY || 0}px;font-size:16px;`;
+    document.body.appendChild(el);
+    const prior = document.getSelection().rangeCount > 0 ? document.getSelection().getRangeAt(0) : null;
+    const range = document.createRange();
+    range.selectNodeContents(el);
+    const sel = window.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(range);
+    el.setSelectionRange(0, text.length);
+    const ok = document.execCommand("copy");
+    document.body.removeChild(el);
+    if (prior) {
+      sel.removeAllRanges();
+      sel.addRange(prior); // restore whatever the user had selected
+    }
+    return ok;
+  } catch {
+    return false;
+  }
 }
 
 // Long-press detection for message actions. A single shared timer (only one press at a
@@ -357,11 +383,11 @@ async function rewind(mode) {
   const m = menuText.value;
   menuText.value = null;
   if (!m) return;
-  await action(
-    `/sessions/${encodeURIComponent(selectedId.value)}/rewind`,
-    { upCount: m.upCount, text: m.text, mode },
-    mode === "both" ? "✓ rewound code + conversation" : "✓ rewound conversation",
-  );
+  await action(`/sessions/${encodeURIComponent(selectedId.value)}/rewind`, {
+    upCount: m.upCount,
+    text: m.text,
+    mode,
+  });
 }
 
 // --- views --------------------------------------------------------------
@@ -710,8 +736,8 @@ function QuestionCard({ q }) {
   // inside a capped card so a many-option question never clips off-screen (#2).
   const multi = q.multiSelect;
   const [sel, setSel] = useState(() => new Set());
-  const answer = (selection, label) =>
-    action(`/sessions/${encodeURIComponent(selectedId.value)}/answer`, { selection }, `✓ answered${label ? `: ${label}` : ""}`);
+  const answer = (selection) =>
+    action(`/sessions/${encodeURIComponent(selectedId.value)}/answer`, { selection });
   const toggle = (i) => {
     const next = new Set(sel);
     next.has(i) ? next.delete(i) : next.add(i);
@@ -727,7 +753,7 @@ function QuestionCard({ q }) {
             <button
               class="opt ${multi && sel.has(i) ? "sel" : ""}"
               key=${i}
-              onClick=${() => (multi ? toggle(i) : answer(i, o.label))}
+              onClick=${() => (multi ? toggle(i) : answer(i))}
             >
               <span class="opt-head">
                 ${multi && html`<span class="opt-check">${sel.has(i) ? "☑" : "☐"}</span>`}
@@ -760,7 +786,7 @@ function ApprovalCard({ approval }) {
   const detail = input.command || input.file_path || "";
   const risky = typeof input.command === "string" && DESTRUCTIVE.test(input.command);
   function decide(decision) {
-    action(`/sessions/${encodeURIComponent(selectedId.value)}/decision`, { decision }, `✓ ${decision}`);
+    action(`/sessions/${encodeURIComponent(selectedId.value)}/decision`, { decision });
   }
   return html`
     <div class="card alert">
@@ -795,6 +821,9 @@ function RunningTool({ tool }) {
 function Composer() {
   const ref = useRef(null);
   const fileRef = useRef(null);
+  const enterArmed = useRef(false); // true after a plain Enter — a second one submits
+  const enterShift = useRef(false); // e.shiftKey of the latest Enter keydown
+  const shiftRun = useRef(false); // inside a Shift+Enter run — suppress submit until a keystroke
   function grow() {
     const el = ref.current;
     if (!el) return;
@@ -827,7 +856,7 @@ function Composer() {
     grow();
     if (items.length === 0) {
       pendingSends.value = [...pendingSends.value, text];
-      const ok = await action(`/sessions/${encodeURIComponent(sid)}/message`, { text }, "✓ sent");
+      const ok = await action(`/sessions/${encodeURIComponent(sid)}/message`, { text });
       if (!ok) {
         const idx = pendingSends.value.lastIndexOf(text);
         if (idx >= 0) pendingSends.value = pendingSends.value.filter((_, i) => i !== idx);
@@ -842,7 +871,7 @@ function Composer() {
     const entry = { text, urls: items.map((it) => it.url) };
     pendingImageSends.value = [...pendingImageSends.value, entry];
     attachments.value = [];
-    const ok = await actionForm(`/sessions/${encodeURIComponent(sid)}/message`, fd, "✓ sent");
+    const ok = await actionForm(`/sessions/${encodeURIComponent(sid)}/message`, fd);
     if (!ok) {
       // Restore so nothing is silently lost; keep the URLs alive for the retry.
       pendingImageSends.value = pendingImageSends.value.filter((e) => e !== entry);
@@ -851,6 +880,55 @@ function Composer() {
       grow();
     }
   }
+  // Enter handling via NATIVE listeners (not Preact props) so the binding is unambiguous on
+  // iOS. We act on `beforeinput` (inputType insertLineBreak/Paragraph) — the reliable Return
+  // signal across iOS soft keyboards and hardware keyboards.
+  //
+  // Shift is read from the Enter keydown's e.shiftKey (requires autocapitalize="none", else
+  // iOS autocapitalize spuriously sets it true on the Enter right after a newline). BUT iOS
+  // only honors a HELD Shift for the FIRST Enter — it drops the modifier afterward, so a
+  // held Shift+Enter ×N reports shiftKey:true once then false. We can't detect those later
+  // Enters as shifted. So instead: a Shift+Enter starts a "shift run" (shiftRun) that treats
+  // every following Enter as a newline (never submit) until a real keystroke ends the run.
+  // Consequence: to submit right after a Shift+Enter without typing, use the Send button.
+  //
+  // Plain Enter (no shift run) inserts a newline and arms; a second consecutive plain Enter
+  // submits (stripping that newline). Never submits an empty message.
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const onKeyDown = (e) => {
+      if (e.key === "Enter") enterShift.current = e.shiftKey; // fires before beforeinput
+    };
+    const onBeforeInput = (e) => {
+      if (e.inputType !== "insertLineBreak" && e.inputType !== "insertParagraph") {
+        shiftRun.current = false; // a real keystroke (typing/delete) ends the shift run...
+        enterArmed.current = false; // ...and breaks the double-Enter run
+        return;
+      }
+      if (enterShift.current || shiftRun.current) {
+        // A genuine Shift+Enter, or a held-Shift continuation iOS stripped the modifier from:
+        // newline, never submit.
+        shiftRun.current = true;
+        enterArmed.current = false;
+        return;
+      }
+      if (enterArmed.current && el.value.trim() !== "") {
+        enterArmed.current = false;
+        e.preventDefault(); // cancel the second newline
+        el.value = el.value.replace(/\n$/, ""); // drop the newline the first Enter added
+        send();
+      } else {
+        enterArmed.current = true;
+      }
+    };
+    el.addEventListener("keydown", onKeyDown);
+    el.addEventListener("beforeinput", onBeforeInput);
+    return () => {
+      el.removeEventListener("keydown", onKeyDown);
+      el.removeEventListener("beforeinput", onBeforeInput);
+    };
+  }, []);
   return html`
     <div class="composerwrap">
       ${attachments.value.length > 0 &&
@@ -869,13 +947,8 @@ function Composer() {
           ref=${ref}
           rows="1"
           placeholder="Message…"
+          autocapitalize="none"
           onInput=${grow}
-          onKeyDown=${(e) => {
-            if (e.key === "Enter" && !e.shiftKey) {
-              e.preventDefault();
-              send();
-            }
-          }}
         ></textarea>
         <button class="send" onClick=${send} aria-label="Send">↑</button>
       </div>
@@ -901,6 +974,17 @@ function Detail() {
   const session = sessions.value.find((s) => s.id === selectedId.value);
   const status = session ? session.status : "";
   const turns = t ? t.turns : []; // full conversation — no slicing (md() is cached)
+  // Real user-turn texts already in the transcript (image prefix stripped, matching the
+  // optimistic captions). Used to suppress optimistic bubbles whose message has landed — a
+  // render-time guard so a just-sent message never shows twice (the SSE only watches hook
+  // events, so the pendingSends cleanup in refreshTranscript can lag the fetch).
+  const landed = new Set();
+  for (const turn of turns) {
+    if (turn.role !== "user") continue;
+    for (const b of turn.content || []) {
+      if (b.type === "text" && b.text) landed.add(stripImagePrefix(b.text).trim());
+    }
+  }
   const question = t && t.openQuestion;
   const approval = t && t.approval;
   // While blocked on a question/approval, the structured answer UI takes the dock —
@@ -1042,13 +1126,17 @@ function Detail() {
             return html`<${Turn} key=${i} turn=${turn} upCount=${up} canCode=${editAfter[i]} />`;
           });
         })()}
-        ${pendingSends.value.map((text, i) => html`<div class="bubble user pending" key=${`p${i}`}>${text}</div>`)}
-        ${pendingImageSends.value.map(
-          (e, i) => html`<div class="bubble user pending imgbubble" key=${`pi${i}`}>
+        ${pendingSends.value
+          .filter((text) => !landed.has(text.trim()))
+          .map((text, i) => html`<div class="bubble user pending" key=${`p${i}`}>${text}</div>`)}
+        ${pendingImageSends.value
+          .filter((e) => !landed.has(stripImagePrefix(e.text).trim()))
+          .map(
+            (e, i) => html`<div class="bubble user pending imgbubble" key=${`pi${i}`}>
             <div class="bubthumbs">${e.urls.map((u) => html`<img src=${u} alt="" key=${u} />`)}</div>
             ${e.text && html`<div>${e.text}</div>`}
           </div>`,
-        )}
+          )}
         ${t && t.pendingTool && !blocked && html`<${RunningTool} tool=${t.pendingTool} />`}
         ${status === "running" && !blocked && html`<div class="typing">working…</div>`}
       </div>

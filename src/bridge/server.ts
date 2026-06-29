@@ -432,10 +432,9 @@ async function route(req: Request): Promise<Response> {
   const transcript = path.match(/^\/sessions\/([^/]+)\/transcript$/);
   if (method === "GET" && transcript) {
     const id = decodeURIComponent(transcript[1]!);
-    // `?since=<cursor>` requests only turns appended since the last fetch (append-only
-    // delta); absent/0 returns the full conversation for a first open.
-    const since = Number(url.searchParams.get("since")) || 0;
-    const tx = await getTranscript(id, since);
+    // Always returns the full active branch (reconstructed leaf→root) — a rewind can shrink
+    // the conversation, so an append-only delta would leak abandoned-branch turns.
+    const tx = await getTranscript(id);
     // Real awaiting-decision approval (blocking hook), NOT the in-flight pendingTool —
     // so Allow/Deny only appears when a decision is genuinely required.
     const approval = listPendingApprovals().find((a) => a.sessionId === id) ?? null;

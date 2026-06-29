@@ -149,33 +149,3 @@ export async function readTranscriptTurns(path: string): Promise<TranscriptTurn[
     return [];
   }
 }
-
-export interface TranscriptSlice {
-  turns: TranscriptTurn[];
-  cursor: number; // byte offset just past the last COMPLETE line; pass back as `since`
-  fromStart: boolean; // true = whole log (append-only delta would be wrong → replace)
-}
-
-/**
- * Read turns from byte offset `since` to EOF and report a new cursor. `since: 0` reads
- * the whole log; a prior cursor reads ONLY the appended bytes — the transcript is
- * append-only, so this lets the bridge stream just-new turns instead of re-reading a
- * multi-MB file every refresh. The cursor advances only to the last NEWLINE in the
- * chunk, so a half-written trailing line is re-read (not skipped) next time
- * (parseTranscript drops the partial line). If `since` is past EOF (file rotated or
- * compacted shorter), it restarts from 0.
- */
-export async function readTranscriptSince(path: string, since = 0): Promise<TranscriptSlice> {
-  try {
-    const file = Bun.file(path);
-    const stat = await file.stat();
-    if (!stat) return { turns: [], cursor: 0, fromStart: true };
-    const start = since > 0 && since <= stat.size ? since : 0;
-    const chunk = await file.slice(start, stat.size).text();
-    const lastNl = chunk.lastIndexOf("\n");
-    const cursor = lastNl >= 0 ? start + Buffer.byteLength(chunk.slice(0, lastNl + 1)) : start;
-    return { turns: parseTranscript(chunk), cursor, fromStart: start === 0 };
-  } catch {
-    return { turns: [], cursor: since, fromStart: false };
-  }
-}

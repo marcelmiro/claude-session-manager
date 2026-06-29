@@ -95,8 +95,6 @@ export const FIXTURE_SESSIONS = [
 // /transcript route adds. Exercises a user bubble, a markdown assistant bubble (code +
 // list), a tool chip, and an open AskUserQuestion (so the question card + its tags show).
 export const FIXTURE_TRANSCRIPT = {
-  full: true,
-  cursor: 4096,
   turns: [
     {
       role: "user",
