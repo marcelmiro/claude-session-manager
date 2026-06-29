@@ -87,6 +87,15 @@ test("propagates is_error from a tool_result block (denial/error styling hook)",
   expect(result?.type === "tool_result" && result.is_error).toBe(true);
 });
 
+test("image block parses to a byte-free marker (drops the base64 source)", () => {
+  const raw =
+    '{"type":"user","message":{"role":"user","content":[{"type":"text","text":"[Image #1] look"},{"type":"image","source":{"type":"base64","media_type":"image/png","data":"AAAAconst-big-base64"}}]}}';
+  const all = blocks(parseTranscript(raw));
+  const img = all.find((b) => b.type === "image");
+  expect(img).toEqual({ type: "image" }); // no `source`/`data`
+  expect(JSON.stringify(parseTranscript(raw))).not.toContain("base64");
+});
+
 test("tolerates a truncated last line and unknown keys", () => {
   const truncated = approved + '\n{"type":"assistant","message":{"role":"assista';
   expect(() => parseTranscript(truncated)).not.toThrow();
@@ -94,6 +103,18 @@ test("tolerates a truncated last line and unknown keys", () => {
   expect(parseTranscript(truncated).map((t) => t.role)).toEqual(
     parseTranscript(approved).map((t) => t.role),
   );
+});
+
+test("drops slash-command runner records (/compact, /clear) as plumbing", () => {
+  const raw = [
+    '{"type":"user","isMeta":true,"message":{"role":"user","content":"<local-command-caveat>Caveat: ...</local-command-caveat>"}}',
+    '{"type":"user","message":{"role":"user","content":"<command-name>/compact</command-name>\\n  <command-message>compact</command-message>\\n  <command-args></command-args>"}}',
+    '{"type":"system","subtype":"local_command","content":"<local-command-stdout></local-command-stdout>"}',
+    '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Compacted."}]}}',
+  ].join("\n");
+  const turns = parseTranscript(raw);
+  expect(turns.map((t) => t.role)).toEqual(["assistant"]);
+  expect(lastAssistantMessage(turns)).toBe("Compacted.");
 });
 
 test("returns the last assistant message", () => {

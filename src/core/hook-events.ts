@@ -87,8 +87,21 @@ export function pendingToolCall(sessionId: string): PendingToolCall | null {
   for (const e of events) {
     if (e.hook_event_name === "PostToolUse" && e.tool_use_id) closed.add(e.tool_use_id);
   }
-  let pre: HookEvent | undefined;
+  // A tool is only genuinely pending if it opened in the CURRENT (unfinished) turn.
+  // After a `Stop` (turn end) every tool is done — even if its PostToolUse was never
+  // captured (e.g. a Bash that spawned a detached process keeping the hook's pipe
+  // open), so a PreToolUse before the last Stop is stale, not "running". A live
+  // AskUserQuestion / permission prompt blocks mid-turn, so NO Stop follows it — it
+  // stays after the last Stop and is still surfaced.
+  let lastStop = -1;
   for (let i = events.length - 1; i >= 0; i--) {
+    if (events[i]!.hook_event_name === "Stop") {
+      lastStop = i;
+      break;
+    }
+  }
+  let pre: HookEvent | undefined;
+  for (let i = events.length - 1; i > lastStop; i--) {
     const e = events[i];
     if (e.hook_event_name === "PreToolUse" && e.tool_use_id && !closed.has(e.tool_use_id)) {
       pre = e;
@@ -114,7 +127,7 @@ export function pendingToolCall(sessionId: string): PendingToolCall | null {
     call.question = {
       question: q.question || "",
       header: q.header || "",
-      options: (q.options || []).map((o: any) => ({ label: o.label || "", description: o.description })),
+      options: (q.options || []).map((o: any) => ({ label: o.label || "", description: o.description, preview: o.preview })),
       multiSelect: q.multiSelect || false,
       toolUseId,
     };
@@ -134,5 +147,35 @@ export async function readTranscriptTurns(path: string): Promise<TranscriptTurn[
     return parseTranscript(chunk);
   } catch {
     return [];
+  }
+}
+
+export interface TranscriptSlice {
+  turns: TranscriptTurn[];
+  cursor: number; // byte offset just past the last COMPLETE line; pass back as `since`
+  fromStart: boolean; // true = whole log (append-only delta would be wrong → replace)
+}
+
+/**
+ * Read turns from byte offset `since` to EOF and report a new cursor. `since: 0` reads
+ * the whole log; a prior cursor reads ONLY the appended bytes — the transcript is
+ * append-only, so this lets the bridge stream just-new turns instead of re-reading a
+ * multi-MB file every refresh. The cursor advances only to the last NEWLINE in the
+ * chunk, so a half-written trailing line is re-read (not skipped) next time
+ * (parseTranscript drops the partial line). If `since` is past EOF (file rotated or
+ * compacted shorter), it restarts from 0.
+ */
+export async function readTranscriptSince(path: string, since = 0): Promise<TranscriptSlice> {
+  try {
+    const file = Bun.file(path);
+    const stat = await file.stat();
+    if (!stat) return { turns: [], cursor: 0, fromStart: true };
+    const start = since > 0 && since <= stat.size ? since : 0;
+    const chunk = await file.slice(start, stat.size).text();
+    const lastNl = chunk.lastIndexOf("\n");
+    const cursor = lastNl >= 0 ? start + Buffer.byteLength(chunk.slice(0, lastNl + 1)) : start;
+    return { turns: parseTranscript(chunk), cursor, fromStart: start === 0 };
+  } catch {
+    return { turns: [], cursor: since, fromStart: false };
   }
 }

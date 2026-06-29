@@ -1,0 +1,544 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="color-scheme" content="dark" />
+    <meta name="theme-color" content="#101010" />
+    <title>portkey</title>
+    <!-- PWA / iOS home-screen install -->
+    <link rel="manifest" href="/manifest.json" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <meta name="apple-mobile-web-app-title" content="portkey" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <!-- Resolve the bare specifiers the vendored dist files import (preact, etc.). -->
+    <script type="importmap">
+      {
+        "imports": {
+          "preact": "/vendor/preact.mjs",
+          "preact/hooks": "/vendor/hooks.mjs",
+          "@preact/signals-core": "/vendor/signals-core.mjs",
+          "@preact/signals": "/vendor/signals.mjs",
+          "htm": "/vendor/htm.mjs",
+          "marked": "/vendor/marked.mjs"
+        }
+      }
+    </script>
+    <style>
+      :root {
+        --bg: #101010;
+        --fg: #ffffff;
+        --muted: #a0a0a0;
+        --dim: #505050;
+        --surface: #1c1c1c;
+        --hover: #282828;
+        --peach: #ffc799;
+        --mint: #99ffe4;
+        --red: #ff8080;
+        --yellow: #ffd866;
+        /* Component-specific surfaces & lines — kept in the palette so every color
+           lives in one place (no magic hex/rgba buried in the rules below). */
+        --code-bg: #000; /* code blocks: deliberately darker than --bg */
+        --border: #222; /* nav/dock hairline dividers */
+        --sheet-bg: #1f1f1f; /* iOS action-sheet group surface (lighter than --surface) */
+        --sheet-line: #343434; /* action-sheet row dividers */
+        --user-bubble: #2f2a24; /* warm-tinted user message bubble */
+        --user-bubble-border: #3a3026;
+        --scrim: rgba(0, 0, 0, 0.45); /* action-sheet backdrop */
+        --red-tint: rgba(255, 128, 128, 0.12); /* attention chip bg = --red at low alpha */
+        --red-tint-active: rgba(255, 128, 128, 0.22);
+        --red-banner: rgba(255, 128, 128, 0.16); /* connection-lost banner bg */
+        --peach-tint: rgba(255, 199, 153, 0.1); /* selected option / approve pill bg */
+        --danger-bg: rgba(255, 128, 128, 0.1); /* destructive command box bg */
+        --danger-border: rgba(255, 128, 128, 0.4);
+        --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, monospace; /* code-style tags/labels */
+      }
+      * { box-sizing: border-box; }
+      html, body {
+        margin: 0;
+        height: 100%;
+        overflow: hidden; /* the app is a fixed shell; only inner regions scroll */
+        background: var(--bg);
+        color: var(--fg);
+        font: 15px/1.45 -apple-system, BlinkMacSystemFont, "SF Mono", ui-monospace, monospace;
+        -webkit-font-smoothing: antialiased;
+        /* Disable iOS Safari's automatic text inflation. Without this, Safari scales
+           up font sizes inside block elements proportional to their width — so wider
+           bubbles/tool rows get inflated more than narrow ones, and the inflation
+           recomputes on portrait↔landscape rotation (the "some blocks much bigger
+           text" + "font jumps when I rotate" bug). 100% pins every block to its
+           authored size. */
+        -webkit-text-size-adjust: 100%;
+        text-size-adjust: 100%;
+      }
+      /* Full-height shell. dvh tracks Safari's shrinking viewport (address bar / keyboard)
+         so the page never overflows up or down. */
+      #app {
+        height: 100dvh;
+        max-width: 680px;
+        margin: 0 auto;
+        padding-top: env(safe-area-inset-top);
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+        background: var(--bg); /* guard against a white pre-paint flash on the root */
+      }
+      /* Installed PWA (standalone) — the iOS `black-translucent` gap. That status-bar style
+         renders content from the physical top (under the Dynamic Island) but hands the app
+         a viewport SHORTER than the screen by the status-bar height, leaving that height as
+         dead space at the BOTTOM. Web Inspector confirmed it: innerH 793 = screenH 852 − 59
+         (the top inset). No viewport-filling CSS can touch it (the gap is outside innerH);
+         the fix is to EXTEND the shell by safe-area-inset-top so the document spans the full
+         screen and fills the strip. Safe-area insets then move onto the scroll CONTENT, so
+         it rests in the safe zone yet scrolls edge-to-edge under the system UI (full-bleed).
+         Scoped to standalone; in-browser keeps 100dvh. */
+      @media (display-mode: standalone) {
+        html { height: calc(100% + env(safe-area-inset-top)); }
+        #app { height: 100%; padding-top: 0; }
+        /* scroll view that reaches the TOP edge: first content sits below the status bar
+           at rest but slides under it when scrolled */
+        .screen > .scroll:first-child { padding-top: calc(6px + env(safe-area-inset-top)); }
+        /* fixed top header (new-session picker) clears the status bar */
+        .screen > .listhead { padding-top: calc(2px + env(safe-area-inset-top)); }
+        /* scroll view that reaches the BOTTOM edge clears the home indicator (detail
+           screens get this from the dock's own inset instead) */
+        .screen > .scroll:last-child { padding-bottom: calc(24px + env(safe-area-inset-bottom)); }
+      }
+      .spinner {
+        width: 32px;
+        height: 32px;
+        border: 3px solid var(--dim);
+        border-top-color: var(--peach);
+        border-radius: 50%;
+        animation: spin 0.8s linear infinite;
+      }
+      /* "connecting" stays optically centered under the spinner; the animated dots
+         render as an absolutely-positioned suffix so their width never shifts it. */
+      .loadtext { position: relative; color: var(--muted); font-size: 14px; }
+      .loadtext::after {
+        content: "";
+        position: absolute;
+        left: 100%;
+        animation: dots 1.4s steps(1, end) infinite;
+      }
+      @keyframes dots {
+        0% { content: ""; }
+        25% { content: "."; }
+        50% { content: ".."; }
+        75% { content: "..."; }
+      }
+      /* a view fills the shell; .scroll is the single scroll region inside it */
+      .screen { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+      /* navigating INTO a session slides the detail screen in from the right (iOS push) */
+      .screen.detail { animation: push-in 0.26s cubic-bezier(0.2, 0.85, 0.25, 1); touch-action: pan-y; }
+      @keyframes push-in { from { transform: translateX(100%); } to { transform: none; } }
+      .scroll {
+        flex: 1;
+        min-height: 0;
+        overflow-y: auto;
+        overflow-x: hidden;
+        -webkit-overflow-scrolling: touch;
+        overscroll-behavior: contain;
+        padding: 6px 12px 24px;
+      }
+      h1 { font-size: 16px; margin: 4px 8px 12px; color: var(--muted); font-weight: 600; }
+      button {
+        font: inherit;
+        color: var(--fg);
+        background: var(--surface);
+        border: 1px solid var(--dim);
+        border-radius: 8px;
+        padding: 10px 14px;
+        cursor: pointer;
+      }
+      button:active { background: var(--hover); }
+      button:disabled { opacity: 0.4; }
+      input {
+        font: inherit;
+        color: var(--fg);
+        background: var(--surface);
+        border: 1px solid var(--dim);
+        border-radius: 8px;
+        padding: 10px 12px;
+        width: 100%;
+      }
+      /* group = uppercase repo header + its stack of session cards; headers and cards
+         share the same left edge for a clean vertical gutter. */
+      .group { margin-top: 10px; }
+      .group:first-child { margin-top: 4px; }
+      .repo {
+        color: var(--muted);
+        font-size: 11px;
+        font-weight: 600;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        margin: 0 4px 6px;
+      }
+      /* a real <button> — reset the global button chrome; flex layout for its spans.
+         Being a <button> is what makes iOS fire click on the first tap (no div hack). */
+      .row {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        width: 100%;
+        padding: 10px 12px;
+        /* 48px keeps a comfortable ≥44px (HIG) tap target while letting single-line
+           rows shrink; two-line rows grow to ~56px from their own content. */
+        min-height: 48px;
+        background: var(--surface);
+        border: none;
+        border-radius: 10px;
+        margin-bottom: 6px;
+        text-align: left;
+        appearance: none;
+        -webkit-appearance: none;
+      }
+      .row:active { background: var(--hover); }
+      /* uniform status circle — same size for every status (color/fill differ, not size) */
+      .dot { flex: none; width: 9px; height: 9px; margin: 0 4px; border-radius: 50%; }
+      .grow { flex: 1; min-width: 0; }
+      .name { display: block; font-weight: 600; font-size: 14px; line-height: 1.3; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      .sub { display: block; color: var(--muted); font-size: 12px; line-height: 1.3; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      .grow .sub { margin-top: 2px; }
+      .age { flex: none; color: var(--dim); font-size: 12px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+      .card { background: var(--surface); border-radius: 10px; padding: 12px; margin-bottom: 10px; }
+      .card.alert { border: 1px solid var(--peach); }
+      /* card heading (question / approve / running) — referenced by app.js but had no
+         rule, so it rendered as plain body text; bold + a gap separates it from the body. */
+      .who { font-weight: 500; font-size: 13px; margin-bottom: 6px; color: var(--muted); font-family: var(--mono); }
+      pre { white-space: pre-wrap; word-break: break-word; margin: 6px 0 0; color: var(--mint); }
+      .btns { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+      .opts { display: flex; flex-direction: column; gap: 8px; margin-top: 8px; }
+      .opt { display: flex; flex-direction: column; align-items: flex-start; gap: 3px; text-align: left; width: 100%; }
+      .opt-label { font-weight: 600; }
+      .opt-desc { color: var(--muted); font-size: 12px; line-height: 1.35; white-space: normal; }
+      .opt-preview {
+        align-self: stretch;
+        margin: 4px 0 0;
+        padding: 8px;
+        background: var(--bg);
+        border-radius: 6px;
+        color: var(--muted);
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 11px;
+        line-height: 1.4;
+        white-space: pre;
+        overflow-x: auto;
+        max-height: 240px;
+        overflow-y: auto;
+      }
+      .err { color: var(--red); padding: 8px; }
+      .center { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; padding: 32px 12px; height: 100%; }
+      @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+
+      /* chat thread */
+      .bubble {
+        max-width: 90%;
+        width: fit-content;
+        padding: 9px 13px;
+        border-radius: 16px;
+        margin-bottom: 8px;
+        white-space: pre-wrap;
+        /* `anywhere` (not `break-word`) so a long unbreakable token — URL, file path,
+           hash — is considered when sizing the box, letting it shrink and wrap inside
+           max-width instead of forcing the box wider than the screen. */
+        overflow-wrap: anywhere;
+        word-break: break-word;
+      }
+      .bubble.assistant { background: var(--surface); border-bottom-left-radius: 5px; margin-right: auto; }
+      .bubble.user { background: var(--user-bubble); border: 1px solid var(--user-bubble-border); border-bottom-right-radius: 5px; margin-left: auto; -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; transition: transform 0.12s ease; }
+      .bubble.user:active { transform: scale(0.97); }
+      .bubble.pending { opacity: 0.5; }
+      .tool {
+        font-size: 12px;
+        color: var(--peach);
+        background: var(--surface);
+        border-radius: 8px;
+        padding: 6px 10px;
+        margin-bottom: 8px;
+        width: fit-content;
+        max-width: 100%;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .tool .arg { color: var(--muted); }
+      .typing { color: var(--muted); font-size: 13px; padding: 2px 4px 10px; font-family: var(--mono); }
+
+      /* Bottom-align the conversation so the newest message sits just above the dock
+         (chat convention) instead of stranding it mid-screen with dead space below.
+         The ::before margin-top:auto absorbs free space when the thread is short and
+         collapses to 0 when it overflows — unlike justify-content:flex-end, it never
+         clips the top on overflow. align-items:flex-start keeps non-bubble children
+         (loading/typing) left without stretching them; bubbles keep their auto-margin
+         left/right alignment. */
+      /* halve the resting gap to the dock (base .scroll bottom is 24px; + dock's 8px top) */
+      .scroll.thread { display: flex; flex-direction: column; align-items: flex-start; padding-bottom: 8px; }
+      .scroll.thread::before { content: ""; margin-top: auto; }
+      /* Each Turn's blocks are wrapped in a .turn div which is the actual flex child.
+         Pin it to full width (and let it shrink) so the bubbles' max-width %, the tool
+         chip's ellipsis, and the left/right auto-margins all resolve against the SCREEN
+         — not against a wrapper that grew wider than the viewport from a wide child
+         (a nowrap tool chip or a long unbreakable token), which pushed content off the
+         right edge with no way to scroll to it. */
+      .turn { width: 100%; min-width: 0; }
+
+      /* markdown inside assistant bubbles — HTML controls spacing, not pre-wrap
+         (the base .bubble uses pre-wrap, which would turn marked's inter-tag
+         newlines into stray blank lines). */
+      .bubble.md { white-space: normal; }
+      .bubble.md > *:first-child { margin-top: 0; }
+      .bubble.md > *:last-child { margin-bottom: 0; }
+      .bubble.md p { margin: 0 0 8px; }
+      .bubble.md ul, .bubble.md ol { margin: 4px 0 8px; padding-left: 20px; }
+      .bubble.md li { margin: 2px 0; }
+      .bubble.md h1, .bubble.md h2, .bubble.md h3 { font-size: 15px; margin: 10px 0 6px; }
+      .bubble.md a { color: var(--peach); }
+      .bubble.md code { background: var(--code-bg); border-radius: 4px; padding: 1px 4px; font-family: "SF Mono", ui-monospace, monospace; font-size: 13px; }
+      .bubble.md pre { background: var(--code-bg); border-radius: 8px; padding: 10px; overflow-x: auto; margin: 6px 0; }
+      .bubble.md pre code { background: none; padding: 0; color: var(--mint); white-space: pre; }
+      .bubble.md blockquote { margin: 6px 0; padding-left: 10px; border-left: 2px solid var(--dim); color: var(--muted); }
+      .bubble.md strong { font-weight: 700; }
+
+      /* bottom nav bar (inside the dock — thumb-reachable; carries back, title,
+         status/usage, and the attention-jump button) */
+      .navbar { display: flex; align-items: center; gap: 8px; padding-bottom: 8px; margin-bottom: 8px; border-bottom: 1px solid var(--border); }
+      /* ≥44px hit area (Apple HIG) without shifting layout — negative margin offsets the pad */
+      .iconbtn { background: none; border: none; padding: 11px 12px; margin: -11px -6px; min-width: 44px; min-height: 44px; display: inline-flex; align-items: center; justify-content: center; color: var(--muted); font-size: 20px; line-height: 1; }
+      .navtitle { flex: 1; min-width: 0; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      .meta { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); }
+      .usage { font-variant-numeric: tabular-nums; }
+      .attn { background: none; border: 1px solid var(--peach); color: var(--peach); border-radius: 14px; padding: 4px 10px; font-size: 12px; font-weight: 600; white-space: nowrap; }
+      .attn:active { background: var(--hover); }
+
+      /* bottom dock (composer / question / approval) — a flex child, not fixed, so it
+         never overlaps the scroll region or sits under the keyboard */
+      .dock {
+        flex: none;
+        background: var(--bg);
+        border-top: 1px solid var(--border);
+        /* bottom = half the home-indicator inset: sits the input lower than the full safe
+           inset (which felt too high) without dropping it hard against the screen edge.
+           Device-scaled via env(); resolves to 0 in-browser where there's no home bar. */
+        padding: 8px 12px calc(env(safe-area-inset-bottom) / 2);
+      }
+      .dock-inner { max-width: 680px; margin: 0 auto; }
+      .flash { color: var(--peach); font-size: 13px; padding: 2px 4px 8px; }
+      .composer { display: flex; gap: 8px; align-items: flex-end; }
+      .composer textarea {
+        font: inherit;
+        color: var(--fg);
+        background: var(--surface);
+        border: 1px solid var(--dim);
+        border-radius: 18px;
+        padding: 9px 14px;
+        width: 100%;
+        resize: none;
+        min-height: 40px;
+        max-height: 120px;
+        line-height: 1.35;
+      }
+      .composer .send {
+        flex: none;
+        width: 40px;
+        height: 40px;
+        padding: 0;
+        border: none;
+        border-radius: 50%;
+        background: var(--peach);
+        color: var(--bg);
+        font-size: 19px;
+        font-weight: 700;
+      }
+      .composer .send:disabled { background: var(--surface); color: var(--dim); }
+      .composer .attach {
+        flex: none;
+        width: 40px;
+        height: 40px;
+        padding: 0;
+        border: 1px solid var(--dim);
+        border-radius: 50%;
+        background: var(--surface);
+        color: var(--muted);
+        font-size: 22px;
+        line-height: 1;
+      }
+      /* staged-attachment thumbnails above the textarea */
+      .thumbs { display: flex; flex-wrap: wrap; gap: 8px; padding: 2px 4px 8px; }
+      .thumb { position: relative; width: 56px; height: 56px; }
+      .thumb img { width: 100%; height: 100%; object-fit: cover; border-radius: 10px; border: 1px solid var(--dim); }
+      .thumb .thumbx {
+        position: absolute; top: -6px; right: -6px;
+        width: 20px; height: 20px; padding: 0;
+        border: none; border-radius: 50%;
+        background: var(--red); color: var(--bg);
+        font-size: 13px; font-weight: 700; line-height: 1;
+      }
+      /* thumbnails inside an optimistic sent bubble */
+      .imgbubble .bubthumbs { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 4px; }
+      .imgbubble .bubthumbs img { width: 120px; max-width: 60vw; border-radius: 10px; }
+      /* history marker for an image attachment — right-aligned like a user bubble */
+      .imgmark {
+        display: block;
+        width: fit-content;
+        margin: 2px 0 2px auto;
+        color: var(--muted);
+        font-size: 13px;
+        padding: 4px 10px;
+        background: var(--surface);
+        border: 1px solid var(--dim);
+        border-radius: 12px;
+      }
+
+      /* list header (title + new-session button) — scrolls with the list (non-sticky) */
+      .listhead { display: flex; align-items: center; gap: 8px; padding: 2px 4px 12px; }
+      .listhead h1 { flex: 1; margin: 0; display: flex; align-items: center; gap: 8px; }
+      .attnchip {
+        padding: 3px 10px;
+        border-radius: 999px;
+        border: 1px solid var(--red);
+        background: var(--red-tint);
+        color: var(--red);
+        font-size: 12px;
+        font-weight: 700;
+        line-height: 1.3;
+      }
+      .attnchip:active { background: var(--red-tint-active); }
+      .newbtn {
+        flex: none;
+        width: 38px;
+        height: 38px;
+        padding: 0;
+        border-radius: 50%;
+        border: 1px solid var(--dim);
+        background: var(--surface);
+        color: var(--peach);
+        font-size: 22px;
+        line-height: 1;
+      }
+      .newbtn:active { background: var(--hover); }
+
+      /* live statusline + permission mode, scraped from the pane (shown in the dock) */
+      .statusbar { display: flex; align-items: baseline; flex-wrap: wrap; gap: 6px; padding: 2px 4px 8px; font-size: 11px; color: var(--muted); }
+      .modebadge { flex: none; color: var(--mint); border: 1px solid currentColor; border-radius: 10px; padding: 0 7px; font-weight: 600; white-space: nowrap; }
+      /* fill the row and right-align so usage+branch hug the right edge, badge stays left */
+      .sltext { flex: 1; min-width: 0; text-align: right; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-variant-numeric: tabular-nums; }
+
+      /* iOS-style long-press action sheet */
+      .scrim {
+        position: fixed;
+        inset: 0;
+        z-index: 20;
+        background: var(--scrim);
+        -webkit-backdrop-filter: blur(3px);
+        backdrop-filter: blur(3px);
+        display: flex;
+        flex-direction: column;
+        justify-content: flex-end;
+        padding: 8px;
+        padding-bottom: calc(8px + env(safe-area-inset-bottom));
+        animation: scrim-in 0.15s ease both;
+      }
+      .sheet {
+        width: 100%;
+        max-width: 520px;
+        margin: 0 auto;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        animation: sheet-up 0.24s cubic-bezier(0.2, 0.85, 0.25, 1) both;
+      }
+      .sheetgroup { background: var(--sheet-bg); border-radius: 14px; overflow: hidden; }
+      .sheet button {
+        display: block;
+        width: 100%;
+        text-align: center;
+        background: none;
+        border: none;
+        border-radius: 0;
+        padding: 16px;
+        font-size: 17px;
+        color: var(--peach);
+      }
+      .sheet button + button, .sheetgroup button { border-top: 0.5px solid var(--sheet-line); }
+      .sheetgroup > button:first-child { border-top: none; }
+      .sheet button:active { background: var(--hover); }
+      .sheet .danger { color: var(--red); }
+      .sheetcancel { font-weight: 700; color: var(--fg); }
+      .sheetpreview {
+        padding: 12px 16px;
+        font-size: 13px;
+        line-height: 1.35;
+        color: var(--muted);
+        text-align: left;
+        border-bottom: 0.5px solid var(--sheet-line);
+        max-height: 64px;
+        overflow: hidden;
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+      .sheethint { color: var(--dim); font-size: 13px; padding: 14px; text-align: center; }
+
+      /* card context label (question / approve / running) — was unstyled body text */
+      .who { font-size: 11px; text-transform: uppercase; letter-spacing: 0.07em; font-weight: 700; color: var(--muted); margin-bottom: 6px; }
+      .who.danger { color: var(--red); }
+
+      /* question card: cap height so a tall (many-option) card scrolls INSIDE the dock
+         instead of clipping options off-screen; the submit bar stays pinned below it */
+      .qcard { display: flex; flex-direction: column; max-height: 68dvh; }
+      .qtext { margin-bottom: 8px; }
+      .qcard .opts { overflow-y: auto; -webkit-overflow-scrolling: touch; min-height: 0; margin-top: 0; padding-top: 2px; }
+      .opt-head { display: flex; align-items: flex-start; gap: 8px; }
+      .opt-check { flex: none; font-size: 16px; line-height: 1; margin-top: 1px; color: var(--dim); }
+      .opt.sel { border-color: var(--peach); background: var(--peach-tint); }
+      .opt.sel .opt-check { color: var(--peach); }
+      .opt-submit { flex: none; margin-top: 10px; padding: 13px; border: none; border-radius: 10px; background: var(--peach); color: var(--bg); font-weight: 700; font-size: 15px; }
+      /* opacity:1 overrides the global button:disabled 0.4 — the muted-on-surface
+         already reads as inactive without fading it into the background. */
+      .opt-submit:disabled { background: var(--surface); color: var(--muted); opacity: 1; }
+
+      /* approval card: distinct primary (Allow) vs secondary (Deny); destructive
+         commands get a red command box + a warning tag */
+      .approve-desc { color: var(--muted); font-size: 13px; margin-bottom: 2px; }
+      pre.cmd-danger { color: var(--red); background: var(--danger-bg); border: 1px solid var(--danger-border); border-radius: 6px; padding: 8px; }
+      .risk-tag { color: var(--red); font-size: 12px; font-weight: 700; margin-top: 6px; }
+      .approve-btns { display: flex; gap: 10px; margin-top: 10px; }
+      .approve-btns button { flex: 1; }
+      .btn-allow { background: var(--peach); color: var(--bg); border: none; font-weight: 700; }
+      .btn-deny { background: var(--surface); border: 1px solid var(--dim); color: var(--fg); }
+
+      /* pending (blocked-on-you) pill on a list row — distinct from a done session */
+      .pendingbadge { flex: none; font-size: 11px; font-weight: 700; padding: 4px 10px; border-radius: 999px; white-space: nowrap; }
+      .pendingbadge.q { color: var(--red); border: 1px solid var(--red); background: var(--red-tint); }
+      .pendingbadge.a { color: var(--peach); border: 1px solid var(--peach); background: var(--peach-tint); }
+      .repo.needsyou { color: var(--red); }
+
+      /* primary filled button + centered login */
+      .primary { background: var(--peach); color: var(--bg); border: none; font-weight: 700; }
+      .login { justify-content: center; flex: 1; }
+      .brand { font-size: 28px; margin: 0 0 2px; color: var(--fg); letter-spacing: -0.02em; }
+      .brandsub { color: var(--muted); font-size: 14px; margin-bottom: 8px; }
+
+      /* SSE connection-lost banner — an in-flow flex child at the top of #app so it
+         reserves its own height and pushes the screen down, never overlaying the header
+         or the first chat bubble (#app already pads for the safe-area inset). */
+      .offline { flex: none; background: var(--red-banner); color: var(--red); font-size: 12px; font-weight: 600; text-align: center; padding: 4px 6px 5px; }
+
+      @keyframes scrim-in { from { opacity: 0; } to { opacity: 1; } }
+      @keyframes sheet-up { from { transform: translateY(24px); opacity: 0.4; } to { transform: none; opacity: 1; } }
+    </style>
+  </head>
+  <body>
+    <!-- Static boot spinner: shows on the dark bg the instant the HTML paints, before
+         app.js + vendor modules finish loading (slow over Tailscale). Preact's render()
+         replaces #app's contents on boot, so this is wiped the moment the app mounts. -->
+    <div id="app">
+      <div class="center">
+        <div class="spinner"></div>
+        <div class="loadtext">connecting</div>
+      </div>
+    </div>
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>

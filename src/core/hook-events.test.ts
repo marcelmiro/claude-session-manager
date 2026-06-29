@@ -11,12 +11,14 @@
 
 import "../../test/helpers/home";
 import { test, expect, beforeEach } from "bun:test";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync, appendFileSync } from "node:fs";
+import { join } from "node:path";
 import {
   readEvents,
   eventSourcedStatus,
   pendingToolCall,
   eventLogPath,
+  readTranscriptSince,
   EVENTS_DIR,
 } from "./hook-events";
 import { fixtureJson } from "../../test/helpers/fixture";
@@ -136,6 +138,33 @@ test("pendingToolCall returns null when the PreToolUse is closed by PostToolUse"
   expect(pendingToolCall(id)).toBeNull();
 });
 
+test("pendingToolCall: an open PreToolUse before the last Stop is stale → null", () => {
+  // A dropped PostToolUse (e.g. a Bash that spawned a detached process holding the
+  // hook's pipe) leaves a PreToolUse open; the turn then ends with Stop. That tool is
+  // NOT still running — without this guard the bridge showed a phantom "running — Bash".
+  const id = "sess-stale-pre";
+  writeLog(id, [
+    ev({ hook_event_name: "PreToolUse", tool_name: "Bash", tool_use_id: "tu_dangling", tool_input: { command: "caffeinate csm bridge" } }, "x"),
+    ev({ hook_event_name: "Stop" }, "x"),
+  ]);
+  expect(pendingToolCall(id)).toBeNull();
+});
+
+test("pendingToolCall: a fresh PreToolUse after the last Stop is live → returned", () => {
+  // A stale dangling tool from a prior turn must not mask a genuinely in-flight tool
+  // opened in the current (post-Stop) turn.
+  const id = "sess-fresh-after-stop";
+  writeLog(id, [
+    ev({ hook_event_name: "PreToolUse", tool_name: "Read", tool_use_id: "tu_stale", tool_input: { file_path: "/a" } }, "x"),
+    ev({ hook_event_name: "Stop" }, "x"),
+    ev({ hook_event_name: "UserPromptSubmit" }, "x"),
+    ev({ hook_event_name: "PreToolUse", tool_name: "Bash", tool_use_id: "tu_live", tool_input: { command: "ls" } }, "x"),
+  ]);
+  const call = pendingToolCall(id);
+  expect(call?.name).toBe("Bash");
+  expect(call?.toolUseId).toBe("tu_live");
+});
+
 test("pendingToolCall maps AskUserQuestion questions[0] → structured options", () => {
   const id = "sess-ask";
   const ask = fixtureJson("hooks/pretooluse-askuserquestion.json") as HookEvent;
@@ -148,4 +177,55 @@ test("pendingToolCall maps AskUserQuestion questions[0] → structured options",
   expect(call!.question!.multiSelect).toBe(false);
   expect(call!.question!.options.map((o) => o.label)).toEqual(["Apple", "Banana", "Cherry"]);
   expect(call!.question!.toolUseId).toBe("toolu_017qQwTYpzg8d65MoEjqtPj8");
+});
+
+// --- readTranscriptSince (append-only delta read for the bridge) ----------------
+
+const txPath = () => join(EVENTS_DIR, "tx.jsonl");
+const rec = (role: "user" | "assistant", text: string) =>
+  JSON.stringify({ type: role, message: { role, content: text } }) + "\n";
+
+test("readTranscriptSince: since=0 reads the whole log, fromStart=true, cursor at EOF", async () => {
+  writeFileSync(txPath(), rec("user", "one") + rec("assistant", "two"));
+  const s = await readTranscriptSince(txPath(), 0);
+  expect(s.turns.map((t) => t.content[0]!.type === "text" && t.content[0]!.text)).toEqual(["one", "two"]);
+  expect(s.fromStart).toBe(true);
+  expect(s.cursor).toBe(Buffer.byteLength(rec("user", "one") + rec("assistant", "two")));
+});
+
+test("readTranscriptSince: a prior cursor returns ONLY the appended turns (delta)", async () => {
+  writeFileSync(txPath(), rec("user", "one"));
+  const first = await readTranscriptSince(txPath(), 0);
+  appendFileSync(txPath(), rec("assistant", "two"));
+  const delta = await readTranscriptSince(txPath(), first.cursor);
+  expect(delta.turns.length).toBe(1);
+  expect(delta.turns[0]!.content[0]!.type === "text" && delta.turns[0]!.content[0]!.text).toBe("two");
+  expect(delta.fromStart).toBe(false);
+});
+
+test("readTranscriptSince: a half-written trailing line is not consumed until its newline lands", async () => {
+  writeFileSync(txPath(), rec("user", "one"));
+  const first = await readTranscriptSince(txPath(), 0);
+  // partial append (no newline yet) — must NOT advance the cursor or yield a turn
+  appendFileSync(txPath(), '{"type":"assistant","message":{"role":"assistant","content":"par');
+  const partial = await readTranscriptSince(txPath(), first.cursor);
+  expect(partial.turns).toEqual([]);
+  expect(partial.cursor).toBe(first.cursor);
+  // complete the line — now it parses exactly once
+  appendFileSync(txPath(), 'tial"}}\n');
+  const done = await readTranscriptSince(txPath(), partial.cursor);
+  expect(done.turns.length).toBe(1);
+  expect(done.turns[0]!.content[0]!.type === "text" && done.turns[0]!.content[0]!.text).toBe("partial");
+});
+
+test("readTranscriptSince: since past EOF (log reset/compacted) restarts from 0", async () => {
+  writeFileSync(txPath(), rec("user", "fresh"));
+  const s = await readTranscriptSince(txPath(), 999999);
+  expect(s.fromStart).toBe(true);
+  expect(s.turns.length).toBe(1);
+});
+
+test("readTranscriptSince: missing file → empty, no throw", async () => {
+  const s = await readTranscriptSince(join(EVENTS_DIR, "nope.jsonl"), 0);
+  expect(s.turns).toEqual([]);
 });

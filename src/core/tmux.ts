@@ -144,16 +144,78 @@ export async function sendKeys(paneId: string, keys: string[]): Promise<void> {
 
 /**
  * Send literal text followed by Enter to a tmux pane.
- * Uses -l for the text (no key-name interpretation), then `;` to chain
- * a second send-keys for Enter — all in one tmux invocation to avoid races.
+ *
+ * The text and the Enter MUST be separate tmux writes with a gap between them.
+ * A chained `send-keys -l text ; send-keys Enter` (one coalesced write) makes the
+ * bytes arrive in a single burst, which Claude's TUI reads as a *paste*: the
+ * trailing `\r` is absorbed as a newline inside the input box instead of
+ * submitting, so the message sits in the prompt unsent (and stacks up on retry).
+ * This is the same coalescing hazard documented in `sendKeysSequential`. Sending
+ * the text, pausing, then sending a standalone Enter lets Claude commit the input
+ * and interpret the Enter as a submit.
  */
 export async function sendTextAndEnter(paneId: string, text: string): Promise<void> {
   try {
-    // tmux splits on `;` before parsing flags, so -l only applies to text, not to the `;`
-    Bun.spawnSync(["tmux", "send-keys", "-t", paneId, "-l", text, ";", "send-keys", "-t", paneId, "Enter"]);
+    Bun.spawnSync(["tmux", "send-keys", "-t", paneId, "-l", text]);
+    await Bun.sleep(250);
+    Bun.spawnSync(["tmux", "send-keys", "-t", paneId, "Enter"]);
   } catch {
     // pane may have closed
   }
+}
+
+/** Send a single tmux key/chord (e.g. "Up", "Enter", "Escape", "C-u") to a pane. */
+export async function sendKey(paneId: string, key: string): Promise<void> {
+  try {
+    Bun.spawnSync(["tmux", "send-keys", "-t", paneId, key]);
+  } catch {
+    // pane may have closed
+  }
+}
+
+/** Send literal text to a pane WITHOUT a trailing Enter (cf. sendTextAndEnter). */
+export async function sendLiteral(paneId: string, text: string): Promise<void> {
+  try {
+    Bun.spawnSync(["tmux", "send-keys", "-t", paneId, "-l", text]);
+  } catch {
+    // pane may have closed
+  }
+}
+
+/**
+ * Send text wrapped in bracketed-paste markers (`ESC[200~ … ESC[201~`), i.e. exactly what
+ * a real terminal paste looks like. This is the trigger that makes Claude Code's TUI treat
+ * an image file path as an inline `[Image #N]` attachment (verified live: a BARE
+ * `send-keys -l <path>` stays literal text; the bracketed-paste form attaches). Claude
+ * base64-embeds the file's bytes at paste time, so the file must exist now but is safe to
+ * delete after submit.
+ */
+export async function sendBracketedPaste(paneId: string, text: string): Promise<void> {
+  try {
+    Bun.spawnSync(["tmux", "send-keys", "-t", paneId, "-l", `\x1b[200~${text}\x1b[201~`]);
+  } catch {
+    // pane may have closed
+  }
+}
+
+/**
+ * Launch `claude` in a NEW tmux window in `repoPath`, inserted after the active
+ * window (`-a`), mirroring the TUI's simple-case new-session launch (index.ts). The
+ * window command is `claude` directly — no shell wrapper — so there's no send-keys
+ * race with shell init. `targetSession` is `session:windowId` from getMainSession().
+ * Returns the new window's pane id (`-P -F '#{pane_id}'`) so the caller can wait for
+ * that pane's SessionStart hook to register the fresh session id.
+ */
+export async function launchClaudeWindow(
+  targetSession: string,
+  repoPath: string,
+  name: string,
+): Promise<string> {
+  const out =
+    await Bun.$`tmux new-window -a -t ${targetSession} -n ${name} -c ${repoPath} -P -F ${"#{pane_id}"} claude`
+      .quiet()
+      .text();
+  return out.trim();
 }
 
 /**
@@ -186,7 +248,8 @@ export async function sendKeysSequential(
  * arrow keys being dropped (the old `Down`×n navigation silently picked the first
  * option; verified live). Keys go out sequentially via `sendKeysSequential`.
  *
- * - single-select (`number`): press the option's digit — it selects AND submits.
+ * - single-select (`number`): press the option's digit (highlights it), then `Enter`
+ *   to submit. The digit alone only moves the cursor — it does not auto-submit.
  * - multiSelect (`number[]`): press each option's digit to toggle its checkbox,
  *   then `Right` (to the Submit tab) + `Enter`.
  *
@@ -204,13 +267,15 @@ export async function answerQuestion(
  * Pure key-sequence builder for `answerQuestion` (extracted for testability).
  * `selection` is 0-based; the emitted digit is 1-based to match the menu labels.
  *
- * - single-select (`number`): `[String(idx + 1)]` — the digit selects and submits.
+ * - single-select (`number`): `[String(idx + 1), "Enter"]` — the digit highlights
+ *   the option, `Enter` submits it. (The digit alone only moves the cursor; it does
+ *   NOT auto-submit — verified live, cursor moved 1→2 but the answer never landed.)
  * - multiSelect (`number[]`): de-duped + ascending digits (toggle each), then
  *   `Right`+`Enter` (→ Submit tab, then submit).
  */
 export function questionAnswerKeys(selection: number | number[]): string[] {
   if (typeof selection === "number") {
-    return [String(selection + 1)];
+    return [String(selection + 1), "Enter"];
   }
   const sorted = [...new Set(selection)].sort((a, b) => a - b);
   return [...sorted.map((idx) => String(idx + 1)), "Right", "Enter"];

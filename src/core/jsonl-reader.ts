@@ -221,7 +221,7 @@ export async function readPreviewMessages(
 export interface PendingQuestion {
   question: string;
   header: string;
-  options: Array<{ label: string; description?: string }>;
+  options: Array<{ label: string; description?: string; preview?: string }>;
   multiSelect: boolean;
   toolUseId: string;
 }
@@ -303,6 +303,7 @@ export async function readPendingToolCall(sessionPath: string): Promise<PendingT
                     options: (q.options || []).map((o: any) => ({
                       label: o.label || "",
                       description: o.description,
+                      preview: o.preview,
                     })),
                     multiSelect: q.multiSelect || false,
                     toolUseId: block.id,

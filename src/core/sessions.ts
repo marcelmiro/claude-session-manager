@@ -10,7 +10,7 @@ import { findClaudeProcesses } from "./process";
 import { detectStatus, estimateContextPercent, type StatusResult } from "./status";
 import { getBaseRepoPath } from "./git";
 import { stripAllPrefixes, extractAIName } from "./notifications";
-import { processHookEvents } from "./state";
+import { processHookEvents, loadPaneSessions } from "./state";
 import { eventSourcedStatus } from "./hook-events";
 import { nativeStatus } from "./session-state";
 
@@ -40,6 +40,25 @@ export function exportPaneSessionCache(): Record<string, string> {
 }
 
 /**
+ * Resolve a pane's CURRENT session id. The SessionStart hook is authoritative — it fires
+ * on launch, resume, /clear AND /compact — so the hook-derived maps win. The command-line
+ * `--resume` id is only a FALLBACK for panes the hook never recorded (hook not installed,
+ * or a brand-new pane before its first event lands): it is the LAUNCH id, so after /clear
+ * or /compact (which mint a new id WITHOUT restarting the process) it goes stale and must
+ * not win, or the pane stays pinned to the dead old session while the new one is orphaned.
+ * `cache` is this process's hook accumulation; `persisted` is pane-sessions.json (kept
+ * current by the monitor) — both are pure hook data, so the order between them is moot.
+ */
+export function resolvePaneSessionId(
+  paneId: string,
+  cmdSessionId: string | undefined,
+  cache: Map<string, string>,
+  persisted: Record<string, string>,
+): string | undefined {
+  return cache.get(paneId) ?? persisted[paneId] ?? cmdSessionId;
+}
+
+/**
  * Discover all Claude Code sessions using a two-phase approach:
  * Phase A: Active sessions from tmux panes (source of truth)
  * Phase B: Idle sessions from index files (secondary, filtered)
@@ -57,10 +76,15 @@ export async function discoverSessions(opts?: { skipArchivedSummaries?: boolean;
     }
   }
 
-  // Phase A: Gather tmux panes and Claude processes in parallel
-  const [panes, claudeProcesses] = await Promise.all([
+  // Phase A: Gather tmux panes, Claude processes, and the persisted pane→session map
+  // in parallel. The persisted map (the same source `csm list` trusts) is a fallback
+  // for the consume-once hook-events log: a freshly-launched session's hook event can
+  // be read on a cycle before its pane has a running claude process — which prunes the
+  // cache entry — and without this fallback that session would never resolve an id.
+  const [panes, claudeProcesses, persistedPaneMap] = await Promise.all([
     listPanes(),
     findClaudeProcesses(),
+    loadPaneSessions(),
   ]);
 
   // Build a TTY→process map. ps reports "ttys001", tmux reports "/dev/ttys001".
@@ -83,24 +107,21 @@ export async function discoverSessions(opts?: { skipArchivedSummaries?: boolean;
     }
   }
 
-  // Phase A: Build active sessions from Claude panes
+  // Phase A: Build active sessions from Claude panes. Hook map (cache/persisted) wins over
+  // the command-line --resume id so a /clear'd or /compact'd pane resolves to its CURRENT
+  // session, not the stale launch id (see resolvePaneSessionId).
   const activeSessionPromises = claudePanesWithProc.map(({ pane, sessionId }) =>
-    buildActiveSession(pane, projectsDir, sessionId ?? paneSessionCache.get(pane.paneId)),
+    buildActiveSession(pane, projectsDir, resolvePaneSessionId(pane.paneId, sessionId, paneSessionCache, persistedPaneMap)),
   );
   const activeSessions = await Promise.all(activeSessionPromises);
 
-  // Track panes where session ID changed (e.g. after /clear)
-  // Start with hook-detected changes, then add --resume flag changes
+  // Session-ID changes (/clear, /compact) come from the SessionStart hook — the
+  // authoritative signal. We deliberately do NOT derive changes from, or cache, the
+  // command-line --resume id: it's the launch id and never changes, so it would miss
+  // nothing the hook didn't already report yet fire spuriously every cycle — and caching
+  // it would clobber the post-/clear mapping back onto the stale id. Keeping the cache
+  // hook-only is what makes the precedence above hold across discovery cycles.
   const changedPaneIds = new Set<string>(hookChangedPanes);
-  for (const { pane, sessionId } of claudePanesWithProc) {
-    if (sessionId) {
-      const cached = paneSessionCache.get(pane.paneId);
-      if (cached && cached !== sessionId) {
-        changedPaneIds.add(pane.paneId);
-      }
-      paneSessionCache.set(pane.paneId, sessionId);
-    }
-  }
 
   // Enrich active sessions that still couldn't resolve a session ID
   await enrichUnmatchedSessions(activeSessions, projectsDir, opts?.nameMap);

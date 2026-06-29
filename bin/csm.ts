@@ -17,6 +17,7 @@ function help() {
     \x1b[36msetup\x1b[0m               Install SessionStart hook for session tracking
     \x1b[36msave-sessions\x1b[0m       Snapshot pane→session map for tmux-resurrect
     \x1b[36mrestore-sessions\x1b[0m    Restore Claude sessions after tmux-resurrect restore
+    \x1b[36mbridge\x1b[0m              Serve the HTTP/SSE bridge for the mobile web app
 
   \x1b[1mOptions:\x1b[0m
     \x1b[36m-h, --help\x1b[0m          Show this help message
@@ -57,6 +58,14 @@ switch (cmd) {
     break;
   case "restore-sessions":
     await import("../src/cli").then((m) => m.restoreSessions());
+    break;
+  case "bridge":
+    try {
+      await import("../src/bridge/server").then((m) => m.startBridge());
+    } catch (err) {
+      console.error(err instanceof Error ? err.message : String(err));
+      process.exit(1);
+    }
     break;
   default:
     console.error(`Unknown command: ${cmd}`);

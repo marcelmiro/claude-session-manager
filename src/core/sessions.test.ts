@@ -8,7 +8,7 @@
  */
 
 import { test, expect } from "bun:test";
-import { slashCommandIntent } from "./sessions";
+import { slashCommandIntent, resolvePaneSessionId } from "./sessions";
 
 test("extracts /implement-plan with its plan path", () => {
   const msg =
@@ -39,4 +39,35 @@ test("returns null for plain text and for non-command XML (caveats)", () => {
 test("collapses whitespace in args", () => {
   const msg = "<command-name>/run</command-name><command-args>  foo   bar  </command-args>";
   expect(slashCommandIntent(msg)).toBe("/run foo bar");
+});
+
+// --- resolvePaneSessionId — the /clear pane→session precedence fix ---------------
+// The SessionStart hook is authoritative; the command-line --resume id is the LAUNCH id
+// and goes stale after /clear or /compact (new id, same process). Hook map must win.
+
+const cache = (entries: Record<string, string> = {}) => new Map(Object.entries(entries));
+
+test("resolvePaneSessionId: hook cache wins over the command-line --resume id (the /clear fix)", () => {
+  expect(resolvePaneSessionId("%651", "old", cache({ "%651": "new" }), {})).toBe("new");
+});
+
+test("resolvePaneSessionId: persisted hook map (pane-sessions.json) wins over the command-line id", () => {
+  // The cache lost the truncate-once hook-events race; the monitor-maintained disk map still has it.
+  expect(resolvePaneSessionId("%651", "old", cache(), { "%651": "new" })).toBe("new");
+});
+
+test("resolvePaneSessionId: cache preferred over persisted (both hook-derived)", () => {
+  expect(resolvePaneSessionId("%651", "old", cache({ "%651": "fromCache" }), { "%651": "fromDisk" })).toBe("fromCache");
+});
+
+test("resolvePaneSessionId: unhooked pane falls back to the command-line id", () => {
+  expect(resolvePaneSessionId("%9", "cmdId", cache(), {})).toBe("cmdId");
+});
+
+test("resolvePaneSessionId: fork/fresh pane (no command-line id, no hook entry) → undefined", () => {
+  expect(resolvePaneSessionId("%9", undefined, cache(), {})).toBeUndefined();
+});
+
+test("resolvePaneSessionId: normal pane (hook == cmd) resolves unchanged — fix is a no-op", () => {
+  expect(resolvePaneSessionId("%1", "s1", cache({ "%1": "s1" }), { "%1": "s1" })).toBe("s1");
 });

@@ -31,6 +31,14 @@ interface RawBlock {
   is_error?: boolean;
 }
 
+/**
+ * Slash-command runner records (`/compact`, `/clear`, …). Claude Code emits these
+ * as `user` turns wrapped in reserved tags and renders them as a command pill, not
+ * raw text. We drop them so the transcript shows conversation, not the plumbing.
+ */
+const LOCAL_COMMAND_META =
+  /^\s*<(?:local-command-caveat|local-command-stdout|command-name|command-message|command-args|command-contents)>/;
+
 /** Parse a raw JSONL transcript into ordered turns (oldest first). */
 export function parseTranscript(raw: string): TranscriptTurn[] {
   const turns: TranscriptTurn[] = [];
@@ -52,7 +60,14 @@ export function parseTranscript(raw: string): TranscriptTurn[] {
           ? (content as RawBlock[]).map(toBlock).filter((b): b is TranscriptBlock => b !== null)
           : [];
 
-    turns.push({ role: record.type, content: blocks });
+    const visible = blocks.filter(
+      (b) => !(b.type === "text" && LOCAL_COMMAND_META.test(b.text)),
+    );
+    // A turn that was wholly local-command plumbing is dropped entirely; a
+    // genuinely empty turn (no blocks to begin with) is preserved as before.
+    if (visible.length === 0 && blocks.length > 0) continue;
+
+    turns.push({ role: record.type, content: visible });
   }
   return turns;
 }
@@ -82,6 +97,8 @@ function toBlock(block: RawBlock): TranscriptBlock | null {
       return { type: "tool_use", id: block.id ?? "", name: block.name ?? "", input: block.input };
     case "tool_result":
       return { type: "tool_result", tool_use_id: block.tool_use_id ?? "", content: block.content, is_error: block.is_error };
+    case "image":
+      return { type: "image" }; // drop the (large base64) source — keep only a marker
     default:
       return null; // unknown block type — drop
   }

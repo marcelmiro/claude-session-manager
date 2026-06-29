@@ -16,22 +16,29 @@
 
 import "../../test/helpers/home";
 import { test, expect, beforeEach } from "bun:test";
-import { mkdirSync, rmSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   pickPane,
-  canSendFreeText,
+  paneFromCommandLine,
   hasOpenQuestion,
   buildSessionTranscript,
+  slimTurns,
+  composeMessageSteps,
+  inputPending,
   getTranscript,
   sendMessage,
   answerSessionQuestion,
+  readContextUsage,
+  pickerCursorText,
+  cursorMatches,
+  parseModeMenu,
+  modeDowns,
 } from "./session-api";
 import { parseTranscript } from "./transcript";
 import { EVENTS_DIR } from "./hook-events";
 import { PATHS } from "./config";
 import { fixture } from "../../test/helpers/fixture";
-import type { SessionStatus } from "./status";
 import type { PendingToolCall } from "./jsonl-reader";
 
 const PANE_SESSIONS = join(PATHS.dir, "pane-sessions.json");
@@ -66,15 +73,38 @@ test("pickPane: two live panes for one session → last-written wins", () => {
   expect(pickPane("s1", { "%1": "s1", "%2": "s1" }, new Set(["%1", "%2"]))).toBe("%2");
 });
 
-// --- pure predicates -----------------------------------------------------------
+// --- paneFromCommandLine (the guarded --resume fallback) -----------------------
 
-test("canSendFreeText: ready→true; waiting/running/idle/null→false", () => {
-  expect(canSendFreeText("ready")).toBe(true);
-  for (const s of ["waiting", "running", "idle"] as SessionStatus[]) {
-    expect(canSendFreeText(s)).toBe(false);
-  }
-  expect(canSendFreeText(null)).toBe(false);
+test("paneFromCommandLine: matches a --resume process by id, maps its TTY to a pane", () => {
+  const procs = [{ sessionId: "s1", tty: "ttys013" }];
+  const panes = [{ paneId: "%651", tty: "/dev/ttys013" }]; // ps strips /dev/, tmux keeps it
+  expect(paneFromCommandLine("s1", procs, panes, {})).toBe("%651");
 });
+
+test("paneFromCommandLine: no process carries this id → null", () => {
+  expect(paneFromCommandLine("nope", [{ sessionId: "s1", tty: "ttys013" }], [{ paneId: "%651", tty: "/dev/ttys013" }], {})).toBeNull();
+});
+
+test("paneFromCommandLine: process matches but its TTY has no live pane → null", () => {
+  expect(paneFromCommandLine("s1", [{ sessionId: "s1", tty: "ttys999" }], [{ paneId: "%651", tty: "/dev/ttys013" }], {})).toBeNull();
+});
+
+test("paneFromCommandLine: stale-id guard — pane hook-claimed by ANOTHER session → null", () => {
+  // /clear case: the process command line still says --resume OLD, but the pane now
+  // hosts NEW (hook map). The command-line OLD id must NOT resolve onto this pane.
+  const procs = [{ sessionId: "old", tty: "ttys013" }];
+  const panes = [{ paneId: "%651", tty: "/dev/ttys013" }];
+  expect(paneFromCommandLine("old", procs, panes, { "%651": "new" })).toBeNull();
+});
+
+test("paneFromCommandLine: hook map agrees (or is silent) → returns the pane", () => {
+  const procs = [{ sessionId: "s1", tty: "ttys013" }];
+  const panes = [{ paneId: "%651", tty: "/dev/ttys013" }];
+  expect(paneFromCommandLine("s1", procs, panes, { "%651": "s1" })).toBe("%651"); // same id, fine
+  expect(paneFromCommandLine("s1", procs, panes, { "%2": "other" })).toBe("%651"); // unrelated entry
+});
+
+// --- pure predicates -----------------------------------------------------------
 
 test("hasOpenQuestion: AskUserQuestion+question→true; Bash/null→false", () => {
   const ask: PendingToolCall = {
@@ -121,6 +151,208 @@ test("getTranscript: unknown session → empty turns, no throw", async () => {
   const t = await getTranscript("never-existed-uuid-xyz");
   expect(t.turns).toEqual([]);
   expect(t.lastAssistant).toBeUndefined();
+  expect(t.full).toBe(true);
+});
+
+// --- slimTurns (payload trimming for the bridge) -------------------------------
+
+test("slimTurns: drops thinking + tool_result, keeps text + tool_use", () => {
+  const turns = [
+    {
+      role: "assistant" as const,
+      content: [
+        { type: "thinking" as const, text: "secret reasoning" },
+        { type: "text" as const, text: "hello" },
+        { type: "tool_use" as const, id: "1", name: "Bash", input: { command: "ls" } },
+        { type: "tool_result" as const, tool_use_id: "1", content: "x".repeat(50000) },
+      ],
+    },
+  ];
+  const [t] = slimTurns(turns);
+  expect(t!.content.map((b) => b.type)).toEqual(["text", "tool_use"]);
+});
+
+test("slimTurns: tool_use input trimmed to the single capped rendered field", () => {
+  const long = "echo " + "a".repeat(500);
+  const turns = [
+    {
+      role: "assistant" as const,
+      content: [
+        {
+          type: "tool_use" as const,
+          id: "1",
+          name: "Bash",
+          input: { command: long, description: "noise", timeout: 9999 },
+        },
+      ],
+    },
+  ];
+  const block = slimTurns(turns)[0]!.content[0] as { type: "tool_use"; input: Record<string, string> };
+  expect(Object.keys(block.input)).toEqual(["command"]); // description/timeout dropped
+  expect(block.input.command.length).toBeLessThanOrEqual(201); // 200 + "…"
+  expect(block.input.command.endsWith("…")).toBe(true);
+});
+
+test("slimTurns: a turn emptied only by stripping is dropped; genuinely-empty kept", () => {
+  const stripped = slimTurns([
+    { role: "assistant", content: [{ type: "thinking", text: "x" }] },
+  ]);
+  expect(stripped).toEqual([]);
+  const empty = slimTurns([{ role: "user", content: [] }]);
+  expect(empty).toEqual([{ role: "user", content: [] }]);
+});
+
+test("slimTurns: keeps the byte-free image marker alongside text", () => {
+  const [t] = slimTurns([
+    { role: "user", content: [{ type: "text", text: "[Image #1] look" }, { type: "image" }] },
+  ]);
+  expect(t!.content).toEqual([{ type: "text", text: "[Image #1] look" }, { type: "image" }]);
+});
+
+// --- composeMessageSteps (keystroke sequence for a message) ---------------------
+
+test("composeMessageSteps: text-only → literal + enter (no paste)", () => {
+  expect(composeMessageSteps("hello", [])).toEqual([
+    { kind: "literal", text: "hello" },
+    { kind: "enter" },
+  ]);
+});
+
+test("composeMessageSteps: image-only → paste + enter (no literal)", () => {
+  expect(composeMessageSteps("", ["/u/a.png"])).toEqual([
+    { kind: "paste", text: "/u/a.png" },
+    { kind: "enter" },
+  ]);
+});
+
+test("composeMessageSteps: image + caption → paste, space-prefixed caption, enter", () => {
+  expect(composeMessageSteps("what is this", ["/u/a.png"])).toEqual([
+    { kind: "paste", text: "/u/a.png" },
+    { kind: "literal", text: " what is this" }, // leading space separates from [Image #N]
+    { kind: "enter" },
+  ]);
+});
+
+test("composeMessageSteps: multiple images paste in order before the single terminal enter", () => {
+  const steps = composeMessageSteps("", ["/u/a.png", "/u/b.png"]);
+  expect(steps).toEqual([
+    { kind: "paste", text: "/u/a.png" },
+    { kind: "paste", text: "/u/b.png" },
+    { kind: "enter" },
+  ]);
+});
+
+test("composeMessageSteps: whitespace-only caption is dropped", () => {
+  expect(composeMessageSteps("   ", ["/u/a.png"])).toEqual([
+    { kind: "paste", text: "/u/a.png" },
+    { kind: "enter" },
+  ]);
+});
+
+// --- inputPending (submit-verification for image messages) ---------------------
+
+test("inputPending: true while the prompt still holds the unsent message", () => {
+  const cap = ["⏺ earlier reply", "❯ [Image #1] what color", "────", "  0/1000k (0%)"].join("\n");
+  expect(inputPending(cap)).toBe(true);
+});
+
+test("inputPending: false once the input cleared (last ❯ line empty)", () => {
+  // An earlier ❯ echo of the submitted message must NOT count — only the LAST ❯ line does.
+  const cap = ["❯ [Image #1] what color", "  ⎿ [Image #1]", "⏺ Purple.", "❯ ", "────"].join("\n");
+  expect(inputPending(cap)).toBe(false);
+});
+
+// --- readContextUsage (token usage for the status-bar readout) -----------------
+
+const txLine = (usage: object) =>
+  JSON.stringify({ type: "assistant", message: { role: "assistant", usage } });
+
+test("readContextUsage: sums input + cache_creation + cache_read of the LAST assistant turn", async () => {
+  const path = join(PATHS.dir, "usage-a.jsonl");
+  writeFileSync(
+    path,
+    [
+      txLine({ input_tokens: 10, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 }),
+      txLine({ input_tokens: 552, cache_creation_input_tokens: 365, cache_read_input_tokens: 177862 }),
+    ].join("\n") + "\n",
+  );
+  const u = await readContextUsage(path);
+  expect(u).toEqual({ tokens: 178779, size: 200_000, percent: 89 });
+});
+
+test("readContextUsage: infers the 1M window when usage exceeds 200k", async () => {
+  const path = join(PATHS.dir, "usage-b.jsonl");
+  writeFileSync(path, txLine({ input_tokens: 250_000, cache_read_input_tokens: 0 }) + "\n");
+  const u = await readContextUsage(path);
+  expect(u?.size).toBe(1_000_000);
+  expect(u?.percent).toBe(25);
+});
+
+test("readContextUsage: missing file / no usage → null", async () => {
+  expect(await readContextUsage(join(PATHS.dir, "nope.jsonl"))).toBeNull();
+  const empty = join(PATHS.dir, "usage-empty.jsonl");
+  writeFileSync(empty, JSON.stringify({ type: "user", message: { role: "user", content: "hi" } }) + "\n");
+  expect(await readContextUsage(empty)).toBeNull();
+});
+
+// --- rewind picker parsing (calibrated against live claude 2.1.x capture-pane) --
+
+const PICKER_STAGE1 = `
+  Rewind
+  Restore the code and/or conversation to the point before…
+    Reply with exactly the word: ALPHA
+    No code changes
+    Reply with exactly the word: BETA
+    No code changes
+  ❯ Reply with exactly the word: GAMMA
+    No code changes
+    (current)
+  Enter to continue · Esc to cancel`;
+
+const MENU_NO_CODE = `
+  Rewind
+  ❯ 1. Restore conversation
+    2. Summarize from here
+    3. Summarize up to here`;
+
+const MENU_WITH_CODE = `
+  Rewind
+  ❯ 1. Restore code and conversation
+    2. Restore conversation
+    3. Restore code
+    4. Summarize from here
+    5. Summarize up to here`;
+
+test("pickerCursorText: reads the selected (❯) checkpoint, ignoring the footer", () => {
+  expect(pickerCursorText(PICKER_STAGE1)).toBe("Reply with exactly the word: GAMMA");
+  expect(pickerCursorText("no picker here")).toBeNull();
+});
+
+test("cursorMatches: truncated cursor text is accepted as a prefix of the full message", () => {
+  expect(cursorMatches("Reply with exactly the word: GA…", "Reply with exactly the word: GAMMA")).toBe(true);
+  expect(cursorMatches("Reply with exactly the word: GAMMA", "Reply with exactly the word: GAMMA")).toBe(true);
+  expect(cursorMatches("Totally different", "Reply with exactly the word: GAMMA")).toBe(false);
+  expect(cursorMatches("ab", "abcdef")).toBe(false); // too short to trust
+});
+
+test("parseModeMenu: extracts numbered restore options", () => {
+  expect(parseModeMenu(MENU_WITH_CODE)).toEqual([
+    { num: 1, label: "Restore code and conversation" },
+    { num: 2, label: "Restore conversation" },
+    { num: 3, label: "Restore code" },
+    { num: 4, label: "Summarize from here" },
+    { num: 5, label: "Summarize up to here" },
+  ]);
+});
+
+test("modeDowns: maps a requested mode to Down-presses for both menu layouts", () => {
+  // no code changed → only conversation is offered (option 1)
+  expect(modeDowns(parseModeMenu(MENU_NO_CODE), "conversation")).toBe(0);
+  expect(modeDowns(parseModeMenu(MENU_NO_CODE), "both")).toBe(0); // falls back to conversation
+  // code changed → both=option1, conversation=option2
+  expect(modeDowns(parseModeMenu(MENU_WITH_CODE), "both")).toBe(0);
+  expect(modeDowns(parseModeMenu(MENU_WITH_CODE), "conversation")).toBe(1);
+  expect(modeDowns([], "conversation")).toBe(-1); // menu not found → caller aborts
 });
 
 // --- send/answer no-pane short-circuit (hermetic: never reaches tmux) ----------

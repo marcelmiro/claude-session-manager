@@ -3,22 +3,9 @@ import type { RepoGroup, DisplayRow, Session } from "../types";
 import { C, statusColor, statusDot } from "./colors";
 import { formatTimeAgo } from "../core/status";
 import { extractTicketId } from "../core/git";
+import { buildSessionLabel } from "../core/session-label";
 
-export { extractTicketId };
-
-/** Build a display label: ticket+name > ticket+suffix > name > branch */
-export function buildSessionLabel(session: Session): string {
-  const ticket = extractTicketId(session.branch);
-  const name = session.name;
-  if (ticket && name) return `${ticket} \u00b7 ${name}`;
-  if (ticket) {
-    let suffix = session.branch.includes("/") ? session.branch.split("/").pop()! : session.branch;
-    suffix = suffix.replace(new RegExp(`^${ticket}-?`, "i"), "");
-    return suffix ? `${ticket} \u00b7 ${suffix}` : ticket;
-  }
-  if (name) return name;
-  return session.branch;
-}
+export { extractTicketId, buildSessionLabel };
 
 /**
  * Converts RepoGroup array into a flat list of DisplayRow items.

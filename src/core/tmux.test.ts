@@ -7,9 +7,9 @@
 import { test, expect } from "bun:test";
 import { questionAnswerKeys } from "./tmux";
 
-test("single-select presses the option's 1-based digit (selects and submits)", () => {
-  expect(questionAnswerKeys(0)).toEqual(["1"]);
-  expect(questionAnswerKeys(2)).toEqual(["3"]);
+test("single-select presses the option's 1-based digit, then Enter to submit", () => {
+  expect(questionAnswerKeys(0)).toEqual(["1", "Enter"]);
+  expect(questionAnswerKeys(2)).toEqual(["3", "Enter"]);
 });
 
 test("multiSelect toggles each option's digit, then Right+Enter (Submit tab)", () => {

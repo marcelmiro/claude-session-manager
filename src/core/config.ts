@@ -9,6 +9,7 @@ export const PATHS = {
   dir: CSM_DIR,
   config: `${CSM_DIR}/config.json`,
   state: `${CSM_DIR}/state.json`,
+  uploads: `${CSM_DIR}/uploads`, // images uploaded from the mobile bridge, pasted into a pane
 } as const;
 
 const DEFAULT_CONFIG: CsmConfig = {

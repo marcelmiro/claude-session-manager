@@ -99,7 +99,7 @@ export interface SessionNotificationState {
 }
 
 export interface CsmState {
-  lastUpdatedBy: "tui" | "monitor";
+  lastUpdatedBy: "tui" | "monitor" | "bridge";
   lastUpdatedAt: number;
   sessions: Record<string, SessionNotificationState>;
 }
@@ -224,7 +224,10 @@ export type TranscriptBlock =
   | { type: "text"; text: string }
   | { type: "thinking"; text: string }
   | { type: "tool_use"; id: string; name: string; input: unknown }
-  | { type: "tool_result"; tool_use_id: string; content: unknown; is_error?: boolean };
+  | { type: "tool_result"; tool_use_id: string; content: unknown; is_error?: boolean }
+  // Byte-free marker only: the source's base64 image data is dropped at parse time so it
+  // never bloats the transcript payload — the UI just shows a "🖼 image" chip.
+  | { type: "image" };
 
 /**
  * One conversational turn. Field is `content` (NOT `blocks`) — the contract test

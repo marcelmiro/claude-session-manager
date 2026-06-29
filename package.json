@@ -9,7 +9,8 @@
     "start": "bun run src/index.ts",
     "dev": "bun --watch src/index.ts",
     "status": "bun run src/monitor.ts",
-    "test": "bun test"
+    "test": "bun test",
+    "shoot": "bun run scripts/shoot.ts"
   },
   "dependencies": {
     "blessed": "^0.1.81"
