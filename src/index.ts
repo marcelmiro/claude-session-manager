@@ -233,7 +233,9 @@ function handleRename() {
   const sessionSummary = session.summary;
   const sessionFirstPrompt = session.firstPrompt;
   const sessionLastPrompt = session.lastPrompt;
-  generateAIName(sessionFirstPrompt, sessionSummary, session.branch, sessionLastPrompt).then(async (name) => {
+  // 30s budget (vs the monitor's 15s) so a cold `claude -p` resolves in one attempt
+  // instead of being killed mid-rename and leaving the window blank.
+  generateAIName(sessionFirstPrompt, sessionSummary, session.branch, sessionLastPrompt, 30_000).then(async (name) => {
     // Reload-and-merge: capture any pin/name the monitor wrote while `claude -p` ran.
     // `r` un-pins so the fresh AI name takes over (or regenerates later if it failed).
     const fresh = await loadNameCache();
@@ -241,10 +243,9 @@ function handleRename() {
     if (name) {
       fresh.names[sessionId] = name;
       fresh.sources[sessionId] = sessionLastPrompt || sessionSummary || sessionFirstPrompt;
-    } else {
-      delete fresh.names[sessionId];
-      delete fresh.sources[sessionId];
     }
+    // On failure, keep whatever name was already there — a stale name beats a blank
+    // window, and the monitor retries naming in the background.
     nameCache = fresh;
     await saveNameCache(fresh);
     await refresh();

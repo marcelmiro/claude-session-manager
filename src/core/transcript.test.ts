@@ -67,7 +67,10 @@ test("a resolved tool surfaces as a tool_use/tool_result pair matched by tool_us
 
 test("AskUserQuestion tool_use.input surfaces as { questions: [...] } (plural, A4)", () => {
   const all = blocks(parseTranscript(askUserQuestion));
-  const ask = all.find((b) => b.type === "tool_use" && b.name === "AskUserQuestion");
+  const ask = all.find(
+    (b): b is Extract<TranscriptBlock, { type: "tool_use" }> =>
+      b.type === "tool_use" && b.name === "AskUserQuestion",
+  );
   const input = ask?.input as {
     questions: { question: string; header: string; multiSelect: boolean; options: { label: string; description: string }[] }[];
   };

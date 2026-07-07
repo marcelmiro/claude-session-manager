@@ -91,12 +91,26 @@ const REFUSAL_PREFIXES = [
   "i need permission", "i don't have", "i do not have", "i'm unable", "i am unable",
   "unable to", "this doesn't appear", "this does not appear", "i'd be happy",
   "i would be happy", "i need clarification", "i need more", "i'll need", "i cannot help",
+  // First-person / conversational openers — a real name is a terse noun/verb phrase
+  // ("Fix Auth"), never a sentence. Catches self-introductions the namer emits when
+  // the source is a non-coding task ("I'm Claude Code, designed for…").
+  "i'm", "i am", "i'll", "i'd", "i've", "as an", "as a", "let me", "here's",
+  "here is", "sure", "certainly", "of course", "hello", "hey", "well,", "actually",
+];
+
+// Substrings that only appear when the model answered conversationally, not as a name.
+const NOT_A_NAME_SUBSTRINGS = [
+  "claude code", "as an ai", "language model", "ai assistant", "i'm claude", "i am claude",
 ];
 
 /** True if the model output reads as a refusal/meta-reply rather than a session name. */
 export function looksLikeRefusal(text: string): boolean {
   const lower = text.trim().toLowerCase();
-  return REFUSAL_PREFIXES.some((p) => lower.startsWith(p));
+  if (REFUSAL_PREFIXES.some((p) => lower.startsWith(p))) return true;
+  if (NOT_A_NAME_SUBSTRINGS.some((s) => lower.includes(s))) return true;
+  // A name is 1-3 words with no sentence punctuation; a comma or >4 words is a ramble.
+  if (lower.includes(",") || lower.split(/\s+/).filter(Boolean).length > 4) return true;
+  return false;
 }
 
 /**
@@ -183,10 +197,13 @@ export function extractPlanTitle(prompt: string): string {
 }
 
 /**
- * AI-powered name generation using `claude -p`.
- * Returns kebab-case name or empty string on failure.
+ * AI-powered name generation using `claude -p`. Returns a normalized Title-Case name
+ * or empty string on failure/refusal. `timeoutMs` bounds the subprocess — keep it low
+ * (15s) for the background monitor so a hung `claude -p` can't stall its poll loop, but
+ * the interactive TUI rename passes a longer budget so a cold haiku start resolves in
+ * one attempt instead of being killed and leaving the window blank.
  */
-export async function generateAIName(firstPrompt: string, summary?: string, branch?: string, lastPrompt?: string): Promise<string> {
+export async function generateAIName(firstPrompt: string, summary?: string, branch?: string, lastPrompt?: string, timeoutMs = 15_000): Promise<string> {
   if (!firstPrompt && !summary && !lastPrompt) return "";
 
   try {
@@ -223,9 +240,9 @@ ${contextParts.join("\n")}`;
       // CLAUDECODE=1 ensures cc_entrypoint=cli billing (Max subscription).
       env: { ...process.env, TMUX: "", TMUX_PANE: "", CLAUDECODE: "1", CLAUDE_CODE_ENTRYPOINT: "cli" },
     });
-    // Kill subprocess after 15s to prevent hanging the monitor process
-    // (tmux #() only runs one instance — a hung claude -p blocks all future polls)
-    const killTimer = setTimeout(() => proc.kill(), 15_000);
+    // Kill the subprocess after `timeoutMs` so a hung `claude -p` can't stall the
+    // caller (the monitor's tmux #() runs one instance — a hang blocks all polls).
+    const killTimer = setTimeout(() => proc.kill(), timeoutMs);
     const result = await new Response(proc.stdout).text();
     clearTimeout(killTimer);
     await proc.exited;

@@ -83,6 +83,21 @@ test("looksLikeRefusal: rejects refusals/meta-replies, keeps real names", () => 
   expect(looksLikeRefusal("Provider Sync")).toBe(false);
 });
 
+test("looksLikeRefusal: rejects self-introductions the namer emits for non-coding tasks", () => {
+  // real garbage names observed in the wild
+  expect(looksLikeRefusal("I'm Claude Code, designed for")).toBe(true);
+  expect(looksLikeRefusal("I'm Claude Code, a")).toBe(true);
+  expect(looksLikeRefusal("I'm a set up for")).toBe(true);
+  expect(looksLikeRefusal("As an AI assistant I can")).toBe(true);
+});
+
+test("looksLikeRefusal: rejects rambles (comma or >4 words), keeps terse names", () => {
+  expect(looksLikeRefusal("Fix, then refactor")).toBe(true); // comma
+  expect(looksLikeRefusal("Update The Index And Types")).toBe(true); // 5 words
+  expect(looksLikeRefusal("Delete Dead Organizations")).toBe(false); // 3 words, real
+  expect(looksLikeRefusal("Add Tomba Provider")).toBe(false);
+});
+
 test("slugify: truncates to 24 chars with no trailing dash", () => {
   const out = slugify("Optimization Something Longer Words");
   expect(out.length).toBeLessThanOrEqual(24);
