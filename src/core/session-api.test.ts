@@ -25,10 +25,12 @@ import {
   buildSessionTranscript,
   slimTurns,
   composeMessageSteps,
+  buildSendPlan,
   inputPending,
   getTranscript,
   sendMessage,
   answerSessionQuestion,
+  interruptSession,
   readContextUsage,
   pickerCursorText,
   cursorMatches,
@@ -248,6 +250,58 @@ test("composeMessageSteps: whitespace-only caption is dropped", () => {
   ]);
 });
 
+// --- buildSendPlan (full tmux send sequence + draft-preserving guard) -----------
+// These lock down HOW we drive Claude Code's prompt over tmux: the keystroke ORDER
+// and, critically, that a Mac-side draft is cut (C-u, via the `stash` step) BEFORE our
+// message and yanked back (C-y, via `restore`) AFTER it — never combined into one turn,
+// and never touched when there's no draft to preserve.
+
+test("buildSendPlan: text-only, no draft → just the coalescing-safe text step", () => {
+  expect(buildSendPlan("hello", [], false)).toEqual([{ kind: "text", text: "hello" }]);
+});
+
+test("buildSendPlan: text-only WITH draft → stash, text, restore (in that order)", () => {
+  expect(buildSendPlan("hello", [], true)).toEqual([
+    { kind: "stash" }, // C-u: cut the Mac draft first so it can't ride along
+    { kind: "text", text: "hello" },
+    { kind: "restore" }, // C-y: put the draft back after our message submits
+  ]);
+});
+
+test("buildSendPlan: image-only, no draft → paste then verify-retry submit", () => {
+  expect(buildSendPlan("", ["/u/a.png"], false)).toEqual([
+    { kind: "paste", text: "/u/a.png" },
+    { kind: "submit" }, // composeMessageSteps' terminal `enter` becomes the retry submit
+  ]);
+});
+
+test("buildSendPlan: image + caption WITH draft → stash wraps paste/literal/submit, then restore", () => {
+  expect(buildSendPlan("what is this", ["/u/a.png"], true)).toEqual([
+    { kind: "stash" },
+    { kind: "paste", text: "/u/a.png" },
+    { kind: "literal", text: " what is this" },
+    { kind: "submit" },
+    { kind: "restore" },
+  ]);
+});
+
+test("buildSendPlan: draft guard is symmetric — stash is first iff restore is last", () => {
+  for (const [text, imgs] of [
+    ["hi", []],
+    ["", ["/u/a.png"]],
+    ["cap", ["/u/a.png", "/u/b.png"]],
+  ] as const) {
+    const withDraft = buildSendPlan(text, [...imgs], true);
+    const noDraft = buildSendPlan(text, [...imgs], false);
+    // present together or not at all
+    expect(withDraft[0]).toEqual({ kind: "stash" });
+    expect(withDraft[withDraft.length - 1]).toEqual({ kind: "restore" });
+    expect(noDraft.some((s) => s.kind === "stash" || s.kind === "restore")).toBe(false);
+    // the body between the guards is exactly the no-draft plan
+    expect(withDraft.slice(1, -1)).toEqual(noDraft);
+  }
+});
+
 // --- inputPending (submit-verification for image messages) ---------------------
 
 test("inputPending: true while the prompt still holds the unsent message", () => {
@@ -362,6 +416,11 @@ test("sendMessage: no pane mapping → no-pane, sends nothing", async () => {
 });
 
 test("answerSessionQuestion: no pane mapping → no-pane, sends nothing", async () => {
-  const r = await answerSessionQuestion("ghost-session", 0);
+  const r = await answerSessionQuestion("ghost-session", [0]);
+  expect(r).toEqual({ ok: false, reason: "no-pane" });
+});
+
+test("interruptSession: no pane mapping → no-pane, sends nothing", async () => {
+  const r = await interruptSession("ghost-session");
   expect(r).toEqual({ ok: false, reason: "no-pane" });
 });

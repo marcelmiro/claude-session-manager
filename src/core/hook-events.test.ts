@@ -176,3 +176,32 @@ test("pendingToolCall maps AskUserQuestion questions[0] → structured options",
   expect(call!.question!.options.map((o) => o.label)).toEqual(["Apple", "Banana", "Cherry"]);
   expect(call!.question!.toolUseId).toBe("toolu_017qQwTYpzg8d65MoEjqtPj8");
 });
+
+test("pendingToolCall parses ALL questions of a multi-question AskUserQuestion", () => {
+  const id = "sess-ask-multi";
+  writeLog(id, [
+    ev(
+      {
+        hook_event_name: "PreToolUse",
+        tool_name: "AskUserQuestion",
+        tool_use_id: "tu_multi",
+        tool_input: {
+          questions: [
+            { question: "Pick a fruit", header: "Fruit", multiSelect: false, options: [{ label: "Apple" }, { label: "Banana" }] },
+            { question: "Pick colors", header: "Color", multiSelect: true, options: [{ label: "Red" }, { label: "Green" }, { label: "Blue" }] },
+          ],
+        },
+      },
+      "x",
+    ),
+  ]);
+  const call = pendingToolCall(id);
+  expect(call?.questions).toBeDefined();
+  expect(call!.questions!.length).toBe(2);
+  // Singular `question` stays = questions[0] for the unchanged display consumers.
+  expect(call!.question).toEqual(call!.questions![0]);
+  expect(call!.questions![1]!.header).toBe("Color");
+  expect(call!.questions![1]!.multiSelect).toBe(true);
+  expect(call!.questions![1]!.options.map((o) => o.label)).toEqual(["Red", "Green", "Blue"]);
+  expect(call!.questions![1]!.toolUseId).toBe("tu_multi");
+});

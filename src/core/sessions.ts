@@ -10,7 +10,8 @@ import { findClaudeProcesses } from "./process";
 import { detectStatus, estimateContextPercent, type StatusResult } from "./status";
 import { getBaseRepoPath } from "./git";
 import { stripAllPrefixes, extractAIName } from "./notifications";
-import { processHookEvents, loadPaneSessions } from "./state";
+import { slugify } from "./names";
+import { processHookEvents, loadPaneSessions, savePaneSessions, reconcilePaneFiles } from "./state";
 import { eventSourcedStatus } from "./hook-events";
 import { nativeStatus } from "./session-state";
 
@@ -54,7 +55,14 @@ export function resolvePaneSessionId(
   cmdSessionId: string | undefined,
   cache: Map<string, string>,
   persisted: Record<string, string>,
+  isFork = false,
 ): string | undefined {
+  // A fork is the ONE case where the hook map is wrong: its SessionStart fires
+  // with the PARENT (resume-source) id, so cache/persisted alias the fork onto
+  // its parent (rendering the parent's running status/name). `cmdSessionId` for
+  // a fork is its REAL id, read from Claude's per-pid native file in
+  // findClaudeProcesses — trust it over the stale hook map.
+  if (isFork && cmdSessionId) return cmdSessionId;
   return cache.get(paneId) ?? persisted[paneId] ?? cmdSessionId;
 }
 
@@ -98,21 +106,25 @@ export async function discoverSessions(opts?: { skipArchivedSummaries?: boolean;
   }
 
   // Filter panes to those with a Claude process on their TTY
-  const claudePanesWithProc: Array<{ pane: PaneInfo; sessionId?: string }> = [];
+  const claudePanesWithProc: Array<{ pane: PaneInfo; sessionId?: string; isFork: boolean }> = [];
   for (const pane of panes) {
     const normalizedPaneTty = pane.tty.replace(/^\/dev\//, "");
     const proc = claudeTtyMap.get(normalizedPaneTty);
     if (proc) {
-      claudePanesWithProc.push({ pane, sessionId: proc.sessionId });
+      claudePanesWithProc.push({ pane, sessionId: proc.sessionId, isFork: proc.isFork });
     }
   }
 
   // Phase A: Build active sessions from Claude panes. Hook map (cache/persisted) wins over
   // the command-line --resume id so a /clear'd or /compact'd pane resolves to its CURRENT
-  // session, not the stale launch id (see resolvePaneSessionId).
-  const activeSessionPromises = claudePanesWithProc.map(({ pane, sessionId }) =>
-    buildActiveSession(pane, projectsDir, resolvePaneSessionId(pane.paneId, sessionId, paneSessionCache, persistedPaneMap)),
-  );
+  // session, not the stale launch id (see resolvePaneSessionId). A fork is the exception —
+  // its hook map is the parent id, so its native-resolved id wins; cache it so the wrong
+  // hook-written pane file gets overwritten on savePaneSessions and every reader self-heals.
+  const activeSessionPromises = claudePanesWithProc.map(({ pane, sessionId, isFork }) => {
+    const resolved = resolvePaneSessionId(pane.paneId, sessionId, paneSessionCache, persistedPaneMap, isFork);
+    if (isFork && resolved) paneSessionCache.set(pane.paneId, resolved);
+    return buildActiveSession(pane, projectsDir, resolved);
+  });
   const activeSessions = await Promise.all(activeSessionPromises);
 
   // Session-ID changes (/clear, /compact) come from the SessionStart hook — the
@@ -124,13 +136,20 @@ export async function discoverSessions(opts?: { skipArchivedSummaries?: boolean;
   const changedPaneIds = new Set<string>(hookChangedPanes);
 
   // Enrich active sessions that still couldn't resolve a session ID
-  await enrichUnmatchedSessions(activeSessions, projectsDir, opts?.nameMap);
+  await enrichUnmatchedSessions(activeSessions, projectsDir, persistedPaneMap, opts?.nameMap);
 
   // Clean stale cache entries for panes that no longer exist
   const activePaneIds = new Set(claudePanesWithProc.map(({ pane }) => pane.paneId));
   for (const paneId of paneSessionCache.keys()) {
     if (!activePaneIds.has(paneId)) paneSessionCache.delete(paneId);
   }
+
+  // Persist the resolved map to the hook-owned per-pane files so every discoverer (incl. the
+  // always-on bridge) keeps `resolveSessionPane` current — capturing window-name/mtime fallback
+  // resolutions the hook never wrote. Prune files for panes that have left tmux entirely (the
+  // full pane set, not just claude panes, so a transient miss can't drop a live mapping).
+  await savePaneSessions(exportPaneSessionCache());
+  await reconcilePaneFiles(new Set(panes.map((p) => p.paneId)));
 
   // Phase B: Discover archived sessions from index files
   const archivedSessions = await discoverArchivedSessions(projectsDir, activeSessions, opts?.skipArchivedSummaries);
@@ -154,6 +173,7 @@ export async function discoverSessions(opts?: { skipArchivedSummaries?: boolean;
 async function enrichUnmatchedSessions(
   sessions: Session[],
   projectsDir: string,
+  persistedPaneMap: Record<string, string>,
   nameMap?: Record<string, string>,
 ): Promise<void> {
   const unmatched = sessions.filter((s) => !s.id);
@@ -170,16 +190,19 @@ async function enrichUnmatchedSessions(
     panesPerWindow.set(wKey, (panesPerWindow.get(wKey) ?? 0) + 1);
   }
 
-  // Build reverse name lookup: windowName → sessionId
-  // (from CSM's name cache — names were set by AI naming in a previous cycle)
+  // Build reverse name lookup: windowSlug → sessionId. Window names carry the
+  // slug (what `extractAIName` pulls out), while the cache stores the normalized
+  // name — so key on `slugify(name)` for the round-trip to resolve.
   const reverseNameMap = new Map<string, string>();
   if (nameMap) {
     for (const [sessionId, name] of Object.entries(nameMap)) {
-      // If two sessions share a name, mark it as ambiguous (skip during matching)
-      if (reverseNameMap.has(name)) {
-        reverseNameMap.set(name, ""); // empty = ambiguous
+      const slug = slugify(name);
+      if (!slug) continue;
+      // If two sessions share a slug, mark it as ambiguous (skip during matching)
+      if (reverseNameMap.has(slug)) {
+        reverseNameMap.set(slug, ""); // empty = ambiguous
       } else {
-        reverseNameMap.set(name, sessionId);
+        reverseNameMap.set(slug, sessionId);
       }
     }
   }
@@ -336,7 +359,16 @@ async function enrichUnmatchedSessions(
       const stillUnmatched = repoSessions.filter((s) => !s.id);
       const unclaimed = candidates.filter((c) => !claimedIds.has(c.sessionId));
 
-      if (stillUnmatched.length === 1 && unclaimed.length >= 1) {
+      // Skip the mtime guess for a pane the hook ALREADY claimed: its persisted id was
+      // cleared by buildActiveSession only because that session's JSONL is gone (stale
+      // hook id, e.g. a fresh attached session before its first JSONL write). Overriding
+      // the hook with an unrelated most-recent JSONL mislabels a live, unresolvable pane
+      // with a DEAD session's identity — which then can't be archived from the phone and
+      // reappears every cycle. Leave it untracked (hidden) until its real id resolves.
+      const soleUnmatchedPane = stillUnmatched.length === 1 ? stillUnmatched[0].tmuxPane?.paneId : undefined;
+      const hookClaimedPane = !!(soleUnmatchedPane && persistedPaneMap[soleUnmatchedPane]);
+
+      if (stillUnmatched.length === 1 && unclaimed.length >= 1 && !hookClaimedPane) {
         const { sessionId, mtime } = unclaimed[0];
         const session = stillUnmatched[0];
 

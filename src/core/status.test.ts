@@ -17,7 +17,7 @@
  */
 
 import { test, expect } from "bun:test";
-import { detectStatus } from "./status";
+import { detectStatus, isPermissionPrompt } from "./status";
 import { fixture } from "../../test/helpers/fixture";
 
 test("scroll-up viewport is misread as ready (the bug Impl #2 migrates away from)", () => {
@@ -28,4 +28,29 @@ test("scroll-up viewport is misread as ready (the bug Impl #2 migrates away from
 test("non-scrolled running viewport is correctly read as running (control)", () => {
   const running = fixture("viewport/running.plain.txt");
   expect(detectStatus(running, true).status).toBe("running");
+});
+
+// isPermissionPrompt — gates surfacing an ATTACHED session's tool approval to the phone.
+test("detects an on-screen tool permission prompt", () => {
+  const prompt = fixture("viewport/permission-prompt.plain.txt");
+  expect(isPermissionPrompt(prompt)).toBe(true);
+});
+
+test("a running viewport is not a permission prompt (no false approve card)", () => {
+  const running = fixture("viewport/running.plain.txt");
+  expect(isPermissionPrompt(running)).toBe(false);
+});
+
+test("AskUserQuestion checkbox UI is excluded (it has its own answer path)", () => {
+  // The ☐ checkbox marker is the AskUserQuestion tell; Enter/Escape must not hijack it.
+  const question = "Do you want to proceed?\n ☐ Option A\n ☐ Option B\n ← ☐ → to select";
+  expect(isPermissionPrompt(question)).toBe(false);
+});
+
+test("stale 'do you want to' text in scrollback (not near the bottom) does not trigger", () => {
+  const scrollback =
+    "  Do you want to proceed?\n" +
+    Array.from({ length: 25 }, (_, i) => `  output line ${i}`).join("\n") +
+    "\n❯ ";
+  expect(isPermissionPrompt(scrollback)).toBe(false);
 });

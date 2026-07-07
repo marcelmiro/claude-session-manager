@@ -71,3 +71,27 @@ test("resolvePaneSessionId: fork/fresh pane (no command-line id, no hook entry) 
 test("resolvePaneSessionId: normal pane (hook == cmd) resolves unchanged — fix is a no-op", () => {
   expect(resolvePaneSessionId("%1", "s1", cache({ "%1": "s1" }), { "%1": "s1" })).toBe("s1");
 });
+
+// --- fork override — the fork/status-sync fix ------------------------------------
+// A fork's SessionStart hook fires with the PARENT id, so the hook map (cache AND
+// persisted) points the fork at its parent → it renders the parent's running status.
+// For a fork, cmdSessionId is the REAL id (from Claude's per-pid native file) and
+// must win over the poisoned hook map.
+
+test("resolvePaneSessionId: fork's native id wins over the parent id in cache/persisted", () => {
+  expect(
+    resolvePaneSessionId("%146", "fork-real", cache({ "%146": "parent" }), { "%146": "parent" }, true),
+  ).toBe("fork-real");
+});
+
+test("resolvePaneSessionId: fork with no native id yet falls back to the hook map (transient)", () => {
+  // Native file not written in the split second after boot — keep the hook value
+  // until nativeSessionIdByPid resolves; still better than nothing.
+  expect(resolvePaneSessionId("%146", undefined, cache({ "%146": "parent" }), {}, true)).toBe("parent");
+});
+
+test("resolvePaneSessionId: isFork=false leaves the hook-wins precedence intact (/clear path)", () => {
+  // The override is fork-scoped: a /clear'd pane (same process, new hook id) still
+  // trusts the hook map over the stale command-line id.
+  expect(resolvePaneSessionId("%651", "old", cache({ "%651": "new" }), {}, false)).toBe("new");
+});

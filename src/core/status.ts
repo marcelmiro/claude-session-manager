@@ -32,6 +32,31 @@ const QUESTION_UI_PATTERNS = [
   /←.*[☐✔].*→/,                 // Navigation bar with checkbox/checkmark controls
 ];
 
+// A tool PERMISSION prompt (Edit/Bash/etc.) — Claude's numbered Yes/No confirmation shown
+// before a tool runs. Answered by Enter (option 1 "Yes" is pre-selected) / Escape (deny),
+// unlike AskUserQuestion (index-nav over checkboxes). Used to surface ATTACHED approvals to
+// the bridge: the blocking PreToolUse hook exits neutral for attached sessions (so the
+// instant desk prompt shows) and never writes a pending file, so the live pane is the only
+// authoritative source that a decision is genuinely required.
+const PERMISSION_PROMPT_PATTERNS = [
+  /Do you want to /i,            // "Do you want to proceed? / make this edit?"
+  /Would you like to proceed/i,  // Plan-mode approval prompt
+  /^\s*❯?\s*1\.\s*Yes\b/m,       // The numbered "1. Yes" affirmative option
+];
+
+/**
+ * Whether a tool permission prompt is currently on-screen. Scoped to the bottom of the
+ * capture (where the prompt renders) so stale "do you want to…" text in scrollback can't
+ * trigger it, and excludes the AskUserQuestion checkbox UI (that has its own answer path).
+ * Callers gate this behind `status === "waiting"` — it's the second confirmation that the
+ * pane is blocked ON a permission decision, not the primary waiting/running classifier.
+ */
+export function isPermissionPrompt(capturedOutput: string): boolean {
+  const bottom = capturedOutput.split("\n").slice(-20).join("\n");
+  if (QUESTION_UI_PATTERNS.some((p) => p.test(bottom))) return false;
+  return PERMISSION_PROMPT_PATTERNS.some((p) => p.test(bottom));
+}
+
 const SEPARATOR_RE = /^[─━═─\-▪][─━═─\-\s▪]{3,}/;
 const TIP_RE = /^⎿\s+Tip:/;  // UI tip lines shown during running — skip like separators
 const TASK_RE = /^(?:⎿\s+)?[✔◼◻☐]\s/;  // Task list items (completed/in-progress/pending) — skip to reach spinner

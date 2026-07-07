@@ -66,6 +66,9 @@ export interface ClaudeProcess {
   tty: string;
   command: string;
   sessionId?: string;
+  /** Launched with `--fork-session`. Its `sessionId` (when set) is the fork's REAL
+   *  id read from Claude's per-pid native file, NOT the parent the hook records. */
+  isFork: boolean;
 }
 
 export type DisplayRow =
@@ -122,9 +125,12 @@ export interface TransitionEvent {
 // --- New Session Wizard types ---
 
 export interface WizardRepo {
-  name: string;           // last path component
-  path: string;           // absolute repo path
+  name: string;           // base repo name (last path component; worktrees inherit their base's name)
+  path: string;           // absolute repo/worktree path
   currentBranch: string;  // checked-out branch
+  isWorktree?: boolean;   // true = a linked worktree row nested under its base repo
+  isLastWorktree?: boolean; // true = last worktree child of its base (tree connector)
+  hasSession?: boolean;   // true = base repo has an active/recent session (sorts to top)
 }
 
 export interface WizardBranch {
@@ -236,6 +242,11 @@ export type TranscriptBlock =
 export interface TranscriptTurn {
   role: "user" | "assistant";
   content: TranscriptBlock[];
+  // Set on the post-compaction summary record (`isCompactSummary` in the JSONL). Claude
+  // Code writes the summary as a `user` turn whose content is the whole summary; this flag
+  // lets the UI render it as a "continued from compacted summary" divider instead of a giant
+  // user bubble, making it clear the branch originated from a compact.
+  compactSummary?: boolean;
 }
 
 /** A tool awaiting approval, surfaced from the blocking PreToolUse hook (Inc6). */

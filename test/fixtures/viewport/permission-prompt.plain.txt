@@ -1,0 +1,27 @@
+    68    }
+    69    return "";
+    70  }
+
+  Ran 1 shell command
+
+⏺ The name guard fixed the egregious cases. Running the full set.
+
+  Running 1 shell command…
+  ⎿  $ cd /Users/throxy/Documents/throxy; rm -f .plans/scrapes/_serp-enrich.checkpoint.jsonl; bun --env-file=.env packages/api/scripts/_ym-serp-enrich.ts 2>&1 | grep -vE "^\[|warn|info" &
+     echo "started full SERP enrichment …
+
+─────────────────────────────────────────────────────────────────────────────────────────────────────────
+ Bash command
+
+   cd /Users/throxy/Documents/throxy; bun --env-file=.env packages/api/scripts/_ym-serp-enrich.ts &
+   echo "started full SERP enrichment in background"
+   Run full SERP enrichment (1,571 rows)
+
+ This command uses the `&` background operator, which defers execution past approval-time safety checks.
+
+ Do you want to proceed?
+ ❯ 1. Yes
+   2. Yes, and always allow access to scrapes/ from this project
+   3. No
+
+ Esc to cancel · Tab to amend · ctrl+e to explain

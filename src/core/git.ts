@@ -69,26 +69,77 @@ async function inferBaseRepoFromSiblings(repoPath: string): Promise<string> {
 }
 
 /**
+ * List all worktrees for a repo via `git worktree list --porcelain`.
+ * Returns `{ path, branch }` for every working tree, main first (`branch` is the
+ * short name, or "detached"). Returns null when `basePath` isn't a git repo (e.g.
+ * a session running in a non-repo dir like ~) so the caller can skip it.
+ */
+async function listWorktrees(basePath: string): Promise<Array<{ path: string; branch: string }> | null> {
+  try {
+    const out = await Bun.$`git -C ${basePath} worktree list --porcelain`.quiet().text();
+    const entries: Array<{ path: string; branch: string }> = [];
+    let cur: { path?: string; branch?: string } = {};
+    for (const line of out.split("\n")) {
+      if (line.startsWith("worktree ")) {
+        if (cur.path) entries.push({ path: cur.path, branch: cur.branch || "detached" });
+        cur = { path: line.slice("worktree ".length) };
+      } else if (line.startsWith("branch refs/heads/")) {
+        cur.branch = line.slice("branch refs/heads/".length);
+      } else if (line === "detached") {
+        cur.branch = "detached";
+      }
+    }
+    if (cur.path) entries.push({ path: cur.path, branch: cur.branch || "detached" });
+    return entries.length ? entries : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Base-repo ordering: priority repos first (in configured order), then repos with an
+ * active session, then alphabetical. Shared so callers can insert extra entries (e.g.
+ * the bridge's "~" home row) into the same order.
+ */
+export function compareRepos(
+  a: { name: string; hasSession?: boolean },
+  b: { name: string; hasSession?: boolean },
+  priorityRepos: string[],
+): number {
+  const ap = priorityRepos.indexOf(a.name.toLowerCase());
+  const bp = priorityRepos.indexOf(b.name.toLowerCase());
+  if (ap !== -1 && bp !== -1) return ap - bp;
+  if (ap !== -1) return -1;
+  if (bp !== -1) return 1;
+  if (!!a.hasSession !== !!b.hasSession) return a.hasSession ? -1 : 1;
+  return a.name.localeCompare(b.name);
+}
+
+/**
  * Discover git repos from session display rows + configured paths.
- * Dedup by path, sort by priorityRepos then alphabetical.
+ * Returns a flat, display-ordered list: each base repo followed by its linked
+ * worktrees (nested rows). Order: priority repos first, then repos with active
+ * sessions, then alphabetical. Worktrees sort alphabetically under their base.
  */
 export async function discoverRepos(
   sessionRepos: Array<{ name: string; path: string }>,
   repoPaths: string[],
   priorityRepos: string[],
 ): Promise<WizardRepo[]> {
-  const seen = new Map<string, { name: string; path: string }>();
+  const bases = new Map<string, { name: string; path: string; hasSession: boolean }>();
 
-  // Add repos from current sessions, deduping worktrees to their base repo
+  // Base repos from current sessions (worktrees resolved to their base).
   for (const r of sessionRepos) {
     const basePath = baseRepoCache.get(r.path) ?? r.path;
-    if (!seen.has(basePath)) {
-      const baseName = basePath.split("/").filter(Boolean).pop() ?? r.name;
-      seen.set(basePath, { name: baseName, path: basePath });
-    }
+    const baseName = basePath.split("/").filter(Boolean).pop() ?? r.name;
+    const existing = bases.get(basePath);
+    if (existing) existing.hasSession = true;
+    else bases.set(basePath, { name: baseName, path: basePath, hasSession: true });
   }
 
-  // Scan configured repoPaths 1-level deep
+  // Scan configured repoPaths 1-level deep (these are always base repos: a real
+  // repo has a `.git/` dir, whereas a worktree's `.git` is a file — so scanning
+  // never picks up worktree dirs; those come from `git worktree list` below).
   for (let rp of repoPaths) {
     rp = rp.replace(/^~/, homedir());
     try {
@@ -96,8 +147,8 @@ export async function discoverRepos(
       for await (const entry of glob.scan({ cwd: rp, onlyFiles: false })) {
         const fullPath = `${rp}/${entry}`;
         const gitExists = await Bun.file(`${fullPath}/.git/HEAD`).exists();
-        if (gitExists && !seen.has(fullPath)) {
-          seen.set(fullPath, { name: entry, path: fullPath });
+        if (gitExists && !bases.has(fullPath)) {
+          bases.set(fullPath, { name: entry, path: fullPath, hasSession: false });
         }
       }
     } catch {
@@ -105,27 +156,30 @@ export async function discoverRepos(
     }
   }
 
-  // Get current branch for each repo
-  const repos: WizardRepo[] = [];
-  for (const { name, path } of seen.values()) {
-    let currentBranch = "main";
-    try {
-      currentBranch = (await Bun.$`git -C ${path} branch --show-current`.quiet().text()).trim() || "main";
-    } catch {
-      // detached HEAD or not a git repo
-    }
-    repos.push({ name, path, currentBranch });
-  }
+  // Order bases: priority first, then active-session repos, then alphabetical.
+  const ordered = [...bases.values()].sort((a, b) => compareRepos(a, b, priorityRepos));
 
-  // Sort: priority repos first, then alphabetical
-  repos.sort((a, b) => {
-    const ap = priorityRepos.indexOf(a.name.toLowerCase());
-    const bp = priorityRepos.indexOf(b.name.toLowerCase());
-    if (ap !== -1 && bp !== -1) return ap - bp;
-    if (ap !== -1) return -1;
-    if (bp !== -1) return 1;
-    return a.name.localeCompare(b.name);
-  });
+  // Flatten: each base repo followed by its worktrees (nested rows).
+  const repos: WizardRepo[] = [];
+  for (const base of ordered) {
+    const worktrees = await listWorktrees(base.path);
+    if (!worktrees) continue; // not a git repo (e.g. a session running in ~) — skip
+    const main = worktrees.find((w) => w.path === base.path) ?? worktrees[0];
+    const linked = worktrees
+      .filter((w) => w !== main)
+      .sort((a, b) => a.branch.localeCompare(b.branch));
+
+    repos.push({ name: base.name, path: base.path, currentBranch: main?.branch || "main", hasSession: base.hasSession });
+    linked.forEach((w, i) => {
+      repos.push({
+        name: base.name,
+        path: w.path,
+        currentBranch: w.branch,
+        isWorktree: true,
+        isLastWorktree: i === linked.length - 1,
+      });
+    });
+  }
 
   return repos;
 }

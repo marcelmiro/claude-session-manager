@@ -259,8 +259,10 @@ export async function sendKeysSequential(
  * arrow keys being dropped (the old `Down`×n navigation silently picked the first
  * option; verified live). Keys go out sequentially via `sendKeysSequential`.
  *
- * - single-select (`number`): press the option's digit (highlights it), then `Enter`
- *   to submit. The digit alone only moves the cursor — it does not auto-submit.
+ * - single-select (`number`): press the option's digit, then `Enter`. On current
+ *   Claude (2.1.x) the digit alone auto-submits, so the `Enter` is a harmless no-op
+ *   on the empty composer; it's kept as a fallback for older builds where the digit
+ *   only highlighted and `Enter` did the submitting.
  * - multiSelect (`number[]`): press each option's digit to toggle its checkbox,
  *   then `Right` (to the Submit tab) + `Enter`.
  *
@@ -269,18 +271,48 @@ export async function sendKeysSequential(
  */
 export async function answerQuestion(
   paneId: string,
-  selection: number | number[],
+  selections: (number | number[])[],
 ): Promise<void> {
-  await sendKeysSequential(paneId, questionAnswerKeys(selection));
+  await sendKeysSequential(paneId, answerKeys(selections));
+  // Recent Claude versions add a "Review your answers" confirmation on the Submit tab
+  // (❯ 1. Submit answers). The sequence above ends with an Enter that submits it — but
+  // on a busy pane that Enter can arrive before the review screen has painted and get
+  // dropped, leaving the answers selected but unconfirmed (the failure the bridge hit).
+  // Confirm from the live pane and re-press Enter only when the review is still showing.
+  if (await isAnswerReviewOpen(paneId)) await sendKey(paneId, "Enter");
+}
+
+/**
+ * Whether the AskUserQuestion "Review your answers" confirmation screen is still on-screen
+ * (its `❯ 1. Submit answers` / `Ready to submit your answers?` prompt). Scoped narrowly so
+ * it fires ONLY for an unconfirmed review — not for a mid-widget state — so the extra Enter
+ * can't mis-answer a question tab.
+ */
+async function isAnswerReviewOpen(paneId: string): Promise<boolean> {
+  await Bun.sleep(400); // let the review screen finish painting before we sample it
+  const bottom = (await capturePane(paneId)).split("\n").slice(-20).join("\n");
+  return /Ready to submit your answers\?|❯\s*1\.\s*Submit answers/.test(bottom);
+}
+
+/**
+ * Dispatch to the right keystroke model by question count (the two are different
+ * widgets — see `questionAnswerKeys` vs `multiQuestionKeys`). A single-question
+ * answer is a 1-element array; N>1 is the tabbed prompt.
+ */
+export function answerKeys(selections: (number | number[])[]): string[] {
+  return selections.length === 1
+    ? questionAnswerKeys(selections[0]!)
+    : multiQuestionKeys(selections);
 }
 
 /**
  * Pure key-sequence builder for `answerQuestion` (extracted for testability).
  * `selection` is 0-based; the emitted digit is 1-based to match the menu labels.
  *
- * - single-select (`number`): `[String(idx + 1), "Enter"]` — the digit highlights
- *   the option, `Enter` submits it. (The digit alone only moves the cursor; it does
- *   NOT auto-submit — verified live, cursor moved 1→2 but the answer never landed.)
+ * - single-select (`number`): `[String(idx + 1), "Enter"]` — on current Claude (2.1.x)
+ *   the digit auto-submits (verified live) so the `Enter` is a no-op on the empty
+ *   composer; kept as a fallback for older builds where the digit only highlighted and
+ *   `Enter` did the submitting.
  * - multiSelect (`number[]`): de-duped + ascending digits (toggle each), then
  *   `Right`+`Enter` (→ Submit tab, then submit).
  */
@@ -290,6 +322,48 @@ export function questionAnswerKeys(selection: number | number[]): string[] {
   }
   const sorted = [...new Set(selection)].sort((a, b) => a - b);
   return [...sorted.map((idx) => String(idx + 1)), "Right", "Enter"];
+}
+
+/** 1-based menu digits for one question's selection (single → [digit]; multi →
+ *  ascending de-duped digits; empty multi → []). Used per-question by `multiQuestionKeys`. */
+function selectionDigits(selection: number | number[]): string[] {
+  if (typeof selection === "number") return [String(selection + 1)];
+  return [...new Set(selection)].sort((a, b) => a - b).map((idx) => String(idx + 1));
+}
+
+/**
+ * Key sequence for a MULTI-question AskUserQuestion (N>1), which renders as
+ * Left/Right-navigable tabs ending in a Submit tab — a different widget from the
+ * single-question menu (hence a separate builder from `questionAnswerKeys`).
+ *
+ * `selections[i]` is question i's answer (0-based option indices): a `number` for
+ * single-select, a `number[]` for multi-select (may be empty — an unanswered
+ * multi-select is allowed to submit).
+ *
+ * Model (LIVE-VERIFIED on claude 2.1.x, 2026-07-01, two real prompts):
+ *   1. `Left` × N to clamp focus onto the first question tab. The prompt opens on
+ *      Q1, but relative arrows can't assume that; `Left` is a no-op at the leftmost
+ *      tab (verified — it does NOT wrap), so over-pressing is safe and N covers the
+ *      worst case (focus parked on the Submit tab, N tabs to the right of Q1).
+ *   2. For each question in order:
+ *      - single-select: press the option digit. This selects AND auto-advances to
+ *        the next tab (→ Submit after the last question) — so NO `Right` follows.
+ *      - multi-select: press the option digit(s) to toggle (no auto-advance), then
+ *        `Right` to step to the next tab. An empty multi-select emits just `Right`.
+ *   3. `Enter` on the Submit tab.
+ * A bare digit selects/toggles within a question (no per-question Enter — that is
+ * only the single-question menu's behaviour).
+ */
+export function multiQuestionKeys(selections: (number | number[])[]): string[] {
+  const keys: string[] = [];
+  for (let i = 0; i < selections.length; i++) keys.push("Left");
+  for (const selection of selections) {
+    keys.push(...selectionDigits(selection));
+    // Single-select auto-advances on the digit; multi-select (incl. empty) needs Right.
+    if (Array.isArray(selection)) keys.push("Right");
+  }
+  keys.push("Enter");
+  return keys;
 }
 
 /**

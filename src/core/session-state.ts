@@ -91,6 +91,33 @@ export async function loadNativeStatuses(
   return result;
 }
 
+/**
+ * The session id Claude currently owns for a given live PID, from its
+ * `<pid>.json` native file — or null when absent/malformed/non-interactive.
+ *
+ * This is the ONLY correct id for a `--fork-session` pane. A fork's SessionStart
+ * hook fires with the PARENT (resume-source) id — the fork's own id isn't minted
+ * yet and no second SessionStart follows — so CSM's hook-owned pane map is
+ * permanently wrong for forks, aliasing the fork onto its parent's status/name.
+ * The native file, keyed by the fork's own pid, carries the real id. No
+ * pid-liveness check: the caller passes the pid of a process it just saw in `ps`.
+ * Pure on `dir` for tests (points at Claude's home, not CSM's — see the note on
+ * `loadNativeStatuses`).
+ */
+export async function nativeSessionIdByPid(
+  pid: number,
+  dir: string = DEFAULT_DIR,
+): Promise<string | null> {
+  try {
+    const parsed = JSON.parse(await Bun.file(`${dir}/${pid}.json`).text());
+    if (parsed?.kind !== "interactive") return null;
+    const sessionId = parsed?.sessionId;
+    return typeof sessionId === "string" && sessionId ? sessionId : null;
+  } catch {
+    return null;
+  }
+}
+
 // Short module-level TTL cache keyed off the default dir so one refresh cycle's
 // per-pane lookups collapse into a single scan.
 const TTL_MS = 1000;

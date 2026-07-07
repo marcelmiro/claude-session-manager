@@ -39,12 +39,22 @@ interface RawBlock {
 const LOCAL_COMMAND_META =
   /^\s*<(?:local-command-caveat|local-command-stdout|command-name|command-message|command-args|command-contents)>/;
 
+/**
+ * Async-subagent completion reports. When a background `Agent`/Task finishes, Claude
+ * Code injects a `<task-notification>…</task-notification>` block as a `user` record and
+ * renders it as a system notification, NOT a user message. We drop it so a session that
+ * fans out to background agents doesn't read as the user posting walls of subagent output.
+ */
+const TASK_NOTIFICATION = /^\s*<task-notification>/;
+
 /** A parsed conversational record: the turn plus the tree links used to rebuild a branch. */
 interface RawRecord {
   type?: string;
   uuid?: string;
   parentUuid?: string | null;
   isSidechain?: boolean;
+  isMeta?: boolean;
+  isCompactSummary?: boolean;
   message?: { role?: string; content?: unknown };
 }
 
@@ -52,9 +62,14 @@ interface RawRecord {
  * Convert a conversational record (`type` of `user`/`assistant`) to a `TranscriptTurn`,
  * or null when it carries no visible content (pure local-command plumbing). A genuinely
  * empty turn (no blocks to begin with) is preserved as `{ content: [] }`.
+ *
+ * `isMeta` records (e.g. the `Base directory for this skill: …` injection a skill launch
+ * adds as a `user` turn) are hidden by the terminal; we drop them too so they don't show
+ * as user bubbles.
  */
 function recordToTurn(record: RawRecord): TranscriptTurn | null {
   if (record.type !== "user" && record.type !== "assistant") return null;
+  if (record.isMeta) return null;
   const content = record.message?.content;
 
   const blocks: TranscriptBlock[] =
@@ -65,9 +80,15 @@ function recordToTurn(record: RawRecord): TranscriptTurn | null {
         : [];
 
   const visible = blocks.filter(
-    (b) => !(b.type === "text" && LOCAL_COMMAND_META.test(b.text)),
+    (b) =>
+      !(b.type === "text" && (LOCAL_COMMAND_META.test(b.text) || TASK_NOTIFICATION.test(b.text))),
   );
   if (visible.length === 0 && blocks.length > 0) return null;
+
+  // The post-compaction summary is a `user` record carrying the entire summary as its text.
+  // Flag it so the UI labels it a "continued from compacted summary" divider rather than a
+  // giant user bubble — the branch literally originated from a compact here.
+  if (record.isCompactSummary) return { role: record.type, content: visible, compactSummary: true };
 
   return { role: record.type, content: visible };
 }

@@ -13,7 +13,7 @@
 
 import { Glob } from "bun";
 import { homedir } from "os";
-import { lastAssistantMessage, parseActiveBranch } from "./transcript";
+import { lastAssistantMessage, parseActiveBranch, parseTranscript } from "./transcript";
 import { pendingToolCall } from "./hook-events";
 import { loadPaneSessions } from "./state";
 import { findClaudeProcesses } from "./process";
@@ -29,6 +29,7 @@ import {
   sendBracketedPaste,
   killPane,
 } from "./tmux";
+import { isPermissionPrompt } from "./status";
 import type { PendingQuestion, PendingToolCall } from "./jsonl-reader";
 import type { TranscriptBlock, TranscriptTurn } from "../types";
 
@@ -36,8 +37,32 @@ export interface SessionTranscript {
   turns: TranscriptTurn[];
   lastAssistant?: string;
   pendingTool?: PendingToolCall;
+  /** First question of an open AskUserQuestion (single-question display path). */
   openQuestion?: PendingQuestion;
+  /** Every question of an open AskUserQuestion (drives the multi-question answer UI). */
+  openQuestions?: PendingQuestion[];
   usage?: ContextUsage;
+  /** Subagents this session fanned out to (sourced from the `subagents/` dir); omitted when none. */
+  subagents?: SubagentSummary[];
+  /**
+   * Opaque disk revision of the transcript file (`size:mtimeMs`) — bumps on ANY JSONL write
+   * (append OR rewind's new branch). The phone snapshots it at rewind time and clears its
+   * optimistic (truncated + prefilled) view once `rev` changes, i.e. once the resend lands.
+   */
+  rev?: string;
+}
+
+/**
+ * One `Agent`/`Task` subagent the phone can drill into. Sourced from the session's
+ * `subagents/agent-<agentId>.meta.json` + the agent's own jsonl. `spawnDepth` is present
+ * on only ~43% of agents (a cheap indent when we have it) — hence optional.
+ */
+export interface SubagentSummary {
+  agentId: string;
+  agentType: string;
+  description: string;
+  status: "done" | "running";
+  spawnDepth?: number;
 }
 
 /** Context-window usage for the mobile status-bar readout (mirrors the Mac statusline). */
@@ -78,7 +103,7 @@ export async function readPaneStatusline(paneId: string): Promise<PaneStatusline
 /** Outcome of a send; `reason` is set only on rejection (nothing was sent). */
 export type SendResult = {
   ok: boolean;
-  reason?: "no-pane" | "no-question" | "no-session" | "rewind-unavailable" | "rewind-mismatch" | "rewind-mode" | "bad-image";
+  reason?: "no-pane" | "no-question" | "no-prompt" | "no-session" | "rewind-unavailable" | "rewind-mismatch" | "rewind-mode" | "bad-image" | "bad-selection";
   /** Fresh session id, set by createSession once the new pane's SessionStart hook lands. */
   sessionId?: string;
 };
@@ -94,14 +119,28 @@ export type SendResult = {
  * heuristics that, during the boot window, can mis-map the not-yet-registered pane to
  * a recently-modified existing session (the mtime fallback in enrichUnmatchedSessions).
  */
+// Claude Code's one-time "Is this a project you trust?" gate for an untrusted
+// folder (`hasTrustDialogAccepted:false` in ~/.claude.json). It blocks boot and
+// suppresses the SessionStart hook, so the pane→session id never registers and the
+// launch silently hangs — most commonly for the `~` home dir. The caller explicitly
+// chose this folder, so we accept it: option 1 ("Yes, I trust this folder") is the
+// default cursor, so a single Enter confirms.
+const TRUST_PROMPT = "Is this a project you created or one you trust";
+
 export async function createSession(repoPath: string, name: string): Promise<SendResult> {
   const target = await getMainSession();
   if (!target) return { ok: false, reason: "no-session" };
   const paneId = await launchClaudeWindow(target, repoPath, name);
+  let trusted = false;
   for (let i = 0; i < 24; i++) {
     await Bun.sleep(500); // up to ~12s for claude to boot and fire SessionStart
     const sessionId = (await loadPaneSessions())[paneId];
     if (sessionId) return { ok: true, sessionId };
+    // Accept the trust gate once if it's showing; then keep polling for the id.
+    if (!trusted && (await capturePane(paneId)).includes(TRUST_PROMPT)) {
+      await sendKey(paneId, "Enter");
+      trusted = true;
+    }
   }
   return { ok: true }; // launched, but the id didn't register in time — list catches up via SSE
 }
@@ -259,6 +298,194 @@ export async function resolveTranscriptPath(sessionId: string): Promise<string |
   return null;
 }
 
+// ---------------------------------------------------------------------------
+// Subagents — drill-in conversations for `Agent`/`Task` fan-out. Read-only over the
+// `<sessionId>/subagents/` directory that sits beside the main transcript JSONL.
+// The directory is the only 100%-coverage source: Workflow-/nested-spawned agents
+// have no main-transcript chip, so we list from disk, never from the active branch.
+// ---------------------------------------------------------------------------
+
+/** The `subagents/` directory beside a session's transcript (`…/<id>.jsonl` → `…/<id>/subagents`). */
+export function subagentsDir(transcriptPath: string): string {
+  const base = transcriptPath.endsWith(".jsonl") ? transcriptPath.slice(0, -6) : transcriptPath;
+  return `${base}/subagents`;
+}
+
+// agentIds are hex filename stems today; the charset rejects `/`,`.`,`_` so a decoded
+// path segment can never traverse out of the subagents dir (the only `_`-bearing files,
+// `aside_question-*`, have no meta and are never listed).
+const AGENT_ID_RE = /^[a-z0-9-]+$/;
+
+/** Guard for a path-segment agentId — blocks traversal (`/`,`.`,`_`); see AGENT_ID_RE. */
+export function isValidAgentId(agentId: string): boolean {
+  return AGENT_ID_RE.test(agentId);
+}
+
+interface TailRecord {
+  type?: string;
+  message?: { content?: unknown };
+}
+
+const TAIL_START = 65536; // 64KB initial window
+const TAIL_CAP = 4 * 1024 * 1024; // 4MB ceiling — final records reach ~99KB; this is slack
+
+/**
+ * Backward chunked tail-read of a JSONL file: parse the complete records at its END
+ * without reading the whole thing. Starts at the last 64KB and doubles the window (up
+ * to 4MB) until ≥1 complete record is recovered — a subagent's final record can reach
+ * ~99KB, so a fixed window would truncate it and misclassify a done agent as running.
+ * When we didn't read from byte 0 the first line is a partial record (dropped); a
+ * half-written trailing line is skipped by the per-line try/parse. Returns [] on a
+ * missing/unreadable file or when the final record exceeds the 4MB cap.
+ */
+async function tailRecords(path: string): Promise<TailRecord[]> {
+  try {
+    const file = Bun.file(path);
+    const size = file.size;
+    if (!size) return [];
+    for (let window = TAIL_START; ; window *= 2) {
+      const start = Math.max(0, size - window);
+      const text = await file.slice(start, size).text();
+      const lines = text.split("\n");
+      if (start > 0) lines.shift(); // first line is a partial record — drop it
+      const records: TailRecord[] = [];
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        try {
+          records.push(JSON.parse(line) as TailRecord);
+        } catch {
+          // torn trailing fragment (file mid-write) — skip
+        }
+      }
+      if (records.length > 0 || start === 0 || window >= TAIL_CAP) return records;
+    }
+  } catch {
+    return []; // missing/unreadable
+  }
+}
+
+// A done agent's jsonl is terminal/immutable, so its (size, mtime) never changes again —
+// cache that verdict to bound re-reads to still-running agents. `running` is never cached
+// (the file is still growing).
+const subagentDoneCache = new Map<string, { size: number; mtimeMs: number }>();
+
+/**
+ * A subagent's status from its OWN jsonl — `done` iff the last conversational record is an
+ * `assistant` turn whose last content block is `text`; else `running`. Validated against
+ * ≈680 agents (0 false positives): this rescues the 22% of done agents whose `stop_reason`
+ * is `null`, while a running tail is always a `thinking`-only assistant turn or a
+ * `tool_result` user record (a tool-calling turn ends in `tool_use`, never `[…text]`). A
+ * killed agent that never wrote a terminal turn reads `running` (accepted in v1).
+ */
+export async function subagentStatus(jsonlPath: string): Promise<"done" | "running"> {
+  let stat: { size: number; mtimeMs: number } | null;
+  try {
+    stat = await Bun.file(jsonlPath).stat();
+  } catch {
+    return "running"; // missing/unreadable → not yet terminal
+  }
+  if (!stat) return "running";
+  const cached = subagentDoneCache.get(jsonlPath);
+  if (cached && cached.size === stat.size && cached.mtimeMs === stat.mtimeMs) return "done";
+
+  const records = await tailRecords(jsonlPath);
+  let last: TailRecord | undefined;
+  for (let i = records.length - 1; i >= 0; i--) {
+    const r = records[i];
+    if (r && (r.type === "user" || r.type === "assistant")) {
+      last = r;
+      break;
+    }
+  }
+  const content = last?.type === "assistant" ? last.message?.content : undefined;
+  const blocks = Array.isArray(content) ? (content as Array<{ type?: string }>) : [];
+  const done = blocks.length > 0 && blocks[blocks.length - 1]?.type === "text";
+  if (done) subagentDoneCache.set(jsonlPath, { size: stat.size, mtimeMs: stat.mtimeMs });
+  return done ? "done" : "running";
+}
+
+interface SubagentMeta {
+  agentType?: unknown;
+  description?: unknown;
+  spawnDepth?: unknown;
+}
+
+/**
+ * List a session's subagents from its `subagents/` directory: one entry per
+ * `agent-<id>.meta.json`, with `status` read from the agent's own jsonl. Sorted by
+ * `(spawnDepth ?? 1, description)` for a stable order. Never throws — a missing dir or
+ * unreadable meta yields [] / a skipped row.
+ */
+export async function listSubagents(transcriptPath: string): Promise<SubagentSummary[]> {
+  const dir = subagentsDir(transcriptPath);
+  const out: SubagentSummary[] = [];
+  try {
+    for await (const name of new Glob("agent-*.meta.json").scan({ cwd: dir })) {
+      const agentId = name.slice("agent-".length, -".meta.json".length);
+      if (!agentId) continue;
+      let meta: SubagentMeta;
+      try {
+        meta = JSON.parse(await Bun.file(`${dir}/${name}`).text()) as SubagentMeta;
+      } catch {
+        continue; // corrupt/unreadable meta — skip this row
+      }
+      const status = await subagentStatus(`${dir}/agent-${agentId}.jsonl`);
+      const summary: SubagentSummary = {
+        agentId,
+        agentType: typeof meta.agentType === "string" ? meta.agentType : "agent",
+        description: typeof meta.description === "string" ? meta.description : "",
+        status,
+      };
+      if (typeof meta.spawnDepth === "number") summary.spawnDepth = meta.spawnDepth;
+      out.push(summary);
+    }
+  } catch {
+    return []; // missing dir / scan failure
+  }
+  out.sort(
+    (a, b) => (a.spawnDepth ?? 1) - (b.spawnDepth ?? 1) || a.description.localeCompare(b.description),
+  );
+  return out;
+}
+
+// The opening user turn of a subagent is the (often huge) task brief; cap it so the
+// drill-in payload stays small — the body (the agent's actual work) is what matters.
+const OPENING_TURN_CAP = 2048;
+
+export function capOpeningTurn(turns: TranscriptTurn[]): void {
+  const first = turns[0];
+  if (!first || first.role !== "user") return;
+  first.content = first.content.map((b) =>
+    b.type === "text" && b.text.length > OPENING_TURN_CAP
+      ? { type: "text", text: `${b.text.slice(0, OPENING_TURN_CAP)}… (truncated)` }
+      : b,
+  );
+}
+
+/**
+ * A subagent's full conversation for the drill-in view: `slimTurns(parseTranscript(...))`
+ * over `subagents/agent-<agentId>.jsonl`. Linear parse (every subagent record is
+ * `isSidechain`, so `parseActiveBranch` falls back to linear anyway). Returns null on a
+ * bad agentId (traversal guard), an unresolvable session, or a missing/unreadable file.
+ */
+export async function getSubagentTranscript(
+  sessionId: string,
+  agentId: string,
+): Promise<SessionTranscript | null> {
+  if (!isValidAgentId(agentId)) return null;
+  const path = await resolveTranscriptPath(sessionId);
+  if (!path) return null;
+  let raw: string;
+  try {
+    raw = await Bun.file(`${subagentsDir(path)}/agent-${agentId}.jsonl`).text();
+  } catch {
+    return null; // missing/unreadable subagent jsonl
+  }
+  const turns = slimTurns(parseTranscript(raw));
+  capOpeningTurn(turns);
+  return { turns };
+}
+
 // The tool_use chip shows ONE truncated line (command / file_path / pattern). Ship only
 // that field, capped — not the full `input` (Write contents, Edit strings, long Bash
 // commands), which is never rendered and is ~half the payload.
@@ -313,6 +540,7 @@ export function buildSessionTranscript(
   if (lastAssistant !== undefined) result.lastAssistant = lastAssistant;
   if (pendingTool) result.pendingTool = pendingTool;
   if (pendingTool?.question) result.openQuestion = pendingTool.question;
+  if (pendingTool?.questions) result.openQuestions = pendingTool.questions;
   return result;
 }
 
@@ -353,8 +581,15 @@ export async function getTranscript(sessionId: string): Promise<SessionTranscrip
   const turns = path ? await readActiveBranchCached(path) : [];
   const result = buildSessionTranscript(slimTurns(turns), pendingToolCall(sessionId));
   if (path) {
+    // Reuse the size+mtime the cached read just stat()'d — no extra syscall (see branchCache).
+    const entry = branchCache.get(path);
+    if (entry) result.rev = `${entry.size}:${entry.mtimeMs}`;
     const usage = await readContextUsage(path);
     if (usage) result.usage = usage;
+    // Source subagents from the directory beside the transcript (already-resolved path —
+    // no second glob). Omitted entirely when the session fanned out to none.
+    const subagents = await listSubagents(path);
+    if (subagents.length > 0) result.subagents = subagents;
   }
   return result;
 }
@@ -461,13 +696,33 @@ export async function resolveSessionPane(sessionId: string): Promise<string | nu
 /**
  * Archive a session from the phone: kill its live tmux pane (ending the Claude
  * process and closing the window), mirroring the TUI's `x` action. The conversation
- * JSONL is untouched, so the session stays resumable from the Mac (`claude -r`). With
- * no live pane it's already gone — treat that as success (idempotent).
+ * JSONL is untouched, so the session stays resumable from the Mac (`claude -r`).
+ *
+ * Fails on no-pane (not silently idempotent): a session that shows as active but whose
+ * pane can't be resolved is a discovery mismatch, not a done deal — swallowing it as
+ * success made the row look archived while it kept reappearing. Surface it so the phone
+ * flashes the failure instead of pretending it worked.
  */
 export async function archiveSession(sessionId: string): Promise<SendResult> {
   const paneId = await resolveSessionPane(sessionId);
-  if (!paneId) return { ok: true }; // no live pane → already archived
+  if (!paneId) return { ok: false, reason: "no-pane" };
   await killPane(paneId);
+  return { ok: true };
+}
+
+/**
+ * Interrupt a running turn by sending `Escape` to the pane — the TUI's own stop key
+ * (also used by `rewindByPane`). Fails on no-pane (like `sendMessage`/`answerSessionQuestion`,
+ * not idempotent like `archiveSession`): this is a send-keys-to-a-live-pane op.
+ *
+ * Note: an interrupt fires NO `Stop` hook, so the event-sourced status latches at
+ * "running". Claude's native status file (`nativeStatus`, the primary source) de-latches
+ * it to "ready" ~1.5s later; the bridge's `/interrupt` route pushes that flip via SSE.
+ */
+export async function interruptSession(sessionId: string): Promise<SendResult> {
+  const paneId = await resolveSessionPane(sessionId);
+  if (!paneId) return { ok: false, reason: "no-pane" };
+  await sendKey(paneId, "Escape");
   return { ok: true };
 }
 
@@ -497,16 +752,100 @@ export function composeMessageSteps(text: string, imagePaths: string[] = []): Me
   return steps;
 }
 
+/** One step in the full send plan — the message steps plus the draft stash/restore guard. */
+export type SendStep =
+  | { kind: "stash" } // cut a Mac-side draft into Claude's kill-ring (C-u) before sending
+  | { kind: "text"; text: string } // text-only: the proven coalescing-safe literal+Enter
+  | { kind: "paste"; text: string } // bracketed-paste an image path → [Image #N]
+  | { kind: "literal"; text: string } // type caption text literally
+  | { kind: "submit" } // verify-retry Enter after image paste(s)
+  | { kind: "restore" }; // after the prompt clears, paste the stashed draft back (C-y)
+
+/**
+ * Pure builder for the complete tmux interaction of a send (extracted for testability,
+ * mirroring `composeMessageSteps` / `questionAnswerKeys`). This is where the keystroke
+ * ORDER and the draft-guard GATING live — the part worth locking down — leaving
+ * `runSendStep` a thin map from step → tmux call.
+ *
+ * Body: text-only stays the single coalescing-safe `text` step (NOT the image submit-loop,
+ * whose paste-ingestion retry is unnecessary for plain text and would change proven
+ * behavior). With images, `composeMessageSteps`' paste/literal steps pass through and its
+ * terminal `enter` becomes the verify-retry `submit`.
+ *
+ * Draft guard: the Mac may be attached with a half-typed draft in the prompt. A bare send
+ * types our message onto the END of that draft and submits BOTH as one turn. So when a
+ * draft is present we wrap the body in `stash` (cut the draft into Claude's kill-ring with
+ * C-u) … `restore` (once our message clears the prompt, yank the draft back with C-y) —
+ * leaving it waiting, unsubmitted, for when the user returns to the Mac. Gated on a real
+ * draft so we never yank stale kill-ring content into an otherwise-empty prompt.
+ */
+export function buildSendPlan(
+  text: string,
+  imagePaths: string[],
+  hadDraft: boolean,
+): SendStep[] {
+  const body: SendStep[] =
+    imagePaths.length === 0
+      ? [{ kind: "text", text }]
+      : composeMessageSteps(text, imagePaths).map((s): SendStep =>
+          s.kind === "enter" ? { kind: "submit" } : s,
+        );
+  return [
+    ...(hadDraft ? [{ kind: "stash" } as const] : []),
+    ...body,
+    ...(hadDraft ? [{ kind: "restore" } as const] : []),
+  ];
+}
+
+/** Execute one `SendStep` against the pane — the thin, effectful tmux wrapper. */
+async function runSendStep(paneId: string, step: SendStep): Promise<void> {
+  switch (step.kind) {
+    case "stash":
+      await sendKey(paneId, "C-u"); // Claude's kill-line: clears the input, holds it for C-y
+      await Bun.sleep(KEY_GAP);
+      return;
+    case "text":
+      await sendTextAndEnter(paneId, step.text);
+      return;
+    case "paste":
+      await sendBracketedPaste(paneId, step.text);
+      await Bun.sleep(KEY_GAP);
+      return;
+    case "literal":
+      await sendLiteral(paneId, step.text);
+      await Bun.sleep(KEY_GAP);
+      return;
+    case "submit":
+      // The Enter after an image paste is dropped if the TUI is still ingesting the pasted
+      // image (base64-embedded at paste time) — reliably so on a session's first message
+      // right after boot. Settle, press Enter, confirm the input cleared; resend if pending.
+      await Bun.sleep(KEY_GAP);
+      for (let i = 0; i < 4; i++) {
+        await sendKey(paneId, "Enter");
+        await Bun.sleep(450);
+        if (!inputPending(await capturePane(paneId))) break;
+      }
+      return;
+    case "restore":
+      // Yank ONLY after our message clears the prompt — a premature C-y would paste the
+      // draft into the not-yet-submitted input and ride along with our message.
+      for (let i = 0; i < 8; i++) {
+        if (!inputPending(await capturePane(paneId))) break;
+        await Bun.sleep(KEY_GAP);
+      }
+      await sendKey(paneId, "C-y"); // Claude's yank: re-adds the draft cut by the stash C-u
+      return;
+  }
+}
+
 /**
  * Send a message (optional images + optional text) to a session's pane — TUI parity: the
  * TUI sends keys unconditionally, so the bridge does too (Claude Code queues input while
  * running, accepts it at the prompt). The ONLY gate is a live pane. Blocked-on-question/
  * permission states are steered to the structured answer/approval UI client-side.
  *
- * Text-only keeps the proven single `sendTextAndEnter` helper (and its paste-coalescing
- * fix). With images, each path is bracketed-pasted (→ `[Image #N]`) and steps are spaced
- * by `KEY_GAP` so each paste registers and the terminal Enter submits rather than being
- * absorbed as a paste newline (validated live).
+ * Thin executor over `buildSendPlan` (where the ordering + draft-guard logic is tested):
+ * resolve the pane, snapshot whether a draft is present, then run each planned step.
  */
 export async function sendMessage(
   sessionId: string,
@@ -515,29 +854,9 @@ export async function sendMessage(
 ): Promise<SendResult> {
   const paneId = await resolveSessionPane(sessionId);
   if (!paneId) return { ok: false, reason: "no-pane" };
-  if (imagePaths.length === 0) {
-    await sendTextAndEnter(paneId, text);
-    return { ok: true };
-  }
-  for (const step of composeMessageSteps(text, imagePaths)) {
-    if (step.kind === "paste") {
-      await sendBracketedPaste(paneId, step.text);
-      await Bun.sleep(KEY_GAP);
-    } else if (step.kind === "literal") {
-      await sendLiteral(paneId, step.text);
-      await Bun.sleep(KEY_GAP);
-    } else {
-      // Submit with verify-retry: the Enter after an image paste is dropped if the TUI is
-      // still ingesting the pasted image (the file is base64-embedded at paste time) —
-      // reliably so on the session's first message right after boot. Settle, press Enter,
-      // and confirm the input cleared; resend if the caption/[Image] is still pending.
-      await Bun.sleep(KEY_GAP);
-      for (let i = 0; i < 4; i++) {
-        await sendKey(paneId, "Enter");
-        await Bun.sleep(450);
-        if (!inputPending(await capturePane(paneId))) break;
-      }
-    }
+  const hadDraft = inputPending(await capturePane(paneId));
+  for (const step of buildSendPlan(text, imagePaths, hadDraft)) {
+    await runSendStep(paneId, step);
   }
   return { ok: true };
 }
@@ -565,11 +884,36 @@ export function inputPending(capture: string): boolean {
  */
 export async function answerSessionQuestion(
   sessionId: string,
-  selection: number | number[],
+  selections: (number | number[])[],
 ): Promise<SendResult> {
   const paneId = await resolveSessionPane(sessionId);
   if (!paneId) return { ok: false, reason: "no-pane" };
-  if (!hasOpenQuestion(pendingToolCall(sessionId))) return { ok: false, reason: "no-question" };
-  await answerQuestion(paneId, selection);
+  const pending = pendingToolCall(sessionId);
+  if (!hasOpenQuestion(pending)) return { ok: false, reason: "no-question" };
+  // One selection per question — a length mismatch means the client is out of sync
+  // with the live prompt; reject before sending any keystroke to a wrong tab.
+  const count = pending!.questions?.length ?? 1;
+  if (selections.length !== count) return { ok: false, reason: "bad-selection" };
+  await answerQuestion(paneId, selections);
+  return { ok: true };
+}
+
+/**
+ * Approve/deny an ATTACHED session's on-screen tool permission prompt by driving the pane
+ * directly — the detached decision-file channel doesn't exist for attached sessions (the
+ * PreToolUse hook exits neutral so the instant desk prompt shows). Mirrors the TUI's own
+ * handling: allow presses Enter (option 1 "Yes" is pre-selected), deny presses Escape.
+ * Guards on the prompt still being up so a resolved/absent prompt no-ops instead of
+ * injecting a stray key into the composer (the caller routes here only when no file-pending
+ * approval exists, so a race where the desk already answered lands on `no-prompt`).
+ */
+export async function decideAttachedApproval(
+  sessionId: string,
+  decision: "allow" | "deny",
+): Promise<SendResult> {
+  const paneId = await resolveSessionPane(sessionId);
+  if (!paneId) return { ok: false, reason: "no-pane" };
+  if (!isPermissionPrompt(await capturePane(paneId))) return { ok: false, reason: "no-prompt" };
+  await sendKey(paneId, decision === "allow" ? "Enter" : "Escape");
   return { ok: true };
 }

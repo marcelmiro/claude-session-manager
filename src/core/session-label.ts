@@ -1,10 +1,54 @@
 import { extractTicketId } from "./git";
 import type { Session } from "../types";
 
-/** Build a display label: ticket+name > ticket+suffix > name > branch */
-export function buildSessionLabel(session: Session): string {
+/**
+ * Given a set of {id, name}, return a map id→display name where any name shared
+ * by more than one item is disambiguated with a ` 2`/` 3`… suffix. Ordering within
+ * a colliding group is by `id` ascending — deterministic and independent of caller
+ * iteration order or session status, so the same session gets the same suffix on
+ * every surface (TUI list, tmux window, phone). Empty names are never suffixed.
+ */
+export function disambiguateNames(items: Array<{ id: string; name: string }>): Map<string, string> {
+  const out = new Map<string, string>();
+  for (const { id, name } of items) out.set(id, name); // default: identity
+  // Group ids by name, deduping repeated ids — the same session can appear on
+  // multiple panes; that is NOT a name collision and must not earn a suffix.
+  const byName = new Map<string, string[]>(); // name → distinct sessionIds
+  const seenPerName = new Map<string, Set<string>>();
+  for (const { id, name } of items) {
+    if (!name) continue;
+    let seen = seenPerName.get(name);
+    if (!seen) { seen = new Set(); seenPerName.set(name, seen); byName.set(name, []); }
+    if (seen.has(id)) continue;
+    seen.add(id);
+    byName.get(name)!.push(id);
+  }
+  // Reserve every base name FIRST so a ` N` suffix can't collide with a name that
+  // already exists literally (e.g. an AI name that happens to be "Foo 2").
+  const used = new Set(byName.keys());
+  for (const [name, ids] of byName) {
+    if (ids.length < 2) continue;
+    const ordered = [...ids].sort(); // lowest id keeps the base name
+    for (let i = 1; i < ordered.length; i++) {
+      let n = 2;
+      while (used.has(`${name} ${n}`)) n++;
+      const candidate = `${name} ${n}`;
+      used.add(candidate);
+      out.set(ordered[i], candidate);
+    }
+  }
+  return out;
+}
+
+/**
+ * Build a display label: ticket+name > ticket+suffix > name > branch.
+ * `nameOverride` (e.g. a disambiguated name) replaces `session.name` when provided;
+ * callers must NOT mutate `session.name` since it feeds drift-source comparison,
+ * wizard prefill, and the preview pane.
+ */
+export function buildSessionLabel(session: Session, nameOverride?: string): string {
   const ticket = extractTicketId(session.branch);
-  const name = session.name;
+  const name = nameOverride ?? session.name;
   if (ticket && name) return `${ticket} · ${name}`;
   if (ticket) {
     let suffix = session.branch.includes("/") ? session.branch.split("/").pop()! : session.branch;

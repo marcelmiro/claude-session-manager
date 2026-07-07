@@ -1,4 +1,5 @@
 import type { ClaudeProcess } from "../types.ts";
+import { nativeSessionIdByPid } from "./session-state";
 
 /**
  * Session id from a claude process command line, or undefined.
@@ -7,8 +8,10 @@ import type { ClaudeProcess } from "../types.ts";
  * only the source it copied from. Using it would alias the fork onto its parent:
  * both panes resolve to one session id, read one event log, and render the same
  * status (the symptom: a running parent makes a `ready` fork show running too).
- * For a fork we return undefined and let the SessionStart hook supply the fork's
- * real id (falling back to the pane scraper until it does).
+ * So we return undefined here. The fork's real id can't come from the SessionStart
+ * hook either — that fires with the PARENT id (the fork's own id isn't minted yet),
+ * so the hook-owned pane map is permanently wrong for forks. `findClaudeProcesses`
+ * instead recovers it from Claude's per-pid native file (`nativeSessionIdByPid`).
  */
 export function sessionIdFromCommand(command: string): string | undefined {
   if (/--fork-session\b/.test(command)) return undefined;
@@ -65,12 +68,17 @@ export async function findClaudeProcesses(): Promise<ClaudeProcess[]> {
 
       // Extract session ID from --resume/-r (fast, no lsof needed); a fork's
       // --resume points at its PARENT, so sessionIdFromCommand suppresses it.
-      results.push({
-        pid: parseInt(pidStr, 10),
-        tty,
-        command,
-        sessionId: sessionIdFromCommand(command),
-      });
+      // For a fork, recover the REAL id from Claude's per-pid native file — the
+      // hook only ever records the parent id (see nativeSessionIdByPid). This
+      // also lets claudeTtyMap prefer the real `claude` binary over its `zsh -c`
+      // wrapper (both carry `--fork-session`, but only the binary has a native
+      // file), since it's the process that now has a resolved sessionId.
+      const pid = parseInt(pidStr, 10);
+      const isFork = /--fork-session\b/.test(command);
+      const sessionId = isFork
+        ? ((await nativeSessionIdByPid(pid)) ?? undefined)
+        : sessionIdFromCommand(command);
+      results.push({ pid, tty, command, sessionId, isFork });
     }
 
     return results;

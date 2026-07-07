@@ -10,7 +10,7 @@ import { test, expect, beforeEach, afterEach } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadNativeStatuses } from "./session-state";
+import { loadNativeStatuses, nativeSessionIdByPid } from "./session-state";
 
 let dir: string;
 
@@ -78,4 +78,27 @@ test("malformed JSON does not throw and does not poison other entries", async ()
 test("missing dir returns empty map without throwing", async () => {
   const map = await loadNativeStatuses(join(dir, "does-not-exist"));
   expect(map.size).toBe(0);
+});
+
+// --- nativeSessionIdByPid — the fork's REAL id, keyed by pid ---------------------
+// A --fork-session pane's SessionStart hook records the PARENT id; the fork's own
+// id lives only in Claude's per-pid native file. This is how CSM recovers it.
+
+test("nativeSessionIdByPid returns the id from the pid's native file", async () => {
+  writeFile("12461.json", { ...base, pid: 12461, sessionId: "fork-real-id", status: "idle" });
+  expect(await nativeSessionIdByPid(12461, dir)).toBe("fork-real-id");
+});
+
+test("nativeSessionIdByPid: missing file → null (fork's native file not written yet)", async () => {
+  expect(await nativeSessionIdByPid(99999, dir)).toBeNull();
+});
+
+test("nativeSessionIdByPid: non-interactive kind → null", async () => {
+  writeFile("500.json", { ...base, pid: 500, sessionId: "headless", kind: "print", status: "busy" });
+  expect(await nativeSessionIdByPid(500, dir)).toBeNull();
+});
+
+test("nativeSessionIdByPid: malformed file → null without throwing", async () => {
+  writeFileSync(join(dir, "501.json"), "{ not json");
+  expect(await nativeSessionIdByPid(501, dir)).toBeNull();
 });

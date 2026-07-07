@@ -226,6 +226,21 @@ export interface PendingQuestion {
   toolUseId: string;
 }
 
+/** Map one raw `AskUserQuestion` question object into a `PendingQuestion`. */
+export function toPendingQuestion(raw: any, toolUseId: string): PendingQuestion {
+  return {
+    question: raw?.question || "",
+    header: raw?.header || "",
+    options: (raw?.options || []).map((o: any) => ({
+      label: o.label || "",
+      description: o.description,
+      preview: o.preview,
+    })),
+    multiSelect: raw?.multiSelect || false,
+    toolUseId,
+  };
+}
+
 export interface PendingToolCall {
   name: string;
   toolUseId: string;
@@ -243,8 +258,10 @@ export interface PendingToolCall {
   content?: string;
   /** Glob/Grep: search pattern */
   pattern?: string;
-  /** AskUserQuestion: full question data */
+  /** AskUserQuestion: the first question (display consumers — preview, status bar). */
   question?: PendingQuestion;
+  /** AskUserQuestion: every question in the prompt (a prompt may carry several). */
+  questions?: PendingQuestion[];
 }
 
 /**
@@ -296,18 +313,11 @@ export async function readPendingToolCall(sessionPath: string): Promise<PendingT
                 } else if (block.name === "Write") {
                   if (typeof input.content === "string") call.content = input.content.slice(0, 500);
                 } else if (block.name === "AskUserQuestion" && input.questions?.[0]) {
-                  const q = input.questions[0];
-                  call.question = {
-                    question: q.question || "",
-                    header: q.header || "",
-                    options: (q.options || []).map((o: any) => ({
-                      label: o.label || "",
-                      description: o.description,
-                      preview: o.preview,
-                    })),
-                    multiSelect: q.multiSelect || false,
-                    toolUseId: block.id,
-                  };
+                  const questions = input.questions.map((q: any) =>
+                    toPendingQuestion(q, block.id),
+                  );
+                  call.questions = questions;
+                  call.question = questions[0];
                 }
               }
 

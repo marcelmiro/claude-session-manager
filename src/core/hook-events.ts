@@ -18,6 +18,7 @@ import { PATHS } from "./config";
 import { deriveStatus } from "./event-status";
 import { parseTranscript } from "./transcript";
 import type { PendingToolCall } from "./jsonl-reader";
+import { toPendingQuestion } from "./jsonl-reader";
 import type { HookEvent, TranscriptTurn } from "../types";
 import type { SessionStatus } from "./status";
 
@@ -123,14 +124,9 @@ export function pendingToolCall(sessionId: string): PendingToolCall | null {
   } else if (pre.tool_name === "Write") {
     if (typeof input.content === "string") call.content = input.content.slice(0, 500);
   } else if (pre.tool_name === "AskUserQuestion" && input.questions?.[0]) {
-    const q = input.questions[0];
-    call.question = {
-      question: q.question || "",
-      header: q.header || "",
-      options: (q.options || []).map((o: any) => ({ label: o.label || "", description: o.description, preview: o.preview })),
-      multiSelect: q.multiSelect || false,
-      toolUseId,
-    };
+    const questions = input.questions.map((q: any) => toPendingQuestion(q, toolUseId));
+    call.questions = questions;
+    call.question = questions[0];
   }
   return call;
 }

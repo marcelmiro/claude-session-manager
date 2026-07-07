@@ -118,6 +118,45 @@ test("drops slash-command runner records (/compact, /clear) as plumbing", () => 
   expect(lastAssistantMessage(turns)).toBe("Compacted.");
 });
 
+test("drops isMeta user records (e.g. skill base-directory injection)", () => {
+  const raw = [
+    '{"type":"user","isMeta":true,"message":{"role":"user","content":"Base directory for this skill: /x\\n\\n# Skill"}}',
+    '{"type":"user","message":{"role":"user","content":"real prompt"}}',
+    '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"ok"}]}}',
+  ].join("\n");
+  const turns = parseTranscript(raw);
+  expect(turns.map((t) => t.role)).toEqual(["user", "assistant"]);
+  expect(JSON.stringify(turns)).not.toContain("Base directory");
+});
+
+test("drops async-subagent <task-notification> user records", () => {
+  const raw = [
+    '{"type":"user","message":{"role":"user","content":"go"}}',
+    '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"launching"}]}}',
+    '{"type":"user","message":{"role":"user","content":"<task-notification>\\n<status>completed</status>\\n</task-notification>"}}',
+  ].join("\n");
+  const turns = parseTranscript(raw);
+  expect(turns.map((t) => t.role)).toEqual(["user", "assistant"]);
+  expect(JSON.stringify(turns)).not.toContain("task-notification");
+});
+
+test("flags the post-compaction summary record (isCompactSummary) keeping its text", () => {
+  const raw = [
+    '{"type":"user","message":{"role":"user","content":"earlier prompt"}}',
+    '{"type":"user","isCompactSummary":true,"isVisibleInTranscriptOnly":true,"message":{"role":"user","content":"This session is being continued from a previous conversation...\\n\\nSummary: did X."}}',
+    '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"continuing"}]}}',
+  ].join("\n");
+  const turns = parseTranscript(raw);
+  expect(turns.map((t) => t.role)).toEqual(["user", "user", "assistant"]);
+  expect(turns[1].compactSummary).toBe(true);
+  expect(turns[1].content).toEqual([
+    { type: "text", text: "This session is being continued from a previous conversation...\n\nSummary: did X." },
+  ]);
+  // Ordinary turns carry no flag.
+  expect(turns[0].compactSummary).toBeUndefined();
+  expect(turns[2].compactSummary).toBeUndefined();
+});
+
 test("returns the last assistant message", () => {
   expect(lastAssistantMessage(parseTranscript(approved))).toBe(
     "Done. Created `/tmp/spike-perm-test.txt`.",

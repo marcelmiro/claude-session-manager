@@ -1,6 +1,9 @@
 import { homedir } from "os";
 
-const NAMING_LOCK = `${homedir()}/.config/csm/naming.lock`;
+// Config root honors the CSM_HOME test seam (matches config.ts); unset in prod → real home.
+const CSM_ROOT = process.env.CSM_HOME ?? homedir();
+
+const NAMING_LOCK = `${CSM_ROOT}/.config/csm/naming.lock`;
 
 /** Resolve the full path to `claude` CLI, searching common install locations beyond PATH. */
 function resolveClaudePath(): string {
@@ -41,12 +44,115 @@ export async function releaseNamingLock(): Promise<void> {
 }
 
 export interface NameCache {
-  version: 3;
-  names: Record<string, string>;     // sessionId → name
+  version: 5;
+  names: Record<string, string>;     // sessionId → AI-generated name (human-readable, e.g. "Fix Auth")
   sources: Record<string, string>;   // sessionId → summary/prompt used for naming
+  pinned: Record<string, string>;    // sessionId → user-pinned name (wins over `names`)
 }
 
-const CACHE_PATH = `${homedir()}/.config/csm/names.json`;
+/**
+ * Deterministic abbreviation map applied ONLY by `slugify` (tmux width). Keys are
+ * lowercase whole words; both long and short forms map to the compact form so an AI
+ * name and a hand-typed one collapse the same way. Best-effort — words outside the
+ * map pass through full, and `slugify`'s 24-char cap is the hard width backstop.
+ */
+export const ABBREV: Record<string, string> = {
+  implement: "impl", implementation: "impl", impl: "impl",
+  configuration: "cfg", config: "cfg", cfg: "cfg",
+  authentication: "auth", auth: "auth",
+  performance: "perf", perf: "perf",
+  refactoring: "refactor", refactor: "refactor",
+  database: "db", db: "db",
+  // Domain nouns that actually recur in real session names and dominate tab width.
+  organization: "org", organizations: "org",
+  integration: "integ", integrations: "integ",
+  visibility: "vis",
+  notification: "notif", notifications: "notif",
+  dashboard: "dash",
+  migration: "migr", migrations: "migr",
+  optimization: "opt", optimize: "opt",
+  component: "cmp", components: "cmp",
+  validation: "val", validate: "val",
+  provider: "prov", providers: "prov",
+  pipeline: "pipe", pipelines: "pipe",
+  enrichment: "enrich",
+  repository: "repo", repositories: "repo",
+  permission: "perm", permissions: "perm",
+};
+
+/**
+ * Conversational refusals/meta-replies the namer echoes when the source prompt is a
+ * refusal or a vague follow-up ("I can't help…", "This doesn't appear…"). As a name
+ * they read as broken UI, so we reject them and leave the window unnamed until a real
+ * signal lands. Matched as case-insensitive prefixes of the raw model output.
+ */
+const REFUSAL_PREFIXES = [
+  "i can't", "i cannot", "i can not", "i'm sorry", "i am sorry", "sorry",
+  "i need permission", "i don't have", "i do not have", "i'm unable", "i am unable",
+  "unable to", "this doesn't appear", "this does not appear", "i'd be happy",
+  "i would be happy", "i need clarification", "i need more", "i'll need", "i cannot help",
+];
+
+/** True if the model output reads as a refusal/meta-reply rather than a session name. */
+export function looksLikeRefusal(text: string): boolean {
+  const lower = text.trim().toLowerCase();
+  return REFUSAL_PREFIXES.some((p) => lower.startsWith(p));
+}
+
+/**
+ * Normalize a name to the human-readable shape stored in the cache and shown on the
+ * phone/TUI verbatim: trim, collapse internal whitespace to single spaces, strip
+ * control chars and the window separators (`·`/`⚡`/`🔄`/`+`) that would corrupt the
+ * tmux format even after slugify, but KEEP spaces and casing. Capped at 30 chars.
+ */
+export function normalizeName(input: string): string {
+  const cleaned = input
+    // Control chars, window separators (`·⚡🔄+`), and word-joining punctuation
+    // (`/ \ : _ — –`) → space, so slugify splits on them instead of gluing words
+    // ("clarification—the" → "clarification the", not "clarificationthe"). Hyphen
+    // is intentionally kept (kebab-friendly).
+    .replace(/[\x00-\x1f·⚡🔄+/\\:_—–]/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (cleaned.length <= 30) return cleaned;
+  // Trim at a word boundary so the stored name never ends mid-word ("…to be a so").
+  const cut = cleaned.slice(0, 30);
+  const lastSpace = cut.lastIndexOf(" ");
+  return (lastSpace >= 15 ? cut.slice(0, lastSpace) : cut).trim();
+}
+
+/** Sanitize a user-typed pinned name — same rules as any stored name. */
+export const sanitizePinnedName = normalizeName;
+
+/**
+ * Slugify a human-readable name to the kebab slug shown on tmux windows: lowercase,
+ * abbreviate each word via `ABBREV`, join with `-`, strip remaining non-`[a-z0-9-]`,
+ * collapse/trim dashes, and truncate to 24 chars (no trailing dash). Applied at every
+ * window-name write; `reverseNameMap` keys on this so the round-trip resolves.
+ */
+export function slugify(name: string): string {
+  return name
+    .toLowerCase()
+    .split(/\s+/)
+    .map((w) => ABBREV[w] ?? w)
+    .join("-")
+    .replace(/[^a-z0-9-]/g, "")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "")
+    .slice(0, 24)
+    .replace(/-+$/, "");
+}
+
+/** Inverse of `slugify` for migration: hyphens→spaces, Title-Case each word. */
+export function deslugify(slug: string): string {
+  return slug
+    .split("-")
+    .filter(Boolean)
+    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+    .join(" ");
+}
+
+const CACHE_PATH = `${CSM_ROOT}/.config/csm/names.json`;
 
 /**
  * Extract a meaningful title from structured prompts like:
@@ -102,12 +208,12 @@ export async function generateAIName(firstPrompt: string, summary?: string, bran
       if (branchContext) contextParts.push(`Branch: "${branchContext}"`);
     }
 
-    const namePrompt = `Name this coding session in 1-3 words, kebab-case. Be extremely compact: "impl" not "implement", "cfg" not "config", "auth" not "authentication", "perf" not "performance", "refactor" not "refactoring". Drop filler words (the, a, for, with, to). Focus on the ACTION and GOAL, not file paths or locations.
+    const namePrompt = `Name this coding session in Title Case, plain English words. Prefer 1-2 words; use 3 only when necessary (keep it short — it also labels a narrow tmux tab). Drop filler words (the, a, for, with, to). Focus on the ACTION and GOAL, not file paths or locations. Do NOT use kebab-case, do NOT abbreviate.
 
-Good: fix-auth, impl-dark-mode, refactor-api, db-perf
-Bad: implement-authentication-flow, packages-api-src, update-index-ts
+Good: Fix Auth, Dark Mode, Refactor API, Provider Sync
+Bad: fix-auth, impl-dark-mode, packages-api-src, update-index-ts
 
-Reply with ONLY the kebab-case name, nothing else.
+Reply with ONLY the name, nothing else.
 
 ${contextParts.join("\n")}`;
     const proc = Bun.spawn([CLAUDE_PATH, "-p", "--model", "haiku", "--no-session-persistence"], {
@@ -127,8 +233,10 @@ ${contextParts.join("\n")}`;
     // Reject error/rate-limit messages that survive sanitization
     const lower = result.trim().toLowerCase();
     if (lower.includes("error") || lower.includes("credit") || lower.includes("balance") || lower.includes("rate limit") || lower.includes("unauthorized") || lower.includes("overloaded")) return "";
-    const name = lower.replace(/[^a-z0-9-]/g, "").replace(/-+/g, "-").replace(/^-|-$/g, "");
-    return name.length > 0 && name.length <= 25 ? name : "";
+    // Reject conversational refusals/meta-replies echoed from a refusal source prompt.
+    if (looksLikeRefusal(result)) return "";
+    const name = normalizeName(result.trim());
+    return name.length > 0 ? name : "";
   } catch {
     return "";
   }
@@ -138,15 +246,28 @@ export async function loadNameCache(): Promise<NameCache> {
   try {
     const raw = await Bun.file(CACHE_PATH).text();
     const parsed = JSON.parse(raw);
-    if (parsed.version === 3 && parsed.names) return parsed;
-    // Migrate from v1/v2: discard names to regenerate with compact prompt
+    if (parsed.version === 5 && parsed.names) return { pinned: {}, ...parsed };
+    // Migrate v4→v5: discard kebab names+sources (regenerate as normalized on the
+    // next monitor/bridge cycle) but de-slugify pins so the user's names survive.
+    if (parsed.version === 4 && parsed.pinned) {
+      const pinned: Record<string, string> = {};
+      for (const [id, slug] of Object.entries(parsed.pinned as Record<string, string>)) {
+        pinned[id] = deslugify(slug);
+      }
+      return { version: 5, names: {}, sources: {}, pinned };
+    }
+    // Migrate v3: discard kebab names/sources, no pins existed yet.
+    if (parsed.version === 3 && parsed.names) {
+      return { version: 5, names: {}, sources: {}, pinned: {} };
+    }
+    // Migrate from v1/v2: all empty.
     if ((parsed.version === 1 || parsed.version === 2) && parsed.names) {
-      return { version: 3, names: {}, sources: {} };
+      return { version: 5, names: {}, sources: {}, pinned: {} };
     }
   } catch {
     // No cache or malformed
   }
-  return { version: 3, names: {}, sources: {} };
+  return { version: 5, names: {}, sources: {}, pinned: {} };
 }
 
 export async function saveNameCache(cache: NameCache): Promise<void> {
@@ -160,10 +281,10 @@ export async function saveNameCache(cache: NameCache): Promise<void> {
 }
 
 /**
- * Get session name from cache. Returns empty string if not cached.
- * Window stays as-is (e.g. "claude") until AI naming completes.
+ * Get session name from cache: user-pinned name wins over the AI-generated one.
+ * Returns empty string if neither is set (window stays "claude" until naming completes).
  */
 export function getSessionName(sessionId: string, cache: NameCache): string {
-  return cache.names[sessionId] || "";
+  return cache.pinned?.[sessionId] || cache.names[sessionId] || "";
 }
 

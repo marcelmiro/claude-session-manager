@@ -2,7 +2,7 @@ import { homedir } from "os";
 import type { SessionIndexEntry, SessionIndex, Session } from "../types";
 import { getBaseRepoPath, extractTicketId } from "./git";
 import { repoNameFromPath } from "./sessions";
-import type { NameCache } from "./names";
+import { slugify, type NameCache } from "./names";
 
 const home = homedir();
 const projectsDir = `${home}/.claude/projects`;
@@ -158,6 +158,7 @@ export async function loadAllSessions(
         entry.summary,
         searchPrompt,
         aiName,
+        aiName ? slugify(aiName) : "", // abbreviated slug so "impl" still matches "Implementation Cleanup"
         entry.gitBranch,
         repo,
         ticketId,
