@@ -2,7 +2,10 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover"
+    />
     <meta name="color-scheme" content="dark" />
     <meta name="theme-color" content="#101010" />
     <title>portkey</title>
@@ -53,12 +56,16 @@
         --danger-bg: rgba(255, 128, 128, 0.1); /* destructive command box bg */
         --danger-border: rgba(255, 128, 128, 0.4);
         --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, monospace; /* code-style tags/labels */
+        --bubble-pad-x: 13px; /* .bubble horizontal padding — negated by full-bleed tables */
       }
       * { box-sizing: border-box; }
       html, body {
         margin: 0;
         height: 100%;
+        width: 100%;
         overflow: hidden; /* the app is a fixed shell; only inner regions scroll */
+        overscroll-behavior: none; /* no document-level rubber-band revealing bg */
+        touch-action: manipulation; /* drop the double-tap-to-zoom gesture (+ its 300ms tap delay) */
         background: var(--bg);
         color: var(--fg);
         font: 15px/1.45 -apple-system, BlinkMacSystemFont, "SF Mono", ui-monospace, monospace;
@@ -201,6 +208,17 @@
       .name { display: block; font-weight: 600; font-size: 14px; line-height: 1.3; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
       .sub { display: block; color: var(--muted); font-size: 12px; line-height: 1.3; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
       .grow .sub { margin-top: 2px; }
+      /* "+" launch marker for base-repo rows — sized to the glyph and centered by the
+         row's align-items:center, so it lines up with the repo name. */
+      .addmark { flex: none; width: 16px; margin: 0 1px; text-align: center; color: var(--mint); font-size: 18px; line-height: 1; }
+      /* worktree rows: nested under their base repo. Indented via margin-left, with the
+         width reduced to match (margin sits outside the border-box, so width:100% would
+         overflow). A peach left-rail signals attachment to the base repo above. */
+      .row.wt {
+        margin-left: 18px; width: calc(100% - 18px); margin-top: -2px; min-height: 44px;
+        border-left: 2px solid var(--peach); border-top-left-radius: 3px; border-bottom-left-radius: 3px;
+        padding-left: 16px;
+      }
       .age { flex: none; color: var(--dim); font-size: 12px; font-variant-numeric: tabular-nums; white-space: nowrap; }
       .card { background: var(--surface); border-radius: 10px; padding: 12px; margin-bottom: 10px; }
       .card.alert { border: 1px solid var(--peach); }
@@ -236,7 +254,7 @@
       .bubble {
         max-width: 90%;
         width: fit-content;
-        padding: 9px 13px;
+        padding: 9px var(--bubble-pad-x);
         border-radius: 16px;
         margin-bottom: 8px;
         white-space: pre-wrap;
@@ -264,6 +282,32 @@
         white-space: nowrap;
       }
       .tool .arg { color: var(--muted); }
+      /* Post-compaction summary: a full-width system divider, collapsed by default. The
+         peach summary line makes it unmistakable that the conversation continued from a
+         compact; expanding reveals the verbatim summary text. */
+      .compact-summary { width: 100%; margin: 4px 0 12px; }
+      .compact-summary > summary {
+        list-style: none;
+        cursor: pointer;
+        color: var(--peach);
+        font-size: 12px;
+        font-family: var(--mono);
+        text-align: center;
+        padding: 6px 10px;
+        border-top: 1px solid var(--dim);
+        border-bottom: 1px solid var(--dim);
+      }
+      .compact-summary > summary::-webkit-details-marker { display: none; }
+      .compact-summary[open] > summary { margin-bottom: 8px; }
+      .compact-summary > .md {
+        background: var(--surface);
+        border-radius: 8px;
+        padding: 10px 12px;
+        font-size: 13px;
+        color: var(--muted);
+      }
+      .compact-summary > .md > *:first-child { margin-top: 0; }
+      .compact-summary > .md > *:last-child { margin-bottom: 0; }
       .typing { color: var(--muted); font-size: 13px; padding: 2px 4px 10px; font-family: var(--mono); }
 
       /* Bottom-align the conversation so the newest message sits just above the dock
@@ -300,6 +344,27 @@
       .bubble.md pre code { background: none; padding: 0; color: var(--mint); white-space: pre; }
       .bubble.md blockquote { margin: 6px 0; padding-left: 10px; border-left: 2px solid var(--dim); color: var(--muted); }
       .bubble.md strong { font-weight: 700; }
+      /* Tables scroll horizontally inside the bubble rather than squashing columns to
+         fit. `display: block` makes the <table> its own scroll container; the cells'
+         nowrap keeps columns at natural width so wide tables pan (the back-swipe defers
+         to this via hScrollerAt) instead of wrapping into an unreadable grid. The left
+         edge keeps the bubble's inset so the table lines up with paragraphs/lists; the
+         right margin goes negative so the scroll area bleeds to the bubble edge, while an
+         equal padding-right leaves that same inset after the last column when fully
+         scrolled — so both ends of the pan mirror the bubble's spacing. */
+      .bubble.md table {
+        display: block;
+        width: fit-content;
+        max-width: calc(100% + var(--bubble-pad-x));
+        margin: 6px calc(-1 * var(--bubble-pad-x)) 6px 0;
+        padding-right: var(--bubble-pad-x);
+        overflow-x: auto;
+        -webkit-overflow-scrolling: touch;
+        border-collapse: collapse;
+        font-size: 13px;
+      }
+      .bubble.md th, .bubble.md td { border: 1px solid var(--dim); padding: 4px 8px; text-align: left; white-space: nowrap; }
+      .bubble.md th { background: var(--code-bg); font-weight: 700; }
 
       /* bottom nav bar (inside the dock — thumb-reachable; carries back, title,
          status/usage, and the attention-jump button) */
@@ -316,6 +381,7 @@
          never overlaps the scroll region or sits under the keyboard */
       .dock {
         flex: none;
+        position: relative; /* anchor for the floating scroll-to-bottom button */
         background: var(--bg);
         border-top: 1px solid var(--border);
         /* bottom = half the home-indicator inset: sits the input lower than the full safe
@@ -324,10 +390,103 @@
         padding: 8px 16px calc(env(safe-area-inset-bottom) / 2);
       }
       .dock-inner { max-width: 680px; margin: 0 auto; }
+      /* Floating button stack — hugs the top edge of the dock, right side. Sits in the dock's
+         positioning context so it tracks the dock's top regardless of dock height (composer
+         vs. tall question card). Holds the always-on prev/next-prompt pill plus the jump-to-
+         latest button that fades in only when scrolled up. */
+      .dockbtns {
+        position: absolute;
+        right: 14px;
+        bottom: 100%;
+        margin-bottom: 10px;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 8px;
+      }
+      /* Shared round-floating-control look + show/hide. Both fade in only when scrolled up
+         off the bottom of the thread (the `.show` class), matching the iMessage convention. */
+      .scrollbtn,
+      .promptnav {
+        border: 1px solid var(--dim);
+        background: var(--surface);
+        color: var(--fg);
+        box-shadow: 0 3px 12px rgba(0, 0, 0, 0.5);
+        opacity: 0;
+        transform: translateY(6px) scale(0.9);
+        pointer-events: none;
+        transition: opacity 0.18s ease, transform 0.18s ease;
+      }
+      .scrollbtn.show,
+      .promptnav.show { opacity: 1; transform: none; pointer-events: auto; }
+      .scrollbtn {
+        width: 38px;
+        height: 38px;
+        padding: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        border-radius: 50%;
+      }
+      .scrollbtn:active { background: var(--hover); }
+      /* vertical prev/next-prompt pill (iMessage-style stacked chevrons) */
+      .promptnav { display: flex; flex-direction: column; border-radius: 19px; overflow: hidden; }
+      .promptnav button {
+        width: 38px;
+        height: 34px;
+        padding: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: none;
+        border: none;
+        border-radius: 0;
+        color: var(--fg);
+      }
+      .promptnav button:active { background: var(--hover); }
+      .promptnav button + button { border-top: 1px solid var(--dim); }
+      .scrollbtn svg, .promptnav svg { display: block; }
       .flash { color: var(--red); font-size: 13px; padding: 2px 4px 8px; }
       /* standing archived notice (not an error) — muted, not the red flash tone */
       .flash.archived { color: var(--muted); }
       .composer textarea:disabled { opacity: 0.5; }
+      .composerwrap { position: relative; } /* anchor for the absolute slash-menu */
+      /* "/" slash-command menu — floats directly above the composer */
+      .slash-menu {
+        position: absolute;
+        left: 0; right: 0; bottom: 100%;
+        margin-bottom: 8px;
+        z-index: 20;
+        /* dvh (not vh) so the menu tracks the keyboard-shrunk viewport and never overflows
+           above the visible top. */
+        max-height: 40dvh;
+        overflow-y: auto;
+        -webkit-overflow-scrolling: touch; /* momentum scroll on iOS */
+        overscroll-behavior: contain; /* don't scroll-chain into the thread behind */
+        background: var(--surface);
+        border: 1px solid var(--dim);
+        border-radius: 12px;
+        padding: 4px;
+        box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+      }
+      .slash-item {
+        min-height: 44px; /* thumb-sized tap target */
+        padding: 6px 10px;
+        border-radius: 8px;
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        gap: 2px;
+      }
+      .slash-item.active { background: var(--hover); }
+      .slash-name { color: var(--peach); font-family: var(--mono); font-size: 14px; }
+      .slash-desc {
+        color: var(--muted);
+        font-size: 12px;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
       .composer { display: flex; gap: 8px; align-items: flex-end; }
       .composer textarea {
         font: inherit;
@@ -355,6 +514,20 @@
         font-weight: 700;
       }
       .composer .send:disabled { background: var(--surface); color: var(--dim); }
+      .composer .stop {
+        flex: none;
+        width: 40px;
+        height: 40px;
+        padding: 0;
+        border: 1px solid var(--red);
+        border-radius: 50%;
+        background: var(--surface);
+        color: var(--red);
+        font-size: 15px;
+        line-height: 1;
+      }
+      /* Armed = first tap landed; filled red signals "tap again to stop" (double-tap confirm). */
+      .composer .stop.armed { background: var(--red); color: var(--bg); }
       .composer .attach {
         flex: none;
         width: 40px;
@@ -468,7 +641,11 @@
       .sheetgroup > button:first-child { border-top: none; }
       .sheet button:active { background: var(--hover); }
       .sheet .danger { color: var(--red); }
-      .sheetcancel { font-weight: 700; color: var(--fg); }
+      /* final destructive confirm: filled red so it reads as an escalation from the
+         plain red-text first tap, not a duplicate of it */
+      .sheet .danger-fill { color: var(--bg); background: var(--red); font-weight: 700; }
+      .sheet .danger-fill:active { background: var(--red); filter: brightness(0.88); }
+      .sheetcancel { font-weight: 600; color: var(--muted); }
       .sheetpreview {
         padding: 12px 16px;
         font-size: 13px;
@@ -481,7 +658,7 @@
         white-space: pre-wrap;
         word-break: break-word;
       }
-      .sheethint { color: var(--dim); font-size: 13px; padding: 14px; text-align: center; }
+      .sheethint { color: var(--muted); font-size: 13px; line-height: 1.4; padding: 14px 18px 16px; text-align: center; }
       /* session action-sheet header: identifies the row being acted on (dot + name +
          repo·sub + age), reusing the list-row .name/.sub/.age/.dot type rules */
       .sheethead { display: flex; align-items: center; gap: 10px; padding: 13px 16px; text-align: left; border-bottom: 0.5px solid var(--sheet-line); }
@@ -504,6 +681,9 @@
       /* opacity:1 overrides the global button:disabled 0.4 — the muted-on-surface
          already reads as inactive without fading it into the background. */
       .opt-submit:disabled { background: var(--surface); color: var(--muted); opacity: 1; }
+      /* Multi-question wizard nav: Back + Next/Submit share a row. */
+      .qnav { display: flex; gap: 8px; }
+      .qnav .opt-submit { flex: 1; }
 
       /* approval card: distinct primary (Allow) vs secondary (Deny); destructive
          commands get a red command box + a warning tag */
@@ -527,13 +707,100 @@
       .brand { font-size: 28px; margin: 0 0 2px; color: var(--fg); letter-spacing: -0.02em; }
       .brandsub { color: var(--muted); font-size: 14px; margin-bottom: 8px; }
 
-      /* SSE connection-lost banner — an in-flow flex child at the top of #app so it
-         reserves its own height and pushes the screen down, never overlaying the header
-         or the first chat bubble (#app already pads for the safe-area inset). */
-      .offline { flex: none; background: var(--red-banner); color: var(--red); font-size: 12px; font-weight: 600; text-align: center; padding: 4px 6px 5px; }
+      /* Connectivity banner (reconnecting / bridge unreachable) — an in-flow flex child at
+         the BOTTOM of #app so it reserves its own height and pushes the screen up, never
+         overlaying content and staying clear of the iPhone notch/Dynamic Island at the top.
+         Flush to the bottom edge with symmetric text-tight padding (no safe-area inset — the
+         inset made it either top-heavy as padding or floating as margin). */
+      .offline { flex: none; background: var(--red-banner); color: var(--red); font-size: 12px; font-weight: 600; text-align: center; padding: 6px 8px; }
 
       @keyframes scrim-in { from { opacity: 0; } to { opacity: 1; } }
       @keyframes sheet-up { from { transform: translateY(24px); opacity: 0.4; } to { transform: none; opacity: 1; } }
+
+      /* 🤖 N agents pill in the detail navbar — opens the subagent list; running count mint */
+      .agentspill {
+        flex: none;
+        background: none;
+        border: 1px solid var(--dim);
+        color: var(--muted);
+        border-radius: 14px;
+        padding: 4px 9px;
+        font-size: 12px;
+        font-weight: 600;
+        white-space: nowrap;
+      }
+      .agentspill:active { background: var(--hover); }
+      .agentspill .run { color: var(--mint); font-weight: 700; }
+
+      /* subagent list (an action sheet over the detail) — rows reuse the sheet surface but
+         lay out left-aligned like list rows (.sheet .agent-row outspecifies the centered
+         .sheet button chrome). The list scrolls inside a capped region for many agents. */
+      .agents-sheet { max-height: 50dvh; overflow-y: auto; -webkit-overflow-scrolling: touch; }
+      .sheet .agent-row {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        width: 100%;
+        text-align: left;
+        padding: 12px 16px;
+        color: var(--fg);
+      }
+      .agents-sheet > .agent-row:first-child { border-top: none; }
+      .agent-row .chev { flex: none; color: var(--dim); font-size: 18px; }
+
+      /* subagent drill-in — a full-screen push over the detail (iOS-style slide-in) */
+      .subagent-view {
+        position: fixed;
+        inset: 0;
+        z-index: 15;
+        max-width: 680px;
+        margin: 0 auto;
+        background: var(--bg);
+        display: flex;
+        flex-direction: column;
+        padding-top: env(safe-area-inset-top);
+        touch-action: pan-y; /* our handler owns horizontal (back-swipe); vertical scrolls */
+        animation: push-in 0.26s cubic-bezier(0.2, 0.85, 0.25, 1);
+      }
+      .subagent-head {
+        flex: none;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 4px 12px 8px;
+        border-bottom: 1px solid var(--border);
+      }
+      .subagent-head .name { font-size: 15px; }
+      .subagent-view .scroll { padding: 12px; padding-bottom: calc(12px + env(safe-area-inset-bottom)); }
+      .brief { margin-bottom: 10px; }
+      .brief-toggle {
+        background: none;
+        border: none;
+        padding: 4px 2px;
+        color: var(--muted);
+        font-size: 12px;
+        font-family: var(--mono);
+      }
+      .subagent-foot {
+        flex: none;
+        display: flex;
+        gap: 8px;
+        padding: 8px 12px calc(8px + env(safe-area-inset-bottom));
+        border-top: 1px solid var(--border);
+      }
+      .sibnav, .sibnav-spacer { flex: 1; min-width: 0; }
+      .sibnav {
+        background: var(--surface);
+        border: 1px solid var(--dim);
+        border-radius: 10px;
+        padding: 8px 10px;
+        color: var(--muted);
+        font-size: 12px;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .sibnav:active { background: var(--hover); }
     </style>
   </head>
   <body>
@@ -546,6 +813,14 @@
         <div class="loadtext">connecting</div>
       </div>
     </div>
+    <!-- iOS Safari (in-browser) ignores user-scalable=no, so kill pinch-zoom directly:
+         its gesture* events fire only for multi-touch zoom. Standalone PWA already
+         blocks zoom from the viewport meta; this covers the browser tab case. -->
+    <script>
+      for (const evt of ["gesturestart", "gesturechange", "gestureend"]) {
+        document.addEventListener(evt, (e) => e.preventDefault(), { passive: false });
+      }
+    </script>
     <script type="module" src="/app.js"></script>
   </body>
 </html>

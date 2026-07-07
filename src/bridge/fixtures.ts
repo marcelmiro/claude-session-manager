@@ -144,8 +144,14 @@ export const FIXTURE_TRANSCRIPT = {
 };
 
 export const FIXTURE_REPOS = [
-  { name: "csm", path: "/Users/you/Documents/csm" },
-  { name: "throxy", path: "/Users/you/throxy" },
+  { name: "throxy", path: "/Users/throxy/Documents/throxy", branch: "main", isWorktree: false },
+  { name: "throxy", path: "/Users/throxy/Documents/throxy-add-tomba-as-enrichment-provider", branch: "add-tomba-as-enrichment-provider", isWorktree: true },
+  { name: "throxy", path: "/Users/throxy/Documents/throxy-workspace-cleanup", branch: "feature/workspace-context-cleanup", isWorktree: true },
+  { name: "csm", path: "/Users/throxy/Documents/csm", branch: "main", isWorktree: false },
+  { name: "customeros", path: "/Users/throxy/Documents/customeros", branch: "main", isWorktree: false },
+  { name: "customeros", path: "/Users/throxy/Documents/customeros-ticket-output-piping", branch: "ticket-output-piping", isWorktree: true },
+  { name: "~", path: "/Users/throxy", branch: "", isWorktree: false },
+  { name: "wiki", path: "/Users/throxy/Documents/wiki", branch: "main", isWorktree: false },
 ];
 
 /**

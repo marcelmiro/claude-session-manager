@@ -16,29 +16,38 @@ import { existsSync, readdirSync, statSync, rmSync } from "node:fs";
 import { discoverSessions } from "../core/sessions";
 import {
   getTranscript,
+  getSubagentTranscript,
   sendMessage,
   answerSessionQuestion,
   createSession,
   rewindSession,
   archiveSession,
+  interruptSession,
   resolveSessionPane,
   readPaneStatusline,
+  decideAttachedApproval,
   type SendResult,
 } from "../core/session-api";
-import { discoverRepos } from "../core/git";
+import { nativeStatus } from "../core/session-state";
+import { homedir } from "os";
+import { discoverRepos, getBaseRepoPath, compareRepos } from "../core/git";
+import { listSlashCommands } from "../core/skills";
 import { loadConfig, PATHS } from "../core/config";
 import { listPendingApprovals, decideApproval } from "../core/approval";
 import { watchEvents } from "../core/watch";
 import { EVENTS_DIR, pendingToolCall } from "../core/hook-events";
+import { capturePane, listPanes } from "../core/tmux";
+import { isPermissionPrompt } from "../core/status";
 import {
   loadNameCache,
   saveNameCache,
   generateAIName,
+  getSessionName,
   acquireNamingLock,
   releaseNamingLock,
   type NameCache,
 } from "../core/names";
-import { buildSessionLabel } from "../core/session-label";
+import { buildSessionLabel, disambiguateNames } from "../core/session-label";
 import { loadState, saveState } from "../core/state";
 import { fixtureData } from "./fixtures";
 import type { Session } from "../types";
@@ -259,17 +268,52 @@ async function markSessionRead(sessionId: string): Promise<void> {
 
 // Repos available for a new session: active-session repos (worktrees deduped to base)
 // plus the configured repoPaths, exactly as the TUI wizard sources them.
-async function reposPayload(): Promise<Array<{ name: string; path: string }>> {
+async function reposPayload(): Promise<Array<{ name: string; path: string; branch: string; isWorktree: boolean }>> {
   const cfg = await loadConfig();
   const { sessions } = await discoverSessions({});
   const sessionRepos = sessions
     .filter((s) => s.repoPath)
     .map((s) => ({ name: s.repo, path: s.repoPath }));
   const repos = await discoverRepos(sessionRepos, cfg.repoPaths ?? [], cfg.priorityRepos ?? []);
-  return repos.map((r) => ({ name: r.name, path: r.path }));
+  const priority = cfg.priorityRepos ?? [];
+  // "~" (home dir) is offered as a launch target, sorted among the base repos the same
+  // way discoverRepos orders them (insert before the first base repo it sorts ahead of,
+  // so worktree rows stay nested under their base).
+  const home = { name: "~", currentBranch: "", hasSession: false };
+  let at = repos.findIndex((r) => !r.isWorktree && compareRepos(home, r, priority) < 0);
+  if (at === -1) at = repos.length;
+  const withHome = [...repos];
+  withHome.splice(at, 0, { name: "~", path: homedir(), currentBranch: "" });
+  return withHome.map((r) => ({
+    name: r.name,
+    path: r.path,
+    branch: r.currentBranch,
+    isWorktree: !!r.isWorktree,
+  }));
 }
 
 let sessionsCache: { ts: number; value: unknown } | null = null;
+
+// GET /sessions/:id/skills — slash-commands scoped to the session's repo. Cached per
+// resolved repo dir (30s TTL); the "" key holds the builtin+user fallback used when a
+// session's pane/repo can't be resolved (archived / no live pane).
+const skillsCache = new Map<string, { list: unknown; ts: number }>();
+
+async function sessionSkills(sessionId: string): Promise<unknown> {
+  let repoDir = "";
+  try {
+    const paneId = await resolveSessionPane(sessionId);
+    if (paneId) {
+      const pane = (await listPanes()).find((p) => p.paneId === paneId);
+      if (pane?.currentPath) repoDir = await getBaseRepoPath(pane.currentPath);
+    }
+  } catch {}
+  const hit = skillsCache.get(repoDir);
+  if (hit && Date.now() - hit.ts < 30_000) return hit.list;
+  const list = await listSlashCommands(repoDir || undefined);
+  skillsCache.set(repoDir, { list, ts: Date.now() });
+  return list;
+}
 
 async function sessionsPayload(): Promise<unknown> {
   const now = Date.now();
@@ -279,12 +323,35 @@ async function sessionsPayload(): Promise<unknown> {
   const approvalIds = new Set(listPendingApprovals().map((a) => a.sessionId));
   const unread = await unreadPanes();
   const tracked = sessions.filter((s) => s.id); // untracked panes (no id) are unaddressable
-  const value = tracked.map((s) => {
-    // nameMap only RESOLVES ids in discoverSessions; the cached name (same source
-    // as tmux window names) must be applied here, mirroring the TUI.
-    s.name = nameCache.names[s.id] || s.name;
-    return projectSession(s, approvalIds, !!(s.tmuxPane && unread.has(s.tmuxPane.paneId)));
-  });
+  // Attached sessions never get a pending-file (the PreToolUse hook exits neutral so the
+  // instant desk prompt shows) — so a phone-approvable permission prompt must be sourced
+  // from the live pane. For each WAITING session with no file-pending and no open question,
+  // confirm a permission prompt is actually on-screen before flagging it `approval`.
+  for (const s of tracked) {
+    if (s.status !== "waiting" || approvalIds.has(s.id) || !s.tmuxPane) continue;
+    const pt = pendingToolCall(s.id);
+    if (pt?.name === "AskUserQuestion" && pt.question) continue;
+    if (isPermissionPrompt(await capturePane(s.tmuxPane.paneId))) approvalIds.add(s.id);
+  }
+  // Apply the cached name (pinned wins over AI-generated), mirroring the TUI/tmux.
+  for (const s of tracked) s.name = getSessionName(s.id, nameCache) || s.name;
+  // Disambiguate same-repo name collisions with a -2/-3 suffix, matching the TUI/tmux.
+  const dnMap = new Map<string, string>();
+  const byRepo = new Map<string, Array<{ id: string; name: string }>>();
+  for (const s of tracked) {
+    const bucket = byRepo.get(s.repo);
+    if (bucket) bucket.push({ id: s.id, name: s.name });
+    else byRepo.set(s.repo, [{ id: s.id, name: s.name }]);
+  }
+  for (const items of byRepo.values()) {
+    for (const [id, name] of disambiguateNames(items)) dnMap.set(id, name);
+  }
+  // Apply the suffixed name onto the projection so the phone's name-first row title
+  // (listTitle = s.name || s.label) shows `-2`/`-3`, matching the TUI/tmux.
+  for (const s of tracked) s.name = dnMap.get(s.id) ?? s.name;
+  const value = tracked.map((s) =>
+    projectSession(s, approvalIds, !!(s.tmuxPane && unread.has(s.tmuxPane.paneId))),
+  );
   sessionsCache = { ts: now, value };
   maybeGenerateNames(tracked, nameCache); // fire-and-forget; refreshes via SSE
   return value;
@@ -308,6 +375,7 @@ function maybeGenerateNames(sessions: Session[], cache: NameCache): void {
       (s) =>
         s.id &&
         !cache.names[s.id] &&
+        !cache.pinned[s.id] &&
         now - (namingSkip.get(s.id) ?? 0) > NAMING_SKIP_TTL &&
         (s.firstPrompt || s.summary || s.lastPrompt),
     )
@@ -363,6 +431,25 @@ function pushAll(frame: Uint8Array): void {
 
 function broadcast(obj: unknown): void {
   pushAll(encoder.encode(`data: ${JSON.stringify(obj)}\n\n`));
+}
+
+/**
+ * After an interrupt, wait for Claude's native status to leave "running" (busy→idle
+ * ~1.5s later) and broadcast so clients refetch the now-"ready" status. `nativeStatus`
+ * has a ~1s cache TTL, so ~500ms polling is the practical resolution floor; ~3.5s of
+ * budget covers the flip. Always broadcasts on exit (even at timeout) so a missed
+ * native write doesn't strand the client on the stale "running". Fire-and-forget.
+ */
+function reconcileAfterInterrupt(id: string): void {
+  void (async () => {
+    for (let i = 0; i < 7; i++) {
+      await Bun.sleep(500);
+      const status = await nativeStatus(id);
+      if (status && status !== "running") break;
+    }
+    sessionsCache = null; // drop the 1s projection cache so the refetch re-derives status
+    broadcast({ type: "session-changed", id });
+  })();
 }
 
 function streamResponse(): Response {
@@ -436,14 +523,46 @@ async function route(req: Request): Promise<Response> {
     // Always returns the full active branch (reconstructed leaf→root) — a rewind can shrink
     // the conversation, so an append-only delta would leak abandoned-branch turns.
     const tx = await getTranscript(id);
+    const pane = await resolveSessionPane(id);
     // Real awaiting-decision approval (blocking hook), NOT the in-flight pendingTool —
-    // so Allow/Deny only appears when a decision is genuinely required.
-    const approval = listPendingApprovals().find((a) => a.sessionId === id) ?? null;
+    // so Allow/Deny only appears when a decision is genuinely required. Detached sessions
+    // surface it via the pending-file; an ATTACHED session has no file, so confirm a
+    // permission prompt is live on the pane and synthesize the same card shape from the
+    // pending tool call (identical Allow/Deny UI; /decision drives the keys instead).
+    let approval = listPendingApprovals().find((a) => a.sessionId === id) ?? null;
+    if (!approval && pane) {
+      const pt = pendingToolCall(id);
+      if (pt && !(pt.name === "AskUserQuestion" && pt.question) && isPermissionPrompt(await capturePane(pane))) {
+        approval = {
+          sessionId: id,
+          ts: 0,
+          tool: pt.name,
+          tool_use_id: pt.toolUseId,
+          input: { command: pt.command, file_path: pt.filePath, description: pt.description },
+        };
+      }
+    }
     // The live statusline + permission mode, scraped from the pane (the only faithful
     // source for the user's custom statusline and the auto/plan mode).
-    const pane = await resolveSessionPane(id);
     const statusline = pane ? await readPaneStatusline(pane) : {};
     return json({ ...tx, approval, ...statusline });
+  }
+
+  // Drill into ONE subagent's full conversation. Anchored like `…/transcript$` so it isn't
+  // shadowed; getSubagentTranscript validates the agentId (traversal guard) and 404s on a
+  // bad id / missing file.
+  const subagent = path.match(/^\/sessions\/([^/]+)\/subagents\/([^/]+)$/);
+  if (method === "GET" && subagent) {
+    const id = decodeURIComponent(subagent[1]!);
+    const agentId = decodeURIComponent(subagent[2]!);
+    const tx = await getSubagentTranscript(id, agentId);
+    if (!tx) return json({ ok: false, reason: "not-found" }, 404);
+    return json(tx);
+  }
+
+  const skills = path.match(/^\/sessions\/([^/]+)\/skills$/);
+  if (method === "GET" && skills) {
+    return json(await sessionSkills(decodeURIComponent(skills[1]!)));
   }
 
   const decision = path.match(/^\/sessions\/([^/]+)\/decision$/);
@@ -453,8 +572,14 @@ async function route(req: Request): Promise<Response> {
       return json({ ok: false, reason: "bad-decision" }, 400);
     }
     const reason = typeof body.reason === "string" ? body.reason : undefined;
-    decideApproval(decodeURIComponent(decision[1]!), body.decision, reason);
-    return json({ ok: true });
+    const id = decodeURIComponent(decision[1]!);
+    // Detached (blocking-hook) approvals resolve via the decision file; an attached
+    // session has no such file, so drive its on-screen prompt with pane keystrokes.
+    if (listPendingApprovals().some((a) => a.sessionId === id)) {
+      decideApproval(id, body.decision, reason);
+      return json({ ok: true });
+    }
+    return sendResult(await decideAttachedApproval(id, body.decision));
   }
 
   const rewind = path.match(/^\/sessions\/([^/]+)\/rewind$/);
@@ -496,11 +621,19 @@ async function route(req: Request): Promise<Response> {
 
   const answer = path.match(/^\/sessions\/([^/]+)\/answer$/);
   if (method === "POST" && answer) {
-    const body = (await req.json().catch(() => ({}))) as { selection?: unknown };
-    const sel = body.selection;
-    const valid = typeof sel === "number" || (Array.isArray(sel) && sel.every((n) => typeof n === "number"));
+    const body = (await req.json().catch(() => ({}))) as { selections?: unknown };
+    const sels = body.selections;
+    // One entry per question: each is a number (single-select) or number[] (multi-select).
+    const valid =
+      Array.isArray(sels) &&
+      sels.length > 0 &&
+      sels.every(
+        (s) => typeof s === "number" || (Array.isArray(s) && s.every((n) => typeof n === "number")),
+      );
     if (!valid) return json({ ok: false, reason: "bad-selection" }, 400);
-    return sendResult(await answerSessionQuestion(decodeURIComponent(answer[1]!), sel as number | number[]));
+    return sendResult(
+      await answerSessionQuestion(decodeURIComponent(answer[1]!), sels as (number | number[])[]),
+    );
   }
 
   // Mark read (cleared the unread glow on open) — clears the monitor's ⚡ on both devices.
@@ -516,6 +649,19 @@ async function route(req: Request): Promise<Response> {
     const result = await archiveSession(decodeURIComponent(archive[1]!));
     sessionsCache = null; // force re-projection — the killed pane drops from the next list
     broadcast({ type: "session-changed", id: decodeURIComponent(archive[1]!) });
+    return sendResult(result);
+  }
+
+  // Interrupt (send Escape to stop a running turn). Interrupt fires no Stop hook, so the
+  // event-sourced status stays "running"; nativeStatus de-latches it to "ready" ~1.5s
+  // later but emits no SSE. So on success we poll nativeStatus and broadcast once it
+  // leaves "running", pushing the flip to the list + other clients. The poll runs
+  // un-awaited (fire-and-forget) so the response returns immediately.
+  const interrupt = path.match(/^\/sessions\/([^/]+)\/interrupt$/);
+  if (method === "POST" && interrupt) {
+    const id = decodeURIComponent(interrupt[1]!);
+    const result = await interruptSession(id);
+    if (result.ok) reconcileAfterInterrupt(id);
     return sendResult(result);
   }
 

@@ -18,6 +18,10 @@ caffeinate -s env CSM_BRIDGE_TOKEN=<your-token> csm bridge
 Generate a token once with `openssl rand -hex 32`. The bridge **refuses to start**
 without `CSM_BRIDGE_TOKEN`, or if bound to a non-loopback / non-tailnet address.
 
+The line above is for a quick foreground run. For an **always-on** bridge, run it as a
+launchd service instead (auto-start on login, auto-restart on crash) — see [Run as a
+service](#run-as-a-launchd-service-always-on) below.
+
 ### 2. Expose it over Tailscale with `tailscale serve`
 
 macOS Tailscale runs in userspace mode and will **not** deliver inbound TCP to a
@@ -42,6 +46,50 @@ http://<your-mac>.<tailnet>.ts.net:8473/
 ```
 
 Paste the token into the field → **Connect**. You'll see the live session list.
+
+### Run as a launchd service (always-on)
+
+So the bridge survives terminal close, logout, and crashes — instead of being held by
+a foreground process. Write `~/Library/LaunchAgents/com.csm.bridge.plist` (chmod `600` —
+it holds the token), then load it. `KeepAlive` restarts it on crash; `RunAtLoad` starts
+it at login. It binds loopback; `tailscale serve` (step 2) still fronts it.
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.csm.bridge</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/caffeinate</string><string>-s</string>
+    <string>/opt/homebrew/bin/bun</string><string>--env-file=/dev/null</string>
+    <string>/opt/homebrew/bin/csm</string><string>bridge</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>CSM_BRIDGE_TOKEN</key><string>&lt;your-token&gt;</string>
+    <key>PATH</key><string>/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+  <key>WorkingDirectory</key><string>/Users/&lt;you&gt;/Documents/csm</string>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>/Users/&lt;you&gt;/.config/csm/bridge.log</string>
+  <key>StandardErrorPath</key><string>/Users/&lt;you&gt;/.config/csm/bridge.log</string>
+</dict>
+</plist>
+```
+
+```sh
+chmod 600 ~/Library/LaunchAgents/com.csm.bridge.plist
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.csm.bridge.plist  # load + start
+launchctl kickstart -k gui/$(id -u)/com.csm.bridge                            # restart (after a code edit)
+launchctl bootout gui/$(id -u)/com.csm.bridge                                 # stop + unload
+tail -f ~/.config/csm/bridge.log                                              # logs
+```
+
+Editing bridge source still requires a restart — the server loads its modules at launch —
+but it's now one `kickstart -k` instead of kill + relaunch.
 
 ## Using it
 
