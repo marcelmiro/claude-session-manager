@@ -3,9 +3,31 @@ import type { RepoGroup, DisplayRow, Session } from "../types";
 import { C, statusColor, statusDot } from "./colors";
 import { formatTimeAgo } from "../core/status";
 import { extractTicketId } from "../core/git";
-import { buildSessionLabel } from "../core/session-label";
+import { buildSessionLabel, disambiguateNames } from "../core/session-label";
 
 export { extractTicketId, buildSessionLabel };
+
+/**
+ * Map sessionId → display name, disambiguating same-repo name collisions
+ * (`fix-auth`, `fix-auth-2`) across the labeled session rows. Only rows actually
+ * rendered with a label participate, so a collapsed/hidden archived session never
+ * perturbs a visible name.
+ */
+function disambiguationMap(rows: DisplayRow[]): Map<string, string> {
+  const byRepo = new Map<string, Array<{ id: string; name: string }>>();
+  for (const row of rows) {
+    if (row.type !== "session") continue;
+    const s = row.session;
+    const bucket = byRepo.get(s.repo);
+    if (bucket) bucket.push({ id: s.id, name: s.name });
+    else byRepo.set(s.repo, [{ id: s.id, name: s.name }]);
+  }
+  const out = new Map<string, string>();
+  for (const items of byRepo.values()) {
+    for (const [id, name] of disambiguateNames(items)) out.set(id, name);
+  }
+  return out;
+}
 
 /**
  * Converts RepoGroup array into a flat list of DisplayRow items.
@@ -75,6 +97,7 @@ export function renderSessionList(
   attentionKeys?: Set<string>,
 ): void {
   const lines: string[] = [];
+  const dnMap = disambiguationMap(rows);
 
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i];
@@ -127,7 +150,7 @@ export function renderSessionList(
       const statusText = (session.status === "ready" ? "input" : session.status).padEnd(8);
       const timeStr = formatTimeAgo(session.modified).padStart(5);
 
-      const rawLabel = buildSessionLabel(session);
+      const rawLabel = buildSessionLabel(session, dnMap.get(session.id));
       const labelMax = Math.max(8, contentWidth - 2 - 15 - 2);
       const truncLabel = rawLabel.length > labelMax
         ? rawLabel.slice(0, labelMax - 1) + "\u2026"

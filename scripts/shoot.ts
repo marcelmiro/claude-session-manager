@@ -165,7 +165,12 @@ async function main() {
   await navigate(cdp, `${BASE}/`);
   await shoot(cdp, "list.png");
 
-  // 3c. Open the first (blocked) session → detail with the question card + styled tags.
+  // 3c. Open the new-session repo picker → repos ordered, worktrees nested under base.
+  await cdp.send("Runtime.evaluate", { expression: "document.querySelector('[aria-label=\"New session\"]')?.click()" });
+  await shoot(cdp, "newsession.png");
+
+  // 3d. Open the first (blocked) session → detail with the question card + styled tags.
+  await navigate(cdp, `${BASE}/`);
   await cdp.send("Runtime.evaluate", { expression: "document.querySelector('.row')?.click()" });
   await shoot(cdp, "detail.png", 900);
 

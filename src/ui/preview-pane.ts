@@ -655,7 +655,11 @@ export async function updatePreview(
         if (pending?.question) {
           // AskUserQuestion — show question with numbered options
           const q = pending.question;
-          dl.push(`{bold}${esc(q.header || "Question")}{/bold}`);
+          const count = pending.questions?.length ?? 1;
+          // Multi-question prompts only render Q1 here — flag the rest so a desk user
+          // sees the prompt is multi-part (1-9 opens the picker for all of them).
+          const more = count > 1 ? `  {${C.dim}-fg}(${count} questions){/${C.dim}-fg}` : "";
+          dl.push(`{bold}${esc(q.header || "Question")}{/bold}${more}`);
           dl.push("");
           dl.push(`  ${esc(truncateAtWord(q.question, contentWidth * 2))}`);
           dl.push("");

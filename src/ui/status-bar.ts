@@ -17,8 +17,14 @@ export function renderStatusBar(
   if (pendingToolCall) {
     const common = `${kl("j/k", "move")}  ${kl("\u23CE", "switch")}  ${kl("Space", "more")}  ${kl("q", "quit")}`;
     if (pendingToolCall.question) {
-      const n = pendingToolCall.question.options.length;
-      box.setContent(`${kl(`1-${n}`, "answer")}  ${kl("t", "custom")}  │  ${common}`);
+      const count = pendingToolCall.questions?.length ?? 1;
+      if (count > 1) {
+        // Several questions — a bare digit opens the picker rather than answering Q1.
+        box.setContent(`${kl("1-9", `${count} questions`)}  │  ${common}`);
+      } else {
+        const n = pendingToolCall.question.options.length;
+        box.setContent(`${kl(`1-${n}`, "answer")}  ${kl("t", "custom")}  │  ${common}`);
+      }
     } else {
       box.setContent(`${kl("y", "approve")}  ${kl("Y", "always")}  │  ${common}`);
     }

@@ -126,22 +126,40 @@ function renderRepoStep(lines: string[], listBox: Widgets.BoxElement, state: Wiz
     const isSelected = i === state.repoIndex;
     const cursor = isSelected ? `{${C.peach}-fg}▸{/${C.peach}-fg}` : " ";
     const abbrevPath = abbreviatePath(repo.path);
-    const branchStr = `{${C.dim}-fg}${repo.currentBranch}{/${C.dim}-fg}`;
 
-    // Pad repo name and path
-    const nameStr = repo.name.padEnd(20);
-    const maxPathLen = Math.max(10, boxWidth - 30 - repo.currentBranch.length);
+    // Name cell: base repos show their name; worktrees show their branch, tree-indented.
+    // Build the plain string (for width-aware padding) and the colored markup separately.
+    let namePlain: string;
+    let nameColored: string;
+    if (repo.isWorktree) {
+      const conn = repo.isLastWorktree ? "└" : "├";
+      const label = repo.currentBranch;
+      namePlain = `  ${conn} ${label}`;
+      const labelColor = isSelected ? C.fg : C.muted;
+      nameColored = `  {${C.dim}-fg}${conn}{/${C.dim}-fg} {${labelColor}-fg}${label}{/${labelColor}-fg}`;
+    } else {
+      namePlain = repo.name;
+      nameColored = isSelected
+        ? `{bold}{${C.fg}-fg}${repo.name}{/${C.fg}-fg}{/bold}`
+        : `{${C.muted}-fg}${repo.name}{/${C.muted}-fg}`;
+    }
+    const namePad = " ".repeat(Math.max(1, 20 - namePlain.length));
+
+    // Right column: base repos show their branch; worktrees a "worktree" tag.
+    const rightLabel = repo.isWorktree ? "worktree" : repo.currentBranch;
+    const maxPathLen = Math.max(10, boxWidth - 30 - rightLabel.length);
     const pathStr = abbrevPath.length > maxPathLen ? "…" + abbrevPath.slice(-maxPathLen + 1) : abbrevPath;
+    const rightStr = `{${C.dim}-fg}${rightLabel}{/${C.dim}-fg}`;
 
     if (isSelected) {
       lines.push(
-        `{${C.surface}-bg} ${cursor} {bold}{${C.fg}-fg}${nameStr}{/${C.fg}-fg}{/bold}` +
-        `{${C.muted}-fg}${pathStr.padEnd(maxPathLen)}{/${C.muted}-fg} ${branchStr}{/${C.surface}-bg}`,
+        `{${C.surface}-bg} ${cursor} ${nameColored}${namePad}` +
+        `{${C.muted}-fg}${pathStr.padEnd(maxPathLen)}{/${C.muted}-fg} ${rightStr}{/${C.surface}-bg}`,
       );
     } else {
       lines.push(
-        ` ${cursor} {${C.muted}-fg}${nameStr}{/${C.muted}-fg}` +
-        `{${C.dim}-fg}${pathStr.padEnd(maxPathLen)}{/${C.dim}-fg} ${branchStr}`,
+        ` ${cursor} ${nameColored}${namePad}` +
+        `{${C.dim}-fg}${pathStr.padEnd(maxPathLen)}{/${C.dim}-fg} ${rightStr}`,
       );
     }
   }
@@ -254,9 +272,19 @@ function renderWorktreeStep(lines: string[], state: WizardState): void {
  */
 export async function renderWizardPreview(previewBox: Widgets.BoxElement, state: WizardState): Promise<void> {
   if (state.step === "repo") {
-    previewBox.setContent(
-      `\n{${C.muted}-fg}  Select a repo to start a new Claude session{/${C.muted}-fg}`,
-    );
+    const sel = state.repos[state.repoIndex];
+    if (sel?.isWorktree) {
+      previewBox.setContent(
+        `{${C.muted}-fg}  Worktree{/${C.muted}-fg}\n\n` +
+        `  {${C.dim}-fg}Branch:{/${C.dim}-fg} {${C.fg}-fg}${sel.currentBranch}{/${C.fg}-fg}\n` +
+        `  {${C.dim}-fg}Path:{/${C.dim}-fg}   {${C.fg}-fg}${abbreviatePath(sel.path)}{/${C.fg}-fg}\n\n` +
+        `  {${C.dim}-fg}⏎ launches Claude here directly{/${C.dim}-fg}`,
+      );
+    } else {
+      previewBox.setContent(
+        `\n{${C.muted}-fg}  Select a repo to start a new Claude session{/${C.muted}-fg}`,
+      );
+    }
     return;
   }
 
@@ -406,7 +434,14 @@ function handleRepoKey(state: WizardState, keyName: string): WizardAction {
       return { type: "render" };
     case "enter":
     case "return": {
-      state.selectedRepo = state.repos[state.repoIndex];
+      const sel = state.repos[state.repoIndex];
+      state.selectedRepo = sel;
+      if (sel.isWorktree) {
+        // Existing worktree: launch Claude there directly on its current branch.
+        const branch: WizardBranch = { name: sel.currentBranch, isRemote: false, isCurrent: true, fullRef: sel.currentBranch };
+        state.selectedBranch = branch;
+        return { type: "launch", repo: sel, branch, worktreeName: "" };
+      }
       state.step = "branch";
       state.branchIndex = 0;
       state.branchFilter = "";

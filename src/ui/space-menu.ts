@@ -6,13 +6,13 @@
 import { C } from "./colors";
 import { handleTextInputKey, renderTextWithCursor } from "./text-input";
 
-export type SpaceMenuLevel = "root" | "send-message";
+export type SpaceMenuLevel = "root" | "send-message" | "pin-name";
 
 export interface SpaceMenuState {
   level: SpaceMenuLevel;
-  /** Back target when exiting send-message */
+  /** Back target when exiting an input level */
   previousLevel?: SpaceMenuLevel;
-  /** Text input state for send-message */
+  /** Text input state, shared by send-message and pin-name */
   messageText: string;
   messageCursor: number;
   /**
@@ -31,7 +31,9 @@ export type SpaceMenuAction =
   | { type: "exec"; command: "copy" | "rename" | "kill" | "fork" }
   | { type: "send-keys"; keys: string[] }
   | { type: "send-text"; text: string }
-  | { type: "start-input" };
+  | { type: "start-input" }
+  | { type: "start-pin-input" }
+  | { type: "pin-name"; text: string };
 
 // --- State lifecycle ---
 
@@ -54,6 +56,7 @@ function renderRoot(canSendMessage: boolean): string {
   const lines = [
     keyLabel("c", "copy"),
     keyLabel("r", "rename"),
+    keyLabel("R", "pin name"),
     keyLabel("x", "kill"),
     keyLabel("f", "fork"),
   ];
@@ -62,13 +65,13 @@ function renderRoot(canSendMessage: boolean): string {
   return lines.join("\n");
 }
 
-function renderSendMessage(text: string, cursor: number): string {
+function renderTextLevel(title: string, hint: string, text: string, cursor: number): string {
   return [
-    ` {bold}Send message{/bold}`,
+    ` {bold}${title}{/bold}`,
     "",
     ` {${C.peach}-fg}\u276f{/${C.peach}-fg} ${renderTextWithCursor(text, cursor)}`,
     "",
-    `  {${C.dim}-fg}Enter send \u00b7 Esc back{/${C.dim}-fg}`,
+    `  {${C.dim}-fg}${hint}{/${C.dim}-fg}`,
   ].join("\n");
 }
 
@@ -77,7 +80,9 @@ export function renderSpaceMenu(state: SpaceMenuState): string {
     case "root":
       return renderRoot(state.canSendMessage);
     case "send-message":
-      return renderSendMessage(state.messageText, state.messageCursor);
+      return renderTextLevel("Send message", "Enter send \u00b7 Esc back", state.messageText, state.messageCursor);
+    case "pin-name":
+      return renderTextLevel("Pin name", "Enter pin \u00b7 Esc back", state.messageText, state.messageCursor);
   }
 }
 
@@ -86,8 +91,10 @@ export function renderSpaceMenu(state: SpaceMenuState): string {
 export function getMenuDimensions(state: SpaceMenuState): { width: number; height: number } {
   switch (state.level) {
     case "root":
-      return { width: 24, height: state.canSendMessage ? 7 : 6 };
+      // +1 for the "R pin name" line; +1 more when send-message is offered.
+      return { width: 24, height: state.canSendMessage ? 8 : 7 };
     case "send-message":
+    case "pin-name":
       return { width: 42, height: 7 };
   }
 }
@@ -103,7 +110,9 @@ export function handleSpaceMenuKey(
     case "root":
       return handleRootKey(state, keyName, ch);
     case "send-message":
-      return handleSendMessageKey(state, keyName, ch);
+      return handleTextLevelKey(state, keyName, ch, (text) => ({ type: "send-text", text }));
+    case "pin-name":
+      return handleTextLevelKey(state, keyName, ch, (text) => ({ type: "pin-name", text }));
   }
 }
 
@@ -112,19 +121,23 @@ function handleRootKey(state: SpaceMenuState, _keyName: string, ch: string): Spa
     case "m": return state.canSendMessage ? { type: "start-input" } : { type: "noop" };
     case "c": return { type: "exec", command: "copy" };
     case "r": return { type: "exec", command: "rename" };
+    case "R": return { type: "start-pin-input" };
     case "x": return { type: "exec", command: "kill" };
     case "f": return { type: "exec", command: "fork" };
     default: return { type: "close" };
   }
 }
 
-function handleSendMessageKey(state: SpaceMenuState, keyName: string, ch: string): SpaceMenuAction {
+function handleTextLevelKey(
+  state: SpaceMenuState,
+  keyName: string,
+  ch: string,
+  onSubmit: (text: string) => SpaceMenuAction,
+): SpaceMenuAction {
   if (keyName === "escape") return { type: "back" };
 
   if (keyName === "enter" || keyName === "return") {
-    if (state.messageText.trim()) {
-      return { type: "send-text", text: state.messageText };
-    }
+    if (state.messageText.trim()) return onSubmit(state.messageText);
     return { type: "noop" };
   }
 

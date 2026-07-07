@@ -5,9 +5,9 @@ import { buildDisplayRows, renderSessionList, moveSelection, moveToGroup, getSel
 import { handleTextInputKey, renderTextWithCursor } from "./ui/text-input";
 import { updatePreview, getPreviewPlainText, renderMessage, getSessionPath } from "./ui/preview-pane";
 import { discoverSessions, groupSessions, seedPaneSessionCache } from "./core/sessions";
-import { readPreviewMessages, type PendingToolCall } from "./core/jsonl-reader";
+import { readPreviewMessages, type PendingToolCall, type PendingQuestion } from "./core/jsonl-reader";
 import { switchToPane, getMainSession, killPane, sendKeys, sendKeysSequential, sendTextAndEnter, answerQuestion } from "./core/tmux";
-import { loadNameCache, getSessionName, generateAIName, saveNameCache, type NameCache } from "./core/names";
+import { loadNameCache, getSessionName, generateAIName, saveNameCache, normalizeName, slugify, type NameCache } from "./core/names";
 import { loadConfig } from "./core/config";
 import { loadState, saveState, loadPaneSessions } from "./core/state";
 import { listPendingApprovals, decideApproval } from "./core/approval";
@@ -17,6 +17,7 @@ import { initWizard, renderWizard, renderWizardPreview, renderWizardStatusBar, h
 import { loadAllSessions, filterAndRankEntries, type SearchEntry } from "./core/search";
 import { renderSearchResults } from "./ui/search-list";
 import { createSpaceMenuState, renderSpaceMenu, handleSpaceMenuKey, getMenuDimensions, type SpaceMenuState } from "./ui/space-menu";
+import { createQuestionPicker, renderQuestionPicker, handleQuestionPickerKey, getPickerDimensions, type QuestionPickerState } from "./ui/question-picker";
 import { C } from "./ui/colors";
 import type { DisplayRow, Session, CsmConfig, WizardState, WizardRepo, GlobalSearchState } from "./types";
 import { resolve } from "path";
@@ -45,7 +46,7 @@ let flashTimer: ReturnType<typeof setTimeout> | null = null;
 let isRefreshing = false;
 let previewGeneration = 0;
 let showArchived = false;
-let nameCache: NameCache = { version: 3, names: {}, sources: {} };
+let nameCache: NameCache = { version: 5, names: {}, sources: {}, pinned: {} };
 let notifConfig: CsmConfig = { statusMonitor: true, windowPrefix: true, nativeNotification: true, repoPaths: [] };
 
 // Wizard state (null = not in wizard mode)
@@ -81,6 +82,11 @@ let cachedPendingToolCall: PendingToolCall | null = null;
 // Inline text input state for custom answers (t key)
 let customInputState: { text: string; cursor: number } | null = null;
 
+// Multi-question AskUserQuestion picker overlay (opens when a prompt has >1 question).
+let multiQuestionPicker: QuestionPickerState | null = null;
+// Suppress the picker's own keypress handler from re-processing the digit that opened it.
+let pickerJustOpened = false;
+
 // Guard against async double-fire (e.g. Enter pressed twice before first completes)
 let isExiting = false;
 
@@ -110,7 +116,7 @@ function updateStatusBar() {
   if (globalSearch) return; // Don't overwrite search bar
   if (spaceMenu) return; // Don't overwrite while menu is open
   if (flashTimer) return; // Don't overwrite active flash messages
-  if (customInputState) return; // Don't overwrite inline text input
+  if (customInputState || multiQuestionPicker) return; // Don't overwrite inline text input
   const session = getSelectedSession();
   renderStatusBar(statusBar, session?.status, showArchived,
     session?.status === "waiting" ? cachedPendingToolCall : null);
@@ -168,6 +174,33 @@ function closeSpaceMenu() {
   screen.render();
 }
 
+// --- Multi-question picker (reuses the menu overlay box; never open alongside the space menu) ---
+
+function updateQuestionBox() {
+  if (!multiQuestionPicker) return;
+  const box = getOrCreateMenuBox();
+  const dims = getPickerDimensions(multiQuestionPicker);
+  box.width = dims.width;
+  box.height = dims.height;
+  box.setContent(renderQuestionPicker(multiQuestionPicker));
+}
+
+function openQuestionPicker(questions: PendingQuestion[]) {
+  multiQuestionPicker = createQuestionPicker(questions);
+  const box = getOrCreateMenuBox();
+  updateQuestionBox();
+  box.show();
+  screen.render();
+}
+
+function closeQuestionPicker() {
+  multiQuestionPicker = null;
+  const box = getOrCreateMenuBox();
+  box.hide();
+  updateStatusBar();
+  screen.render();
+}
+
 async function handleCopy() {
   const text = getPreviewPlainText();
   if (!text) {
@@ -200,17 +233,22 @@ function handleRename() {
   const sessionSummary = session.summary;
   const sessionFirstPrompt = session.firstPrompt;
   const sessionLastPrompt = session.lastPrompt;
-  delete nameCache.names[sessionId];
-  delete nameCache.sources[sessionId];
   generateAIName(sessionFirstPrompt, sessionSummary, session.branch, sessionLastPrompt).then(async (name) => {
+    // Reload-and-merge: capture any pin/name the monitor wrote while `claude -p` ran.
+    // `r` un-pins so the fresh AI name takes over (or regenerates later if it failed).
+    const fresh = await loadNameCache();
+    delete fresh.pinned[sessionId];
     if (name) {
-      nameCache.names[sessionId] = name;
-      nameCache.sources[sessionId] = sessionLastPrompt || sessionSummary || sessionFirstPrompt;
-      await saveNameCache(nameCache);
-      await refresh();
+      fresh.names[sessionId] = name;
+      fresh.sources[sessionId] = sessionLastPrompt || sessionSummary || sessionFirstPrompt;
     } else {
-      flashStatusMessage(`{${C.dim}-fg}Name generation failed{/${C.dim}-fg}`);
+      delete fresh.names[sessionId];
+      delete fresh.sources[sessionId];
     }
+    nameCache = fresh;
+    await saveNameCache(fresh);
+    await refresh();
+    if (!name) flashStatusMessage(`{${C.dim}-fg}Name generation failed{/${C.dim}-fg}`);
   });
 }
 
@@ -656,7 +694,7 @@ async function handleFork() {
   if (!targetSession) return;
 
   const repoName = session.repoPath.split("/").filter(Boolean).pop() ?? "claude";
-  const forkName = buildBaseName(repoName, session.name || undefined, true);
+  const forkName = buildBaseName(repoName, session.name ? slugify(session.name) || undefined : undefined, true);
 
   cleanup();
   try {
@@ -710,7 +748,7 @@ function optimisticApprove(session: Session) {
 
 /** Render inline text input bar for custom answers */
 function renderCustomInputBar() {
-  if (!customInputState) return;
+  if (!customInputState || multiQuestionPicker) return;
   const text = renderTextWithCursor(customInputState.text, customInputState.cursor);
   statusBar.setContent(
     `  {${C.peach}-fg}❯{/${C.peach}-fg} ${text}` +
@@ -721,7 +759,7 @@ function renderCustomInputBar() {
 // --- Contextual key handler (y/Y/1-9/t for waiting sessions) ---
 
 screen.on("keypress", async (_ch: string, key: any) => {
-  if (!key || wizardState || globalSearch || spaceMenu) return;
+  if (!key || wizardState || globalSearch || spaceMenu || multiQuestionPicker) return;
 
   const keyName = key.full || key.name || "";
   const ch = _ch || "";
@@ -805,6 +843,17 @@ screen.on("keypress", async (_ch: string, key: any) => {
   // 1-9 = answer question option via A8 index-nav (structured options, not glyphs)
   const num = parseInt(ch, 10);
   if (num >= 1 && num <= 9) {
+    // Multi-question prompt: a digit can't answer in place (it would land on whatever
+    // question tab is focused) — open the picker overlay instead. The digit that opened
+    // it is swallowed by `pickerJustOpened` so it doesn't also pre-select inside.
+    if (cachedPendingToolCall?.questions && cachedPendingToolCall.questions.length > 1) {
+      spaceMenuHandledKey = true;
+      queueMicrotask(() => { spaceMenuHandledKey = false; });
+      pickerJustOpened = true;
+      queueMicrotask(() => { pickerJustOpened = false; });
+      openQuestionPicker(cachedPendingToolCall.questions);
+      return;
+    }
     if (cachedPendingToolCall?.question) {
       const q = cachedPendingToolCall.question;
       if (num <= q.options.length) {
@@ -812,7 +861,7 @@ screen.on("keypress", async (_ch: string, key: any) => {
         queueMicrotask(() => { spaceMenuHandledKey = false; });
         const idx = num - 1;
         // multiSelect submits via the Submit tab; single-select Enters on the option.
-        await answerQuestion(paneId, q.multiSelect ? [idx] : idx);
+        await answerQuestion(paneId, [q.multiSelect ? [idx] : idx]);
         optimisticApprove(session);
         await advanceToNextWaiting();
         screen.render();
@@ -821,8 +870,13 @@ screen.on("keypress", async (_ch: string, key: any) => {
     }
   }
 
-  // t = type custom answer
+  // t = type custom answer (single-question only; per-question free text on a
+  // multi-question prompt would send blind to the focused tab — disabled there).
   if (ch === "t" && !key.ctrl && !key.meta) {
+    if (cachedPendingToolCall?.questions && cachedPendingToolCall.questions.length > 1) {
+      flashStatusMessage(`{${C.dim}-fg}Use 1-9 to open the multi-question picker{/${C.dim}-fg}`);
+      return;
+    }
     spaceMenuHandledKey = true;
     queueMicrotask(() => { spaceMenuHandledKey = false; });
     customInputState = { text: "", cursor: 0 };
@@ -832,43 +886,82 @@ screen.on("keypress", async (_ch: string, key: any) => {
   }
 });
 
+// Multi-question picker keypress handler (intercepts all keys while the picker is open).
+screen.on("keypress", async (_ch: string, key: any) => {
+  if (!multiQuestionPicker || !key) return;
+  // Swallow the digit that opened the picker (same keypress event fires this handler too).
+  if (pickerJustOpened) return;
+
+  const keyName = key.full || key.name || "";
+  const ch = _ch || "";
+
+  // Block the screen.key() handlers from also acting on this key.
+  spaceMenuHandledKey = true;
+  queueMicrotask(() => { spaceMenuHandledKey = false; });
+
+  const action = handleQuestionPickerKey(multiQuestionPicker, keyName, ch);
+  switch (action.type) {
+    case "render":
+      updateQuestionBox();
+      screen.render();
+      break;
+    case "cancel":
+      closeQuestionPicker();
+      break;
+    case "submit": {
+      const session = getSelectedSession();
+      const paneId = session?.tmuxPane?.paneId;
+      closeQuestionPicker();
+      if (!paneId) {
+        flashStatusMessage(`{${C.dim}-fg}No active pane{/${C.dim}-fg}`);
+        break;
+      }
+      await answerQuestion(paneId, action.selections);
+      if (session) optimisticApprove(session);
+      await advanceToNextWaiting();
+      screen.render();
+      break;
+    }
+  }
+});
+
 // Key bindings (guarded: no-op when wizard, search, or space menu is active)
-screen.key(["j", "down"], () => { if (wizardState || globalSearch || spaceMenu || customInputState) return; handleSelect(1); });
-screen.key(["k", "up"], () => { if (wizardState || globalSearch || spaceMenu || customInputState) return; handleSelect(-1); });
-screen.key(["S-j"], () => { if (wizardState || globalSearch || spaceMenu || customInputState) return; handleGroupSelect(1); });
-screen.key(["S-k"], () => { if (wizardState || globalSearch || spaceMenu || customInputState) return; handleGroupSelect(-1); });
-screen.key(["enter"], () => { if (wizardState || wizardHandledKey || globalSearch || spaceMenu || spaceMenuHandledKey || customInputState) return; handleEnterContextual(); });
-screen.key(["x"], () => { if (wizardState || globalSearch || spaceMenu || spaceMenuHandledKey || customInputState) return; handleKill(); });
-screen.key(["f"], () => { if (wizardState || globalSearch || spaceMenu || spaceMenuHandledKey || customInputState) return; handleFork(); });
+screen.key(["j", "down"], () => { if (wizardState || globalSearch || spaceMenu || customInputState || multiQuestionPicker) return; handleSelect(1); });
+screen.key(["k", "up"], () => { if (wizardState || globalSearch || spaceMenu || customInputState || multiQuestionPicker) return; handleSelect(-1); });
+screen.key(["S-j"], () => { if (wizardState || globalSearch || spaceMenu || customInputState || multiQuestionPicker) return; handleGroupSelect(1); });
+screen.key(["S-k"], () => { if (wizardState || globalSearch || spaceMenu || customInputState || multiQuestionPicker) return; handleGroupSelect(-1); });
+screen.key(["enter"], () => { if (wizardState || wizardHandledKey || globalSearch || spaceMenu || spaceMenuHandledKey || customInputState || multiQuestionPicker) return; handleEnterContextual(); });
+screen.key(["x"], () => { if (wizardState || globalSearch || spaceMenu || spaceMenuHandledKey || customInputState || multiQuestionPicker) return; handleKill(); });
+screen.key(["f"], () => { if (wizardState || globalSearch || spaceMenu || spaceMenuHandledKey || customInputState || multiQuestionPicker) return; handleFork(); });
 screen.key(["a"], () => {
-  if (wizardState || globalSearch || spaceMenu || customInputState) return;
+  if (wizardState || globalSearch || spaceMenu || customInputState || multiQuestionPicker) return;
   showArchived = !showArchived;
   refresh();
 });
 screen.key(["u"], () => {
-  if (wizardState || globalSearch || spaceMenu || customInputState) return;
+  if (wizardState || globalSearch || spaceMenu || customInputState || multiQuestionPicker) return;
   previewBox.scroll(-6);
   screen.render();
 });
 screen.key(["d"], () => {
-  if (wizardState || globalSearch || spaceMenu || customInputState) return;
+  if (wizardState || globalSearch || spaceMenu || customInputState || multiQuestionPicker) return;
   previewBox.scroll(6);
   screen.render();
 });
 screen.key(["q"], () => {
-  if (wizardState || wizardHandledKey || globalSearch || spaceMenu || spaceMenuHandledKey || customInputState) return;
+  if (wizardState || wizardHandledKey || globalSearch || spaceMenu || spaceMenuHandledKey || customInputState || multiQuestionPicker) return;
   cleanup();
   process.exit(0);
 });
 screen.key(["escape"], () => {
-  if (wizardState || wizardHandledKey || globalSearch || spaceMenu || spaceMenuHandledKey || customInputState) return;
+  if (wizardState || wizardHandledKey || globalSearch || spaceMenu || spaceMenuHandledKey || customInputState || multiQuestionPicker) return;
   cleanup();
   process.exit(0);
 });
 
 // Quick new session in selected repo (`N` / Shift+N)
 screen.key(["S-n"], async () => {
-  if (wizardState || globalSearch || spaceMenu || customInputState) return;
+  if (wizardState || globalSearch || spaceMenu || customInputState || multiQuestionPicker) return;
 
   const session = getSelectedSession();
   if (!session?.repoPath) {
@@ -897,7 +990,7 @@ screen.key(["S-n"], async () => {
 
 // New Session wizard (`n` key)
 screen.key(["n"], async () => {
-  if (wizardState || globalSearch || spaceMenu || customInputState) return;
+  if (wizardState || globalSearch || spaceMenu || customInputState || multiQuestionPicker) return;
 
   // Pause refresh loop
   if (refreshTimer) { clearInterval(refreshTimer); refreshTimer = null; }
@@ -950,7 +1043,7 @@ let searchJustActivated = false;
 
 // Space key opens action menu
 screen.key(["space"], () => {
-  if (wizardState || globalSearch || spaceMenu || customInputState) return;
+  if (wizardState || globalSearch || spaceMenu || customInputState || multiQuestionPicker) return;
   openSpaceMenu();
 });
 
@@ -1124,6 +1217,38 @@ screen.on("keypress", async (_ch: string, key: any) => {
       updateMenuBox();
       screen.render();
       break;
+    case "start-pin-input":
+      spaceMenu.level = "pin-name";
+      spaceMenu.previousLevel = "root";
+      spaceMenu.messageText = "";
+      spaceMenu.messageCursor = 0;
+      updateMenuBox();
+      screen.render();
+      break;
+    case "pin-name": {
+      const clean = normalizeName(action.text);
+      if (!clean || !slugify(clean)) {
+        // Empty or symbol-only input (slugifies to nothing → blank tmux tab) — keep
+        // the input open for retry.
+        flashStatusMessage(`{${C.dim}-fg}Invalid name{/${C.dim}-fg}`);
+        break;
+      }
+      const session = getSelectedSession();
+      const sessionId = session?.id;
+      closeSpaceMenu(); // Close before await to prevent double-fire
+      if (!sessionId) {
+        flashStatusMessage(`{${C.dim}-fg}No session selected{/${C.dim}-fg}`);
+        break;
+      }
+      // Reload-and-merge so a name the monitor wrote meanwhile isn't clobbered.
+      const fresh = await loadNameCache();
+      fresh.pinned[sessionId] = clean;
+      nameCache = fresh;
+      await saveNameCache(fresh);
+      await refresh();
+      flashStatusMessage(`{${C.mint}-fg}Pinned ${clean}{/${C.mint}-fg}`);
+      break;
+    }
     case "send-text": {
       const session = getSelectedSession();
       const text = action.text;

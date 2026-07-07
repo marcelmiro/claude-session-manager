@@ -10,14 +10,14 @@
  */
 
 import { homedir } from "os";
-import { loadState, saveState, loadPaneSessions } from "./core/state";
+import { loadState, saveState, loadPaneSessions, migratePaneMap } from "./core/state";
 import { switchToPane, listPanes, renameWindow, capturePane, displayMessage } from "./core/tmux";
 import { syncWindowPrefix, stripAllPrefixes, ATTENTION_PREFIX } from "./core/notifications";
 import { findClaudeProcesses } from "./core/process";
 import { detectStatus } from "./core/status";
 import { eventSourcedStatus } from "./core/hook-events";
 import { nativeStatus } from "./core/session-state";
-import { loadNameCache } from "./core/names";
+import { loadNameCache, slugify } from "./core/names";
 import { PATHS } from "./core/config";
 
 const home = homedir();
@@ -283,6 +283,14 @@ export async function list(): Promise<void> {
     loadPaneSessions(),
   ]);
 
+  // Map each tty to its claude process (prefer one with a resolved sessionId) so a
+  // fork pane can use its real, native-resolved id instead of the parent id the hook
+  // recorded (see resolvePaneSessionId / nativeSessionIdByPid).
+  const procByTty = new Map<string, typeof processes[0]>();
+  for (const proc of processes) {
+    const existing = procByTty.get(proc.tty);
+    if (!existing || proc.sessionId) procByTty.set(proc.tty, proc);
+  }
   const claudeTtys = new Set(processes.map((p) => p.tty));
   const claudePanes = panes.filter((pane) => {
     const normalizedTty = pane.tty.replace(/^\/dev\//, "");
@@ -306,7 +314,12 @@ export async function list(): Promise<void> {
         .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, "");
       const scraper = detectStatus(plain, true);
 
-      const sessionId = paneSessions[pane.paneId];
+      // A fork's hook-owned map entry is the PARENT id; its native-resolved id
+      // (proc.sessionId) wins so it doesn't render the parent's running status.
+      const proc = procByTty.get(pane.tty.replace(/^\/dev\//, ""));
+      const sessionId = proc?.isFork
+        ? (proc.sessionId ?? paneSessions[pane.paneId])
+        : paneSessions[pane.paneId];
       const native = sessionId ? await nativeStatus(sessionId) : null;
       const eventStatus = sessionId ? await eventSourcedStatus(sessionId) : null;
 
@@ -393,9 +406,11 @@ export async function switchTo(name?: string): Promise<void> {
       const normalizedTty = pane.tty.replace(/^\/dev\//, "");
       const sessionId = ttyToSessionId.get(normalizedTty);
       if (sessionId) {
-        const cachedName = nameCache.names[sessionId]?.toLowerCase();
+        const cachedName = nameCache.names[sessionId];
         if (cachedName) {
-          score = Math.max(score, fuzzyScore(cachedName, needle));
+          // Match against both the normalized name ("fix auth") and its tmux slug
+          // ("fix-auth") — the user likely types the slug shown on the tab.
+          score = Math.max(score, fuzzyScore(cachedName.toLowerCase(), needle), fuzzyScore(slugify(cachedName), needle));
         }
       }
 
@@ -434,9 +449,12 @@ function isSubsequence(sub: string, str: string): boolean {
 // csm setup
 // ---------------------------------------------------------------------------
 
-const HOOK_VERSION = 6;
+const HOOK_VERSION = 7;
 
-// SessionStart pane→session mapper (existing; feeds processHookEvents).
+// SessionStart pane→session mapper. Writes one file per pane (panes/<paneId> → sessionId)
+// atomically (temp+rename) — the hook OWNS the map, so there's no shared-file write race and
+// no consume-once log for readers to fight over (v6 appended to a truncate-once hook-events
+// file that only the monitor persisted, leaving sessions listed-but-unsendable).
 const HOOK_SCRIPT = `#!/bin/bash
 # CSM_HOOK_VERSION=${HOOK_VERSION}
 INPUT=$(cat)
@@ -445,8 +463,9 @@ SESSION_ID=$(echo "$INPUT" | grep -o '"session_id":"[^"]*"' | head -1 | cut -d'"
 # the active pane, not the pane running this Claude session.
 PANE_ID="$TMUX_PANE"
 if [ -n "$SESSION_ID" ] && [ -n "$PANE_ID" ]; then
-  mkdir -p ~/.config/csm
-  printf '%s %s\\n' "$PANE_ID" "$SESSION_ID" >> ~/.config/csm/hook-events
+  D=~/.config/csm/panes
+  mkdir -p "$D"
+  printf '%s' "$SESSION_ID" > "$D/$PANE_ID.tmp" && mv "$D/$PANE_ID.tmp" "$D/$PANE_ID"
 fi
 `;
 
@@ -599,6 +618,10 @@ export async function setup(): Promise<void> {
     // No settings file or malformed — start fresh
   }
   if (!settings.hooks) settings.hooks = {};
+
+  // Fold the pre-v7 single-file map (+ residual hook-events) into per-pane files so sessions
+  // already running at upgrade time stay resolvable. Idempotent — a no-op once migrated.
+  await migratePaneMap();
 
   // Rewrite any missing/outdated script (version gate is per-script).
   await Bun.$`mkdir -p ${hookDir}`.quiet();

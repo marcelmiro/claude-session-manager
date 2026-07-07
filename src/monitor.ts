@@ -18,7 +18,8 @@ import { loadState, saveState, computeAggregate, buildSessionStates, loadPaneSes
 import { detectTransitions, dispatchNotifications, syncWindowPrefix, ATTENTION_PREFIX, stripAllPrefixes, desiredPrefix, buildBaseName, NAME_SEPARATOR } from "./core/notifications";
 import { getBaseRepoPath } from "./core/git";
 import { repoNameFromPath } from "./core/sessions";
-import { loadNameCache, saveNameCache, generateAIName, acquireNamingLock, releaseNamingLock, type NameCache } from "./core/names";
+import { loadNameCache, saveNameCache, generateAIName, getSessionName, slugify, acquireNamingLock, releaseNamingLock, type NameCache } from "./core/names";
+import { disambiguateNames } from "./core/session-label";
 import { findActiveSessionInfo } from "./core/sessions";
 import { homedir } from "os";
 import type { Session, AggregateStatus, PaneInfo, ClaudeProcess } from "./types";
@@ -60,7 +61,7 @@ async function saveNamingSkips(skips: NamingSkipMap): Promise<void> {
  */
 async function quickDiscoverActive(
   paneSessionMap: Record<string, string>,
-): Promise<{ sessions: Session[]; allPanes: PaneInfo[]; resumeIds: Record<string, string> }> {
+): Promise<{ sessions: Session[]; allPanes: PaneInfo[]; resumeIds: Record<string, string>; forkPaneIds: Set<string> }> {
   const [panes, processes] = await Promise.all([
     listPanes(),
     findClaudeProcesses(),
@@ -78,11 +79,13 @@ async function quickDiscoverActive(
   // Find panes with Claude processes and collect --resume session IDs
   const claudePanes: PaneInfo[] = [];
   const resumeIds: Record<string, string> = {};
+  const forkPaneIds = new Set<string>();
   for (const pane of panes) {
     const normalizedTty = pane.tty.replace(/^\/dev\//, "");
     const proc = claudeTtyMap.get(normalizedTty);
     if (proc) {
       claudePanes.push(pane);
+      if (proc.isFork) forkPaneIds.add(pane.paneId);
       if (proc.sessionId) {
         resumeIds[pane.paneId] = proc.sessionId;
       }
@@ -103,8 +106,12 @@ async function quickDiscoverActive(
 
       // Status resolution order: Claude's native status file › event-sourced hook
       // log › scraper. Keeps the monitor (sole window-naming authority) aligned
-      // with the TUI so ⚡/🔄 prefixes track Claude's real state (Inc7).
-      const sessionId = paneSessionMap[pane.paneId] ?? resumeIds[pane.paneId];
+      // with the TUI so ⚡/🔄 prefixes track Claude's real state (Inc7). A fork's
+      // native-resolved id (resumeIds) wins over the hook map, which holds the
+      // parent id — otherwise the fork renders the parent's running status.
+      const sessionId = forkPaneIds.has(pane.paneId)
+        ? (resumeIds[pane.paneId] ?? paneSessionMap[pane.paneId])
+        : (paneSessionMap[pane.paneId] ?? resumeIds[pane.paneId]);
       const native = sessionId ? await nativeStatus(sessionId) : null;
       const eventStatus = sessionId ? await eventSourcedStatus(sessionId) : null;
 
@@ -134,7 +141,7 @@ async function quickDiscoverActive(
       };
     }),
   );
-  return { sessions, allPanes: panes, resumeIds };
+  return { sessions, allPanes: panes, resumeIds, forkPaneIds };
 }
 
 function formatStatus(aggregate: AggregateStatus): string {
@@ -205,7 +212,7 @@ async function main(): Promise<void> {
   }
 
   // Quick poll active sessions (event-sourced status when a hook log exists)
-  const { sessions, allPanes, resumeIds } = await quickDiscoverActive(paneSessionMap);
+  const { sessions, allPanes, resumeIds, forkPaneIds } = await quickDiscoverActive(paneSessionMap);
   await debugLog(`discovered ${sessions.length} sessions: ${sessions.map((s) => `${s.tmuxPane!.paneId}=${s.status}`).join(", ") || "(none)"}`);
 
   // Seed paneSessionMap with --resume IDs as fallbacks (don't overwrite hook events,
@@ -221,6 +228,19 @@ async function main(): Promise<void> {
   const { changed: hookChanged, changedPaneIds: clearPaneIds } = await processHookEvents(paneSessionMap);
   if (hookChanged) {
     await debugLog(`hook events processed (early), changed panes: ${[...clearPaneIds].join(", ") || "(new only)"}`);
+  }
+
+  // Fork override — MUST run after processHookEvents (which just re-imposed the hook's
+  // parent id from disk onto fork panes). Force the fork's real, native-resolved id and
+  // remember we changed the map so phase2 persists it (overwriting the wrong on-disk pane
+  // file), self-healing `csm list`, the TUI and the bridge on the next read.
+  let forkCorrected = false;
+  for (const paneId of forkPaneIds) {
+    const realId = resumeIds[paneId];
+    if (realId && paneSessionMap[paneId] !== realId) {
+      paneSessionMap[paneId] = realId;
+      forkCorrected = true;
+    }
   }
 
   // Rebuild previous statuses from saved state
@@ -305,6 +325,26 @@ async function main(): Promise<void> {
       });
     }
   }
+  // Disambiguate same-repo name collisions across single-pane windows (fix-auth,
+  // fix-auth-2). Keyed on sessionId so the suffix matches the TUI list and phone.
+  const nameItemsByRepo = new Map<string, Array<{ id: string; name: string }>>();
+  for (const win of windowMap.values()) {
+    if (win.paneIds.length !== 1) continue;
+    const sid = paneSessionMap[win.paneIds[0]];
+    if (!sid) continue;
+    const nm = getSessionName(sid, nameCache);
+    if (!nm) continue;
+    const s = sessions.find(s => s.tmuxPane?.paneId === win.paneIds[0]);
+    const repo = s ? repoNameFromPath(s.baseRepoPath) : "unknown";
+    const bucket = nameItemsByRepo.get(repo);
+    if (bucket) bucket.push({ id: sid, name: nm });
+    else nameItemsByRepo.set(repo, [{ id: sid, name: nm }]);
+  }
+  const dnMap = new Map<string, string>();
+  for (const items of nameItemsByRepo.values()) {
+    for (const [id, name] of disambiguateNames(items)) dnMap.set(id, name);
+  }
+
   for (const win of windowMap.values()) {
     const prefix = desiredPrefix(win.hasAttention, win.hasRunning);
 
@@ -323,10 +363,10 @@ async function main(): Promise<void> {
     if (hasCleared) {
       baseName = repo;
     } else if (win.paneIds.length === 1) {
-      // Single-pane: {repo}·{ai-name} or just {repo}
+      // Single-pane: {repo}·{ai-or-pinned-name} or just {repo}
       const sessionId = paneSessionMap[win.paneIds[0]];
-      const aiName = sessionId ? nameCache.names[sessionId] : undefined;
-      baseName = buildBaseName(repo, aiName);
+      const aiName = sessionId ? (dnMap.get(sessionId) ?? getSessionName(sessionId, nameCache)) : undefined;
+      baseName = buildBaseName(repo, aiName ? slugify(aiName) || undefined : undefined);
     } else {
       // Multi-pane: show all unique repos joined with "+"
       baseName = uniqueRepos.length > 1 ? uniqueRepos.join("+") : repo;
@@ -358,7 +398,7 @@ async function main(): Promise<void> {
     const aggregate = computeAggregate(freshState);
     process.stdout.write(formatStatus(aggregate));
     // Still run Phase 2 (lsof + naming) — it writes to separate files
-    phase2(sessions, paneSessionMap, nameCache, hookChanged).catch(() => {});
+    phase2(sessions, paneSessionMap, nameCache, hookChanged || forkCorrected).catch(() => {});
     return;
   }
 
@@ -372,7 +412,7 @@ async function main(): Promise<void> {
   process.stdout.write(formatStatus(aggregate));
 
   // Phase 2: hook events + AI naming (runs after stdout, doesn't block tmux)
-  phase2(sessions, paneSessionMap, nameCache, hookChanged).catch(() => {});
+  phase2(sessions, paneSessionMap, nameCache, hookChanged || forkCorrected).catch(() => {});
 }
 
 /**
@@ -427,6 +467,7 @@ async function phase2(
     if (!s.tmuxPane) return false;
     const sessionId = paneSessionMap[s.tmuxPane.paneId];
     if (!sessionId || namingSkips[sessionId]) return false;
+    if (nameCache.pinned[sessionId]) return false; // user-pinned — never regenerate
     if (!nameCache.names[sessionId]) return true;
     // Regenerate when the freshest convo signal (lastPrompt > summary) diverges
     // from the source we last named off of. lastPrompt is needed because Claude
@@ -451,6 +492,9 @@ async function phase2(
           try { branch = (await Bun.$`git -C ${unnamed.repoPath} branch --show-current`.quiet().text()).trim(); } catch {}
           const name = await generateAIName(firstPrompt, summary, branch, lastPrompt);
           if (name) {
+            // Reload-and-merge fresh pins: a pin set during the ≤15s claude -p run
+            // must not be clobbered by this stale-cache save.
+            nameCache.pinned = (await loadNameCache()).pinned;
             nameCache.names[sessionId] = name;
             // Store the freshest signal we used so future drift checks compare apples-to-apples
             nameCache.sources[sessionId] = lastPrompt || summary || firstPrompt;
@@ -465,7 +509,7 @@ async function phase2(
             const prefix = currentWindowName.startsWith(ATTENTION_PREFIX) ? ATTENTION_PREFIX
               : currentWindowName.startsWith("🔄") ? "🔄" : "";
             const repo = repoNameFromPath(unnamed.baseRepoPath);
-            await renameWindow(unnamed.tmuxPane.sessionName, unnamed.tmuxPane.windowIndex, `${prefix}${buildBaseName(repo, name)}`);
+            await renameWindow(unnamed.tmuxPane.sessionName, unnamed.tmuxPane.windowIndex, `${prefix}${buildBaseName(repo, slugify(name) || undefined)}`);
           } else {
             // AI naming returned empty — skip for a while
             namingSkips[sessionId] = now;

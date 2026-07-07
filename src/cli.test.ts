@@ -1,7 +1,7 @@
 /**
  * `setup()` idempotency (Inc setup). Two runs under a temp $HOME must leave exactly
  * one CSM registration per event, preserve pre-existing user hooks + other settings
- * keys, and write the hook scripts stamped CSM_HOOK_VERSION=6.
+ * keys, and write the hook scripts stamped CSM_HOOK_VERSION=7.
  *
  * `home` helper first — cli → hook-events → config freezes paths from $HOME; setup
  * itself re-reads homedir() at call time, so it targets the same temp HOME.
@@ -78,11 +78,11 @@ test("running setup() twice leaves exactly one CSM entry per event and preserves
   expect(pre.hooks[0].timeout).toBe(600);
 });
 
-test("setup() writes the three hook scripts stamped CSM_HOOK_VERSION=6", async () => {
+test("setup() writes the three hook scripts stamped CSM_HOOK_VERSION=7", async () => {
   await setup();
   for (const name of ["session-start", "event", "pretooluse"]) {
     const path = `${hooksDir}/${name}.sh`;
     expect(existsSync(path)).toBe(true);
-    expect(readFileSync(path, "utf8")).toContain("# CSM_HOOK_VERSION=6");
+    expect(readFileSync(path, "utf8")).toContain("# CSM_HOOK_VERSION=7");
   }
 });
