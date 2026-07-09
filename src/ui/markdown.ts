@@ -106,8 +106,11 @@ function finalizeSentinels(text: string): string {
  * Bold/italic are resolved first (can span across code), then code spans are extracted.
  */
 function inlineFormat(text: string): string {
+  // Phase 0: Collapse markdown links to their display text — the URL is noise in a
+  // non-clickable pane and force-wraps mid-string. Images ![alt](url) collapse to alt.
+  let marked = text.replace(/!?\[([^\]]+)\]\(([^)]+)\)/g, "$1");
+
   // Phase 1: Mark bold/italic with sentinels on raw text (handles spans crossing code)
-  let marked = text;
   marked = marked.replace(/\*{3}(.+?)\*{3}/g, `${S_BOLD_O}${S_ITAL_O}$1${S_ITAL_C}${S_BOLD_C}`);
   marked = marked.replace(/\*{2}(.+?)\*{2}/g, `${S_BOLD_O}$1${S_BOLD_C}`);
   marked = marked.replace(/(?<!\w)\*(.+?)\*(?!\w)/g, `${S_ITAL_O}$1${S_ITAL_C}`);
@@ -290,6 +293,17 @@ export function markdownToBlessed(markdown: string, maxWidth: number): string {
     // Horizontal rule
     if (/^(-{3,}|\*{3,}|_{3,})\s*$/.test(trimmed)) {
       output.push(`{${C.dim}-fg}${"─".repeat(Math.min(maxWidth, 40))}{/${C.dim}-fg}`);
+      i++;
+      continue;
+    }
+
+    // Blockquote: > text — dim left bar + muted text
+    const quoteMatch = trimmed.match(/^>\s?(.*)/);
+    if (quoteMatch) {
+      const wrapped = wordWrap(inlineFormat(quoteMatch[1]), maxWidth - 2);
+      for (const w of wrapped) {
+        output.push(`{${C.dim}-fg}▎ {/${C.dim}-fg}{${C.muted}-fg}${w}{/${C.muted}-fg}`);
+      }
       i++;
       continue;
     }

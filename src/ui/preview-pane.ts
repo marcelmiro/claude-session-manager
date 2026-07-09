@@ -310,14 +310,6 @@ export function transcriptToMessages(turns: TranscriptTurn[]): PreviewMessage[] 
 export function renderMessage(msg: PreviewMessage, maxWidth: number): string {
   const parts: string[] = [];
 
-  // Thinking block — truncated, dimmed
-  if (msg.thinking) {
-    const truncated = msg.thinking.length > 120
-      ? msg.thinking.slice(0, 119) + "…"
-      : msg.thinking;
-    parts.push(`{${C.dim}-fg}{italic}${esc(truncated)}{/italic}{/${C.dim}-fg}`);
-  }
-
   switch (msg.role) {
     case "user": {
       const text = msg.text.replace(/\n/g, " ").trim();
@@ -340,40 +332,26 @@ export function renderMessage(msg: PreviewMessage, maxWidth: number): string {
     }
 
     case "tool-use": {
-      // Show tool input details when available
-      if (msg.toolInputs && msg.toolInputs.length > 0) {
-        for (const ti of msg.toolInputs) {
-          if (ti.command) {
-            // Bash: show command
-            const cmd = truncateAtWord(ti.command, maxWidth - 6);
-            parts.push(`{${C.dim}-fg}  ↳ ${esc(ti.name)}{/${C.dim}-fg}`);
-            parts.push(`{${C.peach}-fg}    $ ${esc(cmd)}{/${C.peach}-fg}`);
-          } else if (ti.filePath) {
-            // Edit/Write: show file path (keep the end visible — no word boundaries)
-            const fp = ti.filePath.length > maxWidth - 6
-              ? "…" + ti.filePath.slice(-(maxWidth - 7))
-              : ti.filePath;
-            parts.push(`{${C.dim}-fg}  ↳ ${esc(ti.name)}: ${esc(fp)}{/${C.dim}-fg}`);
-          } else if (ti.question) {
-            // AskUserQuestion: show question and options
-            const q = ti.question;
-            const header = q.header || "Question";
-            parts.push(`{${C.dim}-fg}  ↳ ${esc(header)}{/${C.dim}-fg}`);
-            const qText = truncateAtWord(q.text, maxWidth - 4);
-            parts.push(`{${C.muted}-fg}    ${esc(qText)}{/${C.muted}-fg}`);
-            for (let i = 0; i < q.options.length; i++) {
-              const trunc = truncateAtWord(q.options[i].label, maxWidth - 8);
-              parts.push(`{${C.peach}-fg}    ${i + 1}. ${esc(trunc)}{/${C.peach}-fg}`);
-            }
-          } else {
-            // Other tools: just show name
-            parts.push(`{${C.dim}-fg}  ↳ ${esc(ti.name)}{/${C.dim}-fg}`);
-          }
+      // One compact chip per tool call — "↳ Name arg" — matching portkey's clean
+      // chip style. Tool output/diffs are omitted from history (the live decision
+      // block still renders full call details for a waiting session).
+      const inputs = msg.toolInputs && msg.toolInputs.length > 0
+        ? msg.toolInputs
+        : (msg.toolNames || ["unknown"]).map((name) => ({ name }) as ToolInput);
+      for (const ti of inputs) {
+        const arg = ti.command || ti.filePath || ti.pattern
+          || (ti.question ? ti.question.header || ti.question.text : "");
+        let line = `{${C.dim}-fg}  ↳ ${esc(ti.name)}{/${C.dim}-fg}`;
+        if (arg) {
+          const budget = Math.max(8, maxWidth - ti.name.length - 6);
+          // File paths keep their END visible; commands/patterns keep their START
+          // (a word-boundary cut collapses "cat > /long/path" to just "cat >…").
+          const shown = ti.filePath
+            ? truncPath(arg, budget)
+            : arg.length > budget ? arg.slice(0, budget - 1) + "…" : arg;
+          line += ` {${C.muted}-fg}${esc(shown)}{/${C.muted}-fg}`;
         }
-      } else {
-        // Fallback: tool names only
-        const names = msg.toolNames?.join(", ") || "unknown";
-        parts.push(`{${C.dim}-fg}  ↳ ${esc(names)}{/${C.dim}-fg}`);
+        parts.push(line);
       }
 
       // Denied/errored tool result — one compact event marker, suppress the
@@ -381,18 +359,6 @@ export function renderMessage(msg: PreviewMessage, maxWidth: number): string {
       if (msg.toolError) {
         const name = msg.toolNames?.[0] || "tool";
         parts.push(`{${C.dim}-fg}  ⊘ ${esc(name)} denied{/${C.dim}-fg}`);
-      } else if (msg.bashOutput) {
-        // Show bash output if available (truncated)
-        const outputLines = msg.bashOutput.trim().split("\n");
-        const maxOutputLines = 4;
-        const shown = outputLines.slice(0, maxOutputLines);
-        for (const line of shown) {
-          const truncated = truncateAtWord(line, maxWidth - 4);
-          parts.push(`{${C.dim}-fg}    ${esc(truncated)}{/${C.dim}-fg}`);
-        }
-        if (outputLines.length > maxOutputLines) {
-          parts.push(`{${C.dim}-fg}    … ${outputLines.length - maxOutputLines} more lines{/${C.dim}-fg}`);
-        }
       }
       break;
     }
@@ -579,6 +545,23 @@ export interface PreviewDeps {
 
 const DEFAULT_DEPS: PreviewDeps = { readTurns: readTranscriptTurns, getPending: pendingToolCall };
 
+/** Set content and pin the newest line to the BOTTOM of the pane. blessed
+ *  top-aligns short content, leaving dead space below; when the wrapped content
+ *  is shorter than the visible area we prepend blank rows so a brief conversation
+ *  hugs the bottom like a terminal scrollback. */
+function renderBottomAligned(box: Widgets.BoxElement, content: string): void {
+  box.setContent(content);
+  const height = typeof box.height === "number" ? box.height : 0;
+  // `iheight` = borders + vertical padding; `_clines` = the actual wrapped rows
+  // blessed computed for the content just set. Both are blessed internals.
+  const inner = height - ((box as unknown as { iheight?: number }).iheight ?? 2);
+  const rows = (box as unknown as { _clines?: unknown[] })._clines?.length ?? 0;
+  if (inner > 0 && rows < inner) {
+    box.setContent("\n".repeat(inner - rows) + content);
+  }
+  box.setScrollPerc(100);
+}
+
 export async function updatePreview(
   box: Widgets.BoxElement,
   session: Session | null,
@@ -701,8 +684,7 @@ export async function updatePreview(
         lastPlainText = buildPlainText(messages);
 
         const content = `${header}\n\n${body}`;
-        box.setContent(content);
-        box.setScrollPerc(100); // Decision at bottom, like Claude's scrollback
+        renderBottomAligned(box, content); // Decision at bottom, like Claude's scrollback
         return pendingResult;
       }
 
@@ -730,9 +712,9 @@ export async function updatePreview(
   }
 
   const content = `${header}\n\n${body}`;
-  box.setContent(content);
-  // Always scroll to bottom — content is chronological, most recent at bottom.
+  // Bottom-align — content is chronological, most recent at bottom. Short
+  // conversations get top-padded to hug the bottom; long ones scroll to it.
   // Users can scroll up with u/d keys; next refresh re-snaps to bottom.
-  box.setScrollPerc(100);
+  renderBottomAligned(box, content);
   return pendingResult;
 }
