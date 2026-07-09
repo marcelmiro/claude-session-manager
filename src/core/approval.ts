@@ -14,6 +14,7 @@
 import { readFileSync, writeFileSync, readdirSync, mkdirSync, rmSync } from "node:fs";
 import { PATHS } from "./config";
 import { readEvents, EVENTS_DIR } from "./hook-events";
+import { SOURCE_DIR } from "./input-source";
 import type { PendingApproval } from "../types";
 
 export const PENDING_DIR = `${PATHS.dir}/pending`;
@@ -65,7 +66,7 @@ export function listPendingApprovals(): PendingApproval[] {
  * pane and unbounded dead-session logs.
  */
 export function reapDeadSessionFiles(liveSessionIds: Set<string>): void {
-  for (const dir of [EVENTS_DIR, PENDING_DIR, DECISIONS_DIR]) {
+  for (const dir of [EVENTS_DIR, PENDING_DIR, DECISIONS_DIR, SOURCE_DIR]) {
     let files: string[];
     try {
       files = readdirSync(dir);

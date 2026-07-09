@@ -34,6 +34,7 @@ import { discoverRepos, getBaseRepoPath, compareRepos } from "../core/git";
 import { listSlashCommands } from "../core/skills";
 import { loadConfig, PATHS } from "../core/config";
 import { listPendingApprovals, decideApproval } from "../core/approval";
+import { markPortkeySource } from "../core/input-source";
 import { watchEvents } from "../core/watch";
 import { EVENTS_DIR, pendingToolCall } from "../core/hook-events";
 import { capturePane, listPanes } from "../core/tmux";
@@ -577,9 +578,12 @@ async function route(req: Request): Promise<Response> {
     // session has no such file, so drive its on-screen prompt with pane keystrokes.
     if (listPendingApprovals().some((a) => a.sessionId === id)) {
       decideApproval(id, body.decision, reason);
+      markPortkeySource(id);
       return json({ ok: true });
     }
-    return sendResult(await decideAttachedApproval(id, body.decision));
+    const r = await decideAttachedApproval(id, body.decision);
+    if (r.ok) markPortkeySource(id);
+    return sendResult(r);
   }
 
   const rewind = path.match(/^\/sessions\/([^/]+)\/rewind$/);
@@ -596,7 +600,10 @@ async function route(req: Request): Promise<Response> {
     ) {
       return json({ ok: false, reason: "bad-args" }, 400);
     }
-    return sendResult(await rewindSession(decodeURIComponent(rewind[1]!), body.upCount, body.text, body.mode));
+    const id = decodeURIComponent(rewind[1]!);
+    const r = await rewindSession(id, body.upCount, body.text, body.mode);
+    if (r.ok) markPortkeySource(id, body.text); // rewind re-sends text → attributes by text-match
+    return sendResult(r);
   }
 
   const message = path.match(/^\/sessions\/([^/]+)\/message$/);
@@ -612,11 +619,16 @@ async function route(req: Request): Promise<Response> {
       const saved = await saveUploadedImages(files);
       if ("error" in saved) return json({ ok: false, reason: saved.error }, 400);
       pruneOldUploads();
-      return sendResult(await sendMessage(id, text, saved.paths));
+      const r = await sendMessage(id, text, saved.paths);
+      // Image-only (empty text) can't text-match; fall back to the turn's prompt_id anchor.
+      if (r.ok) markPortkeySource(id, text.trim() ? text : undefined);
+      return sendResult(r);
     }
     const body = (await req.json().catch(() => ({}))) as { text?: unknown };
     if (typeof body.text !== "string") return json({ ok: false, reason: "bad-text" }, 400);
-    return sendResult(await sendMessage(id, body.text));
+    const r = await sendMessage(id, body.text);
+    if (r.ok) markPortkeySource(id, body.text);
+    return sendResult(r);
   }
 
   const answer = path.match(/^\/sessions\/([^/]+)\/answer$/);
@@ -631,9 +643,10 @@ async function route(req: Request): Promise<Response> {
         (s) => typeof s === "number" || (Array.isArray(s) && s.every((n) => typeof n === "number")),
       );
     if (!valid) return json({ ok: false, reason: "bad-selection" }, 400);
-    return sendResult(
-      await answerSessionQuestion(decodeURIComponent(answer[1]!), sels as (number | number[])[]),
-    );
+    const id = decodeURIComponent(answer[1]!);
+    const r = await answerSessionQuestion(id, sels as (number | number[])[]);
+    if (r.ok) markPortkeySource(id); // no text ⇒ anchors the current turn's prompt_id
+    return sendResult(r);
   }
 
   // Mark read (cleared the unread glow on open) — clears the monitor's ⚡ on both devices.

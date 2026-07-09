@@ -2,6 +2,8 @@ import type { NotificationConfig, Session, TransitionEvent } from "../types";
 import type { SessionStatus } from "./status";
 import { getAbovePrompt } from "./status";
 import { renameWindow, getWindowName } from "./tmux";
+import { sourceForSession } from "./input-source";
+import { pendingToolCall } from "./hook-events";
 
 export const ATTENTION_PREFIX = "⚡";
 export const RUNNING_PREFIX = "🔄";
@@ -211,6 +213,119 @@ export async function dispatchNotifications(
         sendNativeNotification(title, body, pane);
       }
     }
+
+    // Tier 4: phone push via ntfy — only when portkey drove the most recent input.
+    // Skip unresolved sessions (no id ⇒ can't attribute).
+    if (config.ntfyTopic && session.id && sourceForSession(session.id) === "portkey") {
+      await sendPushNotification(event, session, config);
+    }
+  }
+}
+
+/** Title-case a space-delimited string ("fix auth" → "Fix Auth"). */
+function titleCase(s: string): string {
+  return s
+    .split(" ")
+    .map((w) => (w ? w[0]!.toUpperCase() + w.slice(1) : w))
+    .join(" ");
+}
+
+/**
+ * Human-facing, non-sensitive label for a push: `${repo} · ${Name}` where Name is
+ * the ai-name humanized (hyphens→spaces, title-cased). Falls back to repo alone
+ * when the window name carries no ai-name. Repo stays verbatim (raw dir name).
+ */
+export function pushLabel(session: Session): string {
+  const aiName = extractAIName(session.name);
+  if (!aiName) return session.repo;
+  return `${session.repo} · ${titleCase(aiName.replace(/-/g, " "))}`;
+}
+
+/**
+ * Non-sensitive category derived from the pending tool's NAME only (never its
+ * input) — safe to cross ntfy.sh + APNs.
+ */
+export function pushAction(sessionId: string): string {
+  const name = pendingToolCall(sessionId)?.name;
+  if (name === "Bash") return "run a command";
+  if (name === "Edit" || name === "Write" || name === "MultiEdit" || name === "NotebookEdit") {
+    return "make an edit";
+  }
+  if (name === "AskUserQuestion") return "answer a question";
+  return "needs permission";
+}
+
+/** Cached bridge origin + when it was resolved (10-min TTL). */
+let _originCache: { value: string | null; at: number } | undefined;
+
+/**
+ * Deep-link origin for the push `Click`: `config.bridgeUrl` if set, else the first
+ * `https://…` token on line 1 of `tailscale serve status`
+ * (`https://<host>.ts.net (tailnet only)`). Cached 10 min so a re-serve self-heals.
+ */
+export function bridgeOrigin(config: NotificationConfig): string | null {
+  if (config.bridgeUrl) return config.bridgeUrl;
+  const now = Date.now();
+  if (_originCache && now - _originCache.at < 10 * 60 * 1000) return _originCache.value;
+  let value: string | null = null;
+  try {
+    const res = Bun.spawnSync(["tailscale", "serve", "status"]);
+    if (res.exitCode === 0) {
+      const firstLine = new TextDecoder().decode(res.stdout).split("\n")[0] ?? "";
+      const m = firstLine.match(/https:\/\/\S+/);
+      if (m) value = m[0];
+    }
+  } catch {
+    value = null;
+  }
+  _originCache = { value, at: now };
+  return value;
+}
+
+/**
+ * Tier 4: POST a phone notification to ntfy.sh. HTTP headers are ASCII/latin-1
+ * only, so emoji ride the `Tags` header (ntfy prepends them to the title) and all
+ * Unicode text (`·`, `—`) lives in the UTF-8 body. NEVER sends `lastCapture` or any
+ * tool input/diff/command/question text — only the non-sensitive label + category.
+ * 3s abort so a slow/offline ntfy can't stall the monitor's poll; failures swallowed.
+ */
+export async function sendPushNotification(
+  event: TransitionEvent,
+  session: Session,
+  config: NotificationConfig,
+): Promise<void> {
+  const topic = config.ntfyTopic;
+  if (!topic) return;
+
+  const label = pushLabel(session);
+  let title: string, tags: string, body: string;
+  if (event.classification === "blocked") {
+    title = "Needs your input";
+    tags = "zap";
+    body = `${label} — ${pushAction(session.id)}`;
+  } else {
+    title = "Turn complete";
+    tags = "white_check_mark";
+    body = label;
+  }
+
+  const headers: Record<string, string> = { Title: title, Tags: tags, Priority: "high" };
+  const origin = bridgeOrigin(config);
+  if (origin) headers.Click = `${origin}/?s=${session.id}`;
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 3000);
+  try {
+    await fetch(`https://ntfy.sh/${encodeURIComponent(topic)}`, {
+      method: "POST",
+      headers,
+      body,
+      signal: controller.signal,
+    });
+  } catch {
+    // Non-fatal — Tiers 1–3 already delivered.
+  } finally {
+    clearTimeout(timer);
   }
 }
 

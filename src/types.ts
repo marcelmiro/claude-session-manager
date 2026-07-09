@@ -87,6 +87,10 @@ export interface NotificationConfig {
   windowPrefix: boolean;
   /** Enable macOS native notifications (Tier 3) */
   nativeNotification: boolean;
+  /** ntfy.sh topic for phone push (Tier 4). Unset ⇒ push disabled. */
+  ntfyTopic?: string;
+  /** Explicit bridge origin for deep links; else auto-detected via `tailscale serve status`. */
+  bridgeUrl?: string;
 }
 
 export interface SessionNotificationState {
@@ -191,6 +195,8 @@ export interface CsmConfig {
   nativeNotification: boolean;
   repoPaths?: string[];       // dirs to scan 1-level deep for git repos
   priorityRepos?: string[];   // repo names pinned at top of list (lowercase)
+  ntfyTopic?: string;         // ntfy.sh topic for phone push (Tier 4); unset ⇒ disabled
+  bridgeUrl?: string;         // explicit bridge origin for deep links; else auto-detected
 }
 
 // --- Hook event log + transcript types (Impl #2 — Camp 1) ---
@@ -222,6 +228,8 @@ export interface HookEvent {
   tool_use_id?: string;
   notification_type?: "permission_prompt" | "idle_prompt";
   message?: string; // Notification
+  prompt?: string; // UserPromptSubmit — the submitted prompt text
+  prompt_id?: string; // UserPromptSubmit — unique per-turn identity
 }
 
 /**

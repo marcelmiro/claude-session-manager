@@ -1936,11 +1936,24 @@ function boot() {
   render(html`<${App} />`, document.getElementById("app"));
 }
 
+// Deep link from a push notification: ?s=<sessionId>. Once the first snapshot
+// lands, open that session (if it exists) and drop the query so a refresh/back
+// doesn't re-trigger it.
+function applyDeepLink() {
+  const id = new URLSearchParams(location.search).get("s");
+  if (!id) return;
+  if (sessions.value.some((s) => s.id === id)) open(id);
+  history.replaceState(null, "", location.pathname);
+}
+
 let bootTimeout;
 refreshSessions()
   .then(() => {
     clearTimeout(bootTimeout);
-    if (authed.value) connectStream();
+    if (authed.value) {
+      applyDeepLink();
+      connectStream();
+    }
   })
   .finally(boot);
 
