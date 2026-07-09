@@ -36,6 +36,13 @@ import {
   cursorMatches,
   parseModeMenu,
   modeDowns,
+  parseStatusline,
+  extractConfirmation,
+  isModelArg,
+  isEffortArg,
+  MODEL_ARGS,
+  EFFORT_ARGS,
+  restoreSession,
 } from "./session-api";
 import { parseTranscript } from "./transcript";
 import { EVENTS_DIR } from "./hook-events";
@@ -423,4 +430,103 @@ test("answerSessionQuestion: no pane mapping → no-pane, sends nothing", async 
 test("interruptSession: no pane mapping → no-pane, sends nothing", async () => {
   const r = await interruptSession("ghost-session");
   expect(r).toEqual({ ok: false, reason: "no-pane" });
+});
+
+// --- model/effort switcher: pure parsers (statusline + confirmation + allowlists) ---
+
+test("parseStatusline: full line → 1M-Opus arg key + effort level", () => {
+  expect(parseStatusline("0/1000k (0%) • master • Opus 4.8 (1M context) • high")).toEqual({
+    model: "opus[1m]",
+    effort: "high",
+  });
+});
+
+test("parseStatusline: non-1M Opus → base 'opus' (not the menu's opus[1m])", () => {
+  // bare `/model opus` yields "Opus 4.8" with no "1M context"; not offered in the menu, so it
+  // simply won't pre-mark anything — but must NOT be mistaken for the 1M variant.
+  expect(parseStatusline("0/1000k (0%) • main • Opus 4.8 • medium").model).toBe("opus");
+});
+
+test("parseStatusline: missing effort segment → model only, no effort", () => {
+  expect(parseStatusline("12.3k/200k (6%) • feat/x • Sonnet 5")).toEqual({ model: "sonnet" });
+});
+
+test("parseStatusline: every family maps to its arg key", () => {
+  expect(parseStatusline("• b • Opus 4.8 (1M context)").model).toBe("opus[1m]");
+  expect(parseStatusline("• b • Sonnet 5").model).toBe("sonnet");
+  expect(parseStatusline("• b • Haiku 4.5").model).toBe("haiku");
+  expect(parseStatusline("• b • Fable 5").model).toBe("fable");
+});
+
+test("parseStatusline: 'Default' renders as 1M Opus → resolves to opus[1m]", () => {
+  // Claude's statusline shows the resolved model; Default and Opus both render "Opus 4.8 (1M context)".
+  expect(parseStatusline("0/1000k (0%) • main • Opus 4.8 (1M context) • medium").model).toBe("opus[1m]");
+});
+
+test("parseStatusline: garbled/foreign line → {} (no throw)", () => {
+  expect(parseStatusline("some unrelated text with no bullets")).toEqual({});
+  expect(parseStatusline("")).toEqual({});
+});
+
+test("parseStatusline: effort takes the trailing segment (last match wins)", () => {
+  // even if an earlier segment coincidentally equals a level word, the last one is the effort
+  expect(parseStatusline("0/1k (0%) • high • Opus 4.8 • max").effort).toBe("max");
+});
+
+test("extractConfirmation: model set globally", () => {
+  const cap = "❯ /model sonnet\n  ⎿  Set model to Sonnet 5 and saved as your default for new sessions\n";
+  expect(extractConfirmation(cap)).toBe(
+    "Set model to Sonnet 5 and saved as your default for new sessions",
+  );
+});
+
+test("extractConfirmation: effort set globally", () => {
+  const cap = "  ⎿  Set effort level to high (saved as your default for new sessions): Balanced";
+  expect(extractConfirmation(cap)).toBe(
+    "Set effort level to high (saved as your default for new sessions): Balanced",
+  );
+});
+
+test("extractConfirmation: ultracode reports session-only scope verbatim", () => {
+  const cap =
+    "  ⎿  Set effort level to ultracode (this session only): xhigh + dynamic workflow orchestration\n";
+  expect(extractConfirmation(cap)).toBe(
+    "Set effort level to ultracode (this session only): xhigh + dynamic workflow orchestration",
+  );
+});
+
+test("extractConfirmation: wrapped continuation line is joined, not truncated", () => {
+  const cap =
+    "  ⎿  Set model to Opus 4.8 (1M context) (default) and saved as your default\n     for new sessions\n";
+  expect(extractConfirmation(cap)).toBe(
+    "Set model to Opus 4.8 (1M context) (default) and saved as your default for new sessions",
+  );
+});
+
+test("extractConfirmation: no confirmation present → null", () => {
+  expect(extractConfirmation("❯ \n  0/1000k (0%) • main • Opus 4.8 • medium\n")).toBeNull();
+});
+
+test("restoreSession: missing repo dir short-circuits to no-repo (no tmux)", async () => {
+  const r = await restoreSession(
+    "00000000-0000-4000-8000-000000000000",
+    join(PATHS.dir, "does-not-exist-repo"),
+  );
+  expect(r).toEqual({ ok: false, reason: "no-repo" });
+});
+
+test("restoreSession: real repo dir but unknown session → no-transcript (no tmux)", async () => {
+  // PATHS.dir exists (temp HOME); a random session id has no transcript under ~/.claude/projects.
+  const r = await restoreSession("11111111-1111-4111-8111-111111111111", PATHS.dir);
+  expect(r).toEqual({ ok: false, reason: "no-transcript" });
+});
+
+test("isModelArg/isEffortArg: allowlist members pass, others reject", () => {
+  for (const m of MODEL_ARGS) expect(isModelArg(m)).toBe(true);
+  for (const e of EFFORT_ARGS) expect(isEffortArg(e)).toBe(true);
+  expect(isModelArg("gpt4")).toBe(false);
+  expect(isModelArg("")).toBe(false);
+  expect(isModelArg("opus ")).toBe(false);
+  expect(isEffortArg("extreme")).toBe(false);
+  expect(isEffortArg("")).toBe(false);
 });

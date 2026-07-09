@@ -23,6 +23,7 @@ import {
   answerQuestion,
   getMainSession,
   launchClaudeWindow,
+  launchResumeWindow,
   capturePane,
   sendKey,
   sendLiteral,
@@ -76,6 +77,51 @@ export interface ContextUsage {
 export interface PaneStatusline {
   statusline?: string; // the user's custom statusline text (tokens • branch • model • …)
   mode?: string; // e.g. "⏵⏵ auto mode on", "⏸ plan mode on"
+  model?: string; // current model as an arg key (opus/sonnet/…), parsed from the statusline
+  effort?: string; // current reasoning effort (low/…/ultracode), when the statusline renders it
+}
+
+// The model/effort arg forms Claude accepts (`/model <x>`, `/effort <x>`) — the switcher's
+// allowlists. Note `opus[1m]`, NOT `opus`: the bare `opus` arg resolves to the non-1M base
+// model (`claude-opus-4-8`), whereas the picker's "Opus" and "Default" both select the 1M
+// variant (`claude-opus-4-8[1m]`). `opus[1m]` is the arg that reaches 1M.
+export const MODEL_ARGS = ["default", "opus[1m]", "fable", "sonnet", "haiku"] as const;
+export const EFFORT_ARGS = ["low", "medium", "high", "xhigh", "max", "ultracode"] as const;
+export const isModelArg = (v: string): boolean => (MODEL_ARGS as readonly string[]).includes(v);
+export const isEffortArg = (v: string): boolean => (EFFORT_ARGS as readonly string[]).includes(v);
+
+// Non-Opus families map display → arg key directly. Opus is special (1M vs base variant) and
+// is handled inline in parseStatusline.
+const MODEL_FAMILIES: Array<[RegExp, string]> = [
+  [/sonnet/i, "sonnet"],
+  [/haiku/i, "haiku"],
+  [/fable/i, "fable"],
+];
+
+/**
+ * Parse the current model (as an arg key) and effort level out of the rendered statusline
+ * (`tokens • branch • model • <effort>`), by TOKEN-SCAN not fixed index — the effort segment
+ * is absent for models without reasoning effort, and its position shifts. Returns only the
+ * fields it can identify; a garbled/foreign statusline yields `{}` (never throws).
+ *
+ * Opus renders in two variants: "Opus 4.8 (1M context)" → `opus[1m]` (the menu's Opus option,
+ * also how "Default" renders), and plain "Opus 4.8" → `opus` (the non-1M base, not in the menu
+ * so it simply marks nothing).
+ */
+export function parseStatusline(line: string): { model?: string; effort?: string } {
+  const out: { model?: string; effort?: string } = {};
+  for (const raw of line.split("•")) {
+    const seg = raw.trim();
+    if (isEffortArg(seg)) out.effort = seg; // effort is the trailing segment — last match wins
+    if (!out.model) {
+      if (/opus/i.test(seg)) out.model = /1m/i.test(seg) ? "opus[1m]" : "opus";
+      else {
+        const fam = MODEL_FAMILIES.find(([re]) => re.test(seg));
+        if (fam) out.model = fam[1];
+      }
+    }
+  }
+  return out;
 }
 
 /**
@@ -97,13 +143,14 @@ export async function readPaneStatusline(paneId: string): Promise<PaneStatusline
       res.statusline = l;
     }
   }
+  if (res.statusline) Object.assign(res, parseStatusline(res.statusline));
   return res;
 }
 
 /** Outcome of a send; `reason` is set only on rejection (nothing was sent). */
 export type SendResult = {
   ok: boolean;
-  reason?: "no-pane" | "no-question" | "no-prompt" | "no-session" | "rewind-unavailable" | "rewind-mismatch" | "rewind-mode" | "bad-image" | "bad-selection";
+  reason?: "no-pane" | "no-question" | "no-prompt" | "no-session" | "rewind-unavailable" | "rewind-mismatch" | "rewind-mode" | "bad-image" | "bad-selection" | "no-confirm" | "no-repo" | "no-transcript" | "resume-failed" | "not-found";
   /** Fresh session id, set by createSession once the new pane's SessionStart hook lands. */
   sessionId?: string;
 };
@@ -143,6 +190,58 @@ export async function createSession(repoPath: string, name: string): Promise<Sen
     }
   }
   return { ok: true }; // launched, but the id didn't register in time — list catches up via SSE
+}
+
+/**
+ * Whether an archived session can be resumed from the phone: its original repo dir must
+ * still exist as a directory AND its transcript JSONL must still be on disk. `claude
+ * --resume` is project-cwd-scoped, so a missing/renamed repo makes resume impossible, and a
+ * deleted transcript makes it meaningless. Cheap disk checks (one `stat` via Bun.file — NOT
+ * `Bun.file().exists()`, which is false for directories); the phone hides the Restore button
+ * when this is false. Never throws.
+ */
+export async function canRestore(sessionId: string, repoPath: string): Promise<boolean> {
+  if (!(await isDirectory(repoPath))) return false;
+  return (await resolveTranscriptPath(sessionId)) !== null;
+}
+
+/** True iff `path` exists and is a directory. Bun-native stat, guarded (mirrors tailRecords). */
+async function isDirectory(path: string): Promise<boolean> {
+  try {
+    return (await Bun.file(path).stat()).isDirectory();
+  } catch {
+    return false; // missing path / stat failure
+  }
+}
+
+/**
+ * Resume an archived session from the phone: launch `claude --resume=<id>` in its original
+ * repo dir as a new tmux window and BLOCK until it's ready to drive. Registration (the
+ * SessionStart hook writing paneId→sessionId) is the SUCCESS signal — a resume that never
+ * registers within the cap failed (bad id / boot error) and returns `resume-failed` rather
+ * than a false `ok`. Once registered, we keep polling until the pane's statusline renders
+ * (prompt live / sendable) so a message the phone sends the instant it opens the session
+ * lands instead of dropping into the boot window (verified: a send at registration-time,
+ * before the prompt, is silently swallowed). `repoPath` comes from the caller (server
+ * discovery), mirroring `createSession`.
+ */
+export async function restoreSession(sessionId: string, repoPath: string): Promise<SendResult> {
+  if (!(await isDirectory(repoPath))) return { ok: false, reason: "no-repo" };
+  if ((await resolveTranscriptPath(sessionId)) === null) return { ok: false, reason: "no-transcript" };
+  const target = await getMainSession();
+  if (!target) return { ok: false, reason: "no-session" };
+  const name = repoPath.split("/").filter(Boolean).pop() ?? "claude";
+  const paneId = await launchResumeWindow(target, repoPath, name, sessionId);
+
+  let registered = false;
+  for (let i = 0; i < 24; i++) {
+    await Bun.sleep(500); // up to ~12s for claude to boot, fire SessionStart, and reach the prompt
+    if (!registered && (await loadPaneSessions())[paneId] === sessionId) registered = true;
+    if (registered && (await readPaneStatusline(paneId)).statusline) return { ok: true, sessionId };
+  }
+  // Registered but the prompt never rendered in time → launched, just slow (small residual
+  // send-drop risk, matches createSession). Never registered → the resume itself failed.
+  return registered ? { ok: true, sessionId } : { ok: false, reason: "resume-failed" };
 }
 
 // --- Rewind: drive Claude's interactive /rewind picker via tmux --------------
@@ -859,6 +958,58 @@ export async function sendMessage(
     await runSendStep(paneId, step);
   }
   return { ok: true };
+}
+
+/**
+ * Pull Claude's `Set model to …` / `Set effort level to …` confirmation out of a pane
+ * capture, JOINING wrapped continuation lines first (a long confirmation wraps on a narrow
+ * pane — see the width caveat in tmux.ts — and would otherwise truncate the toast). A
+ * continuation is an indented, non-empty line that doesn't open a new block (`⎿`/`❯`) or a
+ * glyph/status line. Returns the whitespace-collapsed sentence, or null if none is present.
+ */
+export function extractConfirmation(capture: string): string | null {
+  const lines = capture.split("\n");
+  for (let i = 0; i < lines.length; i++) {
+    const m = lines[i]!.match(/Set (?:model|effort level) to .+/);
+    if (!m) continue;
+    let text = m[0]!;
+    for (let j = i + 1; j < lines.length; j++) {
+      const next = lines[j]!;
+      if (!next.trim()) break; // blank line ends the block
+      if (/^\s*[❯⎿│•·>]/.test(next)) break; // new block / statusline / hint glyph
+      if (!/^\s{2,}/.test(next)) break; // continuations stay indented under the ⎿
+      text += " " + next.trim();
+    }
+    return text.replace(/\s+/g, " ").trim();
+  }
+  return null;
+}
+
+/**
+ * Switch a live session's model or reasoning effort from the phone. Sends the arg-form
+ * slash command (`/model <x>`, `/effort <x>`) through the same draft-safe send path as
+ * `sendMessage`, then POLLS the pane for Claude's confirmation line (variable latency,
+ * mirroring `rewindByPane`) and returns it verbatim for the caller to surface. Scope is
+ * Claude's to decide — global default for model + normal effort, session-only for
+ * `ultracode` — so we report its exact wording rather than asserting a scope ourselves.
+ * Callers validate `value` against MODEL_ARGS/EFFORT_ARGS before calling.
+ */
+export async function setSessionModelEffort(
+  sessionId: string,
+  kind: "model" | "effort",
+  value: string,
+): Promise<SendResult & { line?: string }> {
+  const paneId = await resolveSessionPane(sessionId);
+  if (!paneId) return { ok: false, reason: "no-pane" };
+  const hadDraft = inputPending(await capturePane(paneId));
+  for (const step of buildSendPlan(`/${kind} ${value}`, [], hadDraft)) {
+    await runSendStep(paneId, step);
+  }
+  for (let i = 0; i < 12; i++) {
+    const line = extractConfirmation(await captureAfter(paneId, 200));
+    if (line) return { ok: true, line };
+  }
+  return { ok: false, reason: "no-confirm" };
 }
 
 /**

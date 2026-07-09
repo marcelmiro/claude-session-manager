@@ -215,6 +215,12 @@ Examples: `csm`, `csm/fix-auth`, `⚡csm/fix-auth`, `🔄api`, `csm/fix-auth+`
 Multi-pane same repo: `{repo}`. Multi-pane mixed: `{repo1}+{repo2}`.
 Helpers in `notifications.ts`: `buildBaseName()`, `extractAIName()`, `extractRepoFromWindowName()`.
 
+### Portkey model/effort switcher
+
+The phone can change a session's model or reasoning effort. Typing `/model` or `/effort` in the composer opens a native selection sheet (current value marked); tapping an option `POST`s to `/sessions/:id/config`, which sends the arg-form slash command (`/model opus`, `/effort ultracode`) via the existing send path and toasts Claude's verbatim confirmation. Scope is Claude's: model + normal effort set the **global default** ("for new sessions"); `ultracode` is **session-only**. Route validates against `MODEL_ARGS`/`EFFORT_ARGS` (`session-api.ts`) — nothing reaches the pane on a bad value. Mechanics guarded by `test/smoke/model-effort.sh` (opt-in, drives real sessions — not in `bun test`).
+
+**Prerequisite (one-time, user dotfile):** current *effort* is read by scraping the pane statusline, so `~/.claude/statusline.sh` must render `.effort.level` as its trailing `• <level>` segment (it replaced the old `• thinking` boolean). Current *model* needs no change — it's already in the statusline. Without the statusline edit the model switcher still works; the effort menu just can't pre-mark the current level.
+
 ## Conventions
 
 - **Runtime**: Bun only — `Bun.$` for shell, `Bun.file()` for IO, `Bun.Glob` for scanning

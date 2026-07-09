@@ -264,7 +264,7 @@
         overflow-wrap: anywhere;
         word-break: break-word;
       }
-      .bubble.assistant { background: var(--surface); border-bottom-left-radius: 5px; margin-right: auto; }
+      .bubble.assistant { background: var(--surface); border-bottom-left-radius: 5px; margin-right: auto; -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; }
       .bubble.user { background: var(--user-bubble); border: 1px solid var(--user-bubble-border); border-bottom-right-radius: 5px; margin-left: auto; -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; transition: transform 0.12s ease; }
       .bubble.user:active { transform: scale(0.97); }
       .bubble.pending { opacity: 0.5; }
@@ -339,8 +339,13 @@
       .bubble.md li { margin: 2px 0; }
       .bubble.md h1, .bubble.md h2, .bubble.md h3 { font-size: 15px; margin: 10px 0 6px; }
       .bubble.md a { color: var(--peach); }
-      .bubble.md code { background: var(--code-bg); border-radius: 4px; padding: 1px 4px; font-family: "SF Mono", ui-monospace, monospace; font-size: 13px; }
-      .bubble.md pre { background: var(--code-bg); border-radius: 8px; padding: 10px; overflow-x: auto; margin: 6px 0; }
+      /* Inline code & code blocks are tap-to-copy (see assistantTap). The pill bg is the cue
+         for inline code; blocks get an explicit "copy" hint pinned top-right. */
+      .bubble.md code { background: var(--code-bg); border-radius: 4px; padding: 1px 4px; font-family: "SF Mono", ui-monospace, monospace; font-size: 13px; cursor: pointer; }
+      .bubble.md code:active { background: var(--hover); }
+      .bubble.md pre { position: relative; background: var(--code-bg); border-radius: 8px; padding: 10px; overflow-x: auto; margin: 6px 0; cursor: pointer; }
+      .bubble.md pre::after { content: "copy"; position: absolute; top: 6px; right: 8px; font-family: var(--mono); font-size: 10px; letter-spacing: 0.04em; color: var(--dim); pointer-events: none; }
+      .bubble.md pre:active { filter: brightness(1.25); }
       .bubble.md pre code { background: none; padding: 0; color: var(--mint); white-space: pre; }
       .bubble.md blockquote { margin: 6px 0; padding-left: 10px; border-left: 2px solid var(--dim); color: var(--muted); }
       .bubble.md strong { font-weight: 700; }
@@ -449,6 +454,10 @@
       .flash { color: var(--red); font-size: 13px; padding: 2px 4px 8px; }
       /* standing archived notice (not an error) — muted, not the red flash tone */
       .flash.archived { color: var(--muted); }
+      .restore-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+      .restore-btn { padding: 6px 14px; border-radius: 8px; font-size: 13px; }
+      .restore-btn:disabled { opacity: 0.6; }
+      .restore-err { color: var(--red); font-size: 12px; }
       .composer textarea:disabled { opacity: 0.5; }
       .composerwrap { position: relative; } /* anchor for the absolute slash-menu */
       /* "/" slash-command menu — floats directly above the composer */
@@ -581,6 +590,16 @@
         line-height: 1.3;
       }
       .attnchip:active { background: var(--red-tint-active); }
+      .attnchip.soft { border-color: var(--peach); background: var(--peach-tint); color: var(--peach); }
+      .runchip {
+        padding: 3px 10px;
+        border-radius: 999px;
+        border: 1px solid var(--mint);
+        color: var(--mint);
+        font-size: 12px;
+        font-weight: 700;
+        line-height: 1.3;
+      }
       .newbtn {
         flex: none;
         width: 38px;
@@ -646,6 +665,18 @@
       .sheet .danger-fill { color: var(--bg); background: var(--red); font-weight: 700; }
       .sheet .danger-fill:active { background: var(--red); filter: brightness(0.88); }
       .sheetcancel { font-weight: 600; color: var(--muted); }
+      /* /model & /effort selection options: left-aligned label + optional sub, ✓ on the current */
+      .sheet .cfgopt {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        text-align: left;
+        gap: 12px;
+      }
+      .sheet .cfgopt.current { color: var(--mint); }
+      .cfglabel { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+      .cfgsub { font-size: 13px; font-weight: 400; color: var(--muted); }
+      .cfgmark { color: var(--mint); font-weight: 700; flex: none; }
       .sheetpreview {
         padding: 12px 16px;
         font-size: 13px;
@@ -713,6 +744,42 @@
          Flush to the bottom edge with symmetric text-tight padding (no safe-area inset — the
          inset made it either top-heavy as padding or floating as margin). */
       .offline { flex: none; background: var(--red-banner); color: var(--red); font-size: 12px; font-weight: 600; text-align: center; padding: 6px 8px; }
+
+      /* "✓ copied" pill — centered, above everything, fades in then auto-hides (JS-driven) */
+      .copied-toast {
+        position: fixed;
+        left: 50%;
+        bottom: calc(72px + env(safe-area-inset-bottom));
+        transform: translateX(-50%);
+        z-index: 40;
+        background: var(--sheet-bg);
+        color: var(--mint);
+        font-size: 13px;
+        font-weight: 600;
+        padding: 8px 16px;
+        border-radius: 999px;
+        pointer-events: none;
+        animation: copied-in 0.14s ease both;
+      }
+      @keyframes copied-in { from { opacity: 0; transform: translate(-50%, 6px); } to { opacity: 1; transform: translate(-50%, 0); } }
+      /* success notice (model/effort confirmation) — like the copied pill but wraps longer text */
+      .notice-toast {
+        position: fixed;
+        left: 50%;
+        bottom: calc(72px + env(safe-area-inset-bottom));
+        transform: translateX(-50%);
+        z-index: 40;
+        max-width: min(88vw, 420px);
+        background: var(--sheet-bg);
+        color: var(--fg);
+        font-size: 13px;
+        line-height: 1.35;
+        text-align: center;
+        padding: 10px 16px;
+        border-radius: 14px;
+        pointer-events: none;
+        animation: copied-in 0.14s ease both;
+      }
 
       @keyframes scrim-in { from { opacity: 0; } to { opacity: 1; } }
       @keyframes sheet-up { from { transform: translateY(24px); opacity: 0.4; } to { transform: none; opacity: 1; } }

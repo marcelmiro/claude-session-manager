@@ -7,8 +7,9 @@
  *
  * Security posture: bind fail-closed (loopback / tailnet only); a static bearer
  * token, exchanged once via `POST /auth` for an HttpOnly cookie so the token never
- * rides in a URL. `/decision`, `/message`, `/answer` are remote-code-execution by
- * design — the tailnet bind is the wall, the token is defense-in-depth.
+ * rides in a URL. `/decision`, `/message`, `/answer`, `/config` are remote-code-execution
+ * by design (`/config` is allowlist-clamped) — the tailnet bind is the wall, the token is
+ * defense-in-depth.
  */
 
 import { createHash, timingSafeEqual, randomUUID } from "node:crypto";
@@ -20,12 +21,17 @@ import {
   sendMessage,
   answerSessionQuestion,
   createSession,
+  canRestore,
+  restoreSession,
   rewindSession,
   archiveSession,
   interruptSession,
   resolveSessionPane,
   readPaneStatusline,
   decideAttachedApproval,
+  setSessionModelEffort,
+  isModelArg,
+  isEffortArg,
   type SendResult,
 } from "../core/session-api";
 import { nativeStatus } from "../core/session-state";
@@ -204,7 +210,7 @@ function sessionLabel(s: Session): string {
   return base;
 }
 
-function projectSession(s: Session, approvalIds: Set<string>, unread: boolean) {
+function projectSession(s: Session, approvalIds: Set<string>, unread: boolean, restorable?: boolean) {
   // Pending = blocked-on-USER, sourced from the hook log (not status): discovery can
   // mislabel a live blocked session as `archived`, but it must stay reachable from the
   // phone. ONLY a real question or a real awaiting-decision approval counts — an
@@ -232,6 +238,9 @@ function projectSession(s: Session, approvalIds: Set<string>, unread: boolean) {
     summary: s.summary,
     statusSource: s.statusSource,
     modified: s.modified.toISOString(),
+    // Present only for archived sessions: true when the phone can resume it (repo dir +
+    // transcript both still on disk). Drives whether the Restore button renders.
+    ...(restorable !== undefined ? { restorable } : {}),
   };
 }
 
@@ -350,8 +359,19 @@ async function sessionsPayload(): Promise<unknown> {
   // Apply the suffixed name onto the projection so the phone's name-first row title
   // (listTitle = s.name || s.label) shows `-2`/`-3`, matching the TUI/tmux.
   for (const s of tracked) s.name = dnMap.get(s.id) ?? s.name;
+  // Restorable flag for archived sessions only (repo dir + transcript on disk) — computed in
+  // an async pass before the sync `.map()`, mirroring the approvalIds loop above.
+  const restorableMap = new Map<string, boolean>();
+  for (const s of tracked) {
+    if (s.status === "archived") restorableMap.set(s.id, await canRestore(s.id, s.repoPath));
+  }
   const value = tracked.map((s) =>
-    projectSession(s, approvalIds, !!(s.tmuxPane && unread.has(s.tmuxPane.paneId))),
+    projectSession(
+      s,
+      approvalIds,
+      !!(s.tmuxPane && unread.has(s.tmuxPane.paneId)),
+      restorableMap.get(s.id),
+    ),
   );
   sessionsCache = { ts: now, value };
   maybeGenerateNames(tracked, nameCache); // fire-and-forget; refreshes via SSE
@@ -665,6 +685,24 @@ async function route(req: Request): Promise<Response> {
     return sendResult(result);
   }
 
+  // Restore (resume an archived session in a new tmux window; blocks until its prompt is
+  // live so a send right after opening lands). repoPath comes from discovery, not the client.
+  const restore = path.match(/^\/sessions\/([^/]+)\/restore$/);
+  if (method === "POST" && restore) {
+    const id = decodeURIComponent(restore[1]!);
+    // Full discovery (NOT skipArchivedSummaries — that flag also skips the fallback JSONL
+    // scan, dropping index-less sessions the phone DID list → spurious not-found).
+    const { sessions } = await discoverSessions({});
+    const s = sessions.find((x) => x.id === id);
+    if (!s) return json({ ok: false, reason: "not-found" }, 404);
+    // Already live (the Mac resumed it between list-render and tap) — the client just opens it.
+    if (s.status !== "archived") return json({ ok: true, sessionId: id });
+    const result = await restoreSession(id, s.repoPath);
+    sessionsCache = null; // drop the 1s projection cache so the refetch re-derives the now-live status
+    broadcast({ type: "session-changed", id });
+    return sendResult(result);
+  }
+
   // Interrupt (send Escape to stop a running turn). Interrupt fires no Stop hook, so the
   // event-sourced status stays "running"; nativeStatus de-latches it to "ready" ~1.5s
   // later but emits no SSE. So on success we poll nativeStatus and broadcast once it
@@ -676,6 +714,24 @@ async function route(req: Request): Promise<Response> {
     const result = await interruptSession(id);
     if (result.ok) reconcileAfterInterrupt(id);
     return sendResult(result);
+  }
+
+  // Switch model or reasoning effort. Body carries EXACTLY ONE of `model`/`effort`, each
+  // validated against the allowlist before anything reaches the pane. Response includes
+  // Claude's verbatim confirmation `line` (states the applied value + scope).
+  const config = path.match(/^\/sessions\/([^/]+)\/config$/);
+  if (method === "POST" && config) {
+    const id = decodeURIComponent(config[1]!);
+    const body = (await req.json().catch(() => ({}))) as { model?: unknown; effort?: unknown };
+    const hasModel = typeof body.model === "string";
+    const hasEffort = typeof body.effort === "string";
+    if (hasModel === hasEffort) return json({ ok: false, reason: "bad-args" }, 400); // need exactly one
+    if (hasModel) {
+      if (!isModelArg(body.model as string)) return json({ ok: false, reason: "bad-args" }, 400);
+      return sendResult(await setSessionModelEffort(id, "model", body.model as string));
+    }
+    if (!isEffortArg(body.effort as string)) return json({ ok: false, reason: "bad-args" }, 400);
+    return sendResult(await setSessionModelEffort(id, "effort", body.effort as string));
   }
 
   return json({ ok: false, reason: "not-found" }, 404);

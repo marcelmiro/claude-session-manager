@@ -23,6 +23,7 @@ const BUILTIN_COMMANDS: Omit<SlashCommand, "source">[] = [
   { name: "clear", description: "Clear the conversation history" },
   { name: "help", description: "Show help and available commands" },
   { name: "model", description: "Switch the active model" },
+  { name: "effort", description: "Set reasoning effort" },
   { name: "cost", description: "Show token usage and cost for this session" },
   { name: "context", description: "Show the context-window breakdown" },
   { name: "resume", description: "Resume a previous conversation" },

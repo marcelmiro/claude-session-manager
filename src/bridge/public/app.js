@@ -39,12 +39,16 @@ const transcript = signal(null);
 const error = signal("");
 const showArchived = signal(false);
 const flash = signal(""); // transient FAILURE feedback in the detail view (successes stay silent)
+const copied = signal(false); // transient "✓ copied" pill (clipboard success needs visible feedback)
 const pendingSends = signal([]); // optimistic user bubbles awaiting transcript catch-up
 const showNewSession = signal(false); // repo picker for launching a new session
 const repos = signal(null); // null = loading, [] = loaded
 const launching = signal(""); // repo name while waiting for a just-launched session to register
+const restoring = signal(false); // true while a /restore request is in flight (blocks the button)
 const menuText = signal(null); // long-pressed user message → action sheet (null = closed)
 const sessionMenu = signal(null); // long-pressed session ROW → session action sheet (null = closed)
+const configSheet = signal(null); // /model or /effort → model/effort selection sheet ({kind} | null)
+const notice = signal(""); // transient SUCCESS notice, e.g. Claude's model/effort confirmation line
 const loadingAuth = signal(true); // boot-time auth check + initial session load
 const attachments = signal([]); // images staged in the composer: {blob, url} (object URLs)
 const pendingImageSends = signal([]); // optimistic image bubbles awaiting transcript catch-up: {text, urls}
@@ -213,6 +217,24 @@ function flashError(msg) {
   if (msg) flashTimer = setTimeout(() => (flash.value = ""), 5000);
 }
 
+// Copy success IS worth a toast (unlike sends): the clipboard is invisible, so silent
+// success leaves you unsure it worked. A brief centered "✓ copied" pill, auto-hidden.
+let copiedTimer = null;
+function flashCopied() {
+  copied.value = true;
+  clearTimeout(copiedTimer);
+  copiedTimer = setTimeout(() => (copied.value = false), 1100);
+}
+
+// A longer-lived success notice (vs the 1.1s copied pill) — used to surface Claude's own
+// model/effort confirmation line verbatim, including the scope it reports (global vs session).
+let noticeTimer = null;
+function notify(msg) {
+  notice.value = msg;
+  clearTimeout(noticeTimer);
+  if (msg) noticeTimer = setTimeout(() => (notice.value = ""), 4500);
+}
+
 // Send an action and report ok/failure to the caller — the bridge gates
 // answer/decision/message server-side and returns {ok,reason}. Failures flash; success
 // is silent (the caller updates the UI optimistically).
@@ -237,6 +259,32 @@ async function action(path, body) {
   } catch {
     flashError("✗ bridge unreachable");
     return false;
+  }
+}
+
+// Like action(), but returns the parsed response so callers can read extra fields (the
+// /config confirmation `line`). Refreshes on success; flashes + returns null on failure.
+async function actionJson(path, body) {
+  try {
+    const r = await fetch(path, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    let data = {};
+    try {
+      data = await r.json();
+    } catch {}
+    if (r.ok && data.ok !== false) {
+      refreshTranscript();
+      refreshSessions();
+      return data;
+    }
+    flashError(`✗ ${data.reason || r.status}`);
+    return null;
+  } catch {
+    flashError("✗ bridge unreachable");
+    return null;
   }
 }
 
@@ -333,13 +381,30 @@ function closeSubagent() {
   subTranscript.value = null;
 }
 
-// Reading a session clears its unread glow: optimistically here, and on the bridge —
-// which writes needsAttention:false to the shared state.json so the Mac's ⚡ clears too.
+// Reading a session clears its unread glow — but only after a 3s grace period, never
+// instantly. The delay closes a race: the monitor sets ⚡ once, on the running→ready
+// transition, so if Claude finishes right as you open (or glance and leave), an
+// immediate read would clobber that fresh ⚡ before it reaches the phone and you'd miss
+// the completion. We clear only if the session is still unread with the SAME `modified`
+// we saw at open — a turn completing within the window advances `modified`, so its ⚡
+// survives. Clears locally + on the bridge (which writes needsAttention:false to
+// state.json so the Mac's ⚡ clears too).
+const readTimers = new Map();
 function markRead(id) {
   const s = sessions.value.find((x) => x.id === id);
   if (!s || !s.unread) return;
-  sessions.value = sessions.value.map((x) => (x.id === id ? { ...x, unread: false } : x));
-  fetch(`/sessions/${encodeURIComponent(id)}/read`, { method: "POST" }).catch(() => {});
+  const seen = s.modified;
+  clearTimeout(readTimers.get(id));
+  readTimers.set(
+    id,
+    setTimeout(() => {
+      readTimers.delete(id);
+      const cur = sessions.value.find((x) => x.id === id);
+      if (!cur || !cur.unread || cur.modified !== seen) return; // gone, or a fresh turn arrived → keep ⚡
+      sessions.value = sessions.value.map((x) => (x.id === id ? { ...x, unread: false } : x));
+      fetch(`/sessions/${encodeURIComponent(id)}/read`, { method: "POST" }).catch(() => {});
+    }, 3000),
+  );
 }
 
 function back() {
@@ -389,11 +454,36 @@ async function launchSession(repo) {
     launching.value = "";
   }
 }
+// Resume an archived session from the phone. The request BLOCKS until Claude's prompt is live
+// (~7-12s), so show a "Restoring…" state meanwhile; on success the session is now live
+// (non-archived) and refreshSessions() flips the dock to the composer. Failures stay archived
+// so the button remains for retry — the reason is surfaced via `flash` in the restore row.
+async function restoreSession() {
+  const id = selectedId.value;
+  if (!id || restoring.value) return;
+  restoring.value = true;
+  flash.value = "";
+  try {
+    const r = await fetch(`/sessions/${encodeURIComponent(id)}/restore`, { method: "POST" });
+    const data = await r.json().catch(() => ({}));
+    if (r.ok && data.ok !== false) {
+      await refreshSessions();
+      if (id === selectedId.value) await refreshTranscript();
+    } else {
+      flash.value = `restore failed: ${data.reason || r.status}`;
+    }
+  } catch {
+    flash.value = "bridge unreachable";
+  } finally {
+    restoring.value = false;
+  }
+}
 
 // Copy that works on iPhone across origins. On a secure origin (HTTPS) the native Clipboard
 // API actually writes; over plain http navigator.clipboard is undefined, so we fall back to
 // an execCommand path (see legacyCopy). iOS only honors the clipboard at all over HTTPS.
-async function copyMessage(text) {
+async function copyText(text) {
+  if (!text) return false;
   let ok = false;
   // Prefer the native Clipboard API on a secure origin (HTTPS) — it actually writes. iOS
   // `execCommand` returns true even when it no-ops, so it can't be trusted as the primary.
@@ -406,7 +496,14 @@ async function copyMessage(text) {
     }
   }
   if (!ok) ok = legacyCopy(text); // non-secure origins / older browsers (http desktop)
-  if (!ok) flashError("✗ copy failed");
+  if (ok) flashCopied();
+  else flashError("✗ copy failed");
+  return ok;
+}
+
+// Copy from an action sheet: copy, then dismiss the sheet.
+async function copyMessage(text) {
+  await copyText(text);
   menuText.value = null;
 }
 
@@ -451,6 +548,34 @@ const lpStart = (text, upCount, canCode) => () => {
   lpTimer = setTimeout(() => (menuText.value = { text, upCount, canCode }), 450);
 };
 const lpCancel = () => clearTimeout(lpTimer);
+
+// Assistant bubble: long-press → a Copy-only sheet (rewind is a user-turn concept). The
+// `assistant` flag tells ActionSheet to drop the rewind buttons. `asstLpFired` suppresses the
+// click iOS fires on release so a long-press never also tap-copies a code span underneath it.
+let asstLpFired = false;
+const lpStartAsst = (text) => () => {
+  asstLpFired = false;
+  clearTimeout(lpTimer);
+  lpTimer = setTimeout(() => {
+    asstLpFired = true;
+    menuText.value = { text, assistant: true };
+  }, 450);
+};
+
+// Tap-to-copy inside a rendered-markdown assistant bubble: a tap on a code block copies the
+// whole block, a tap on an inline `code` span copies just that span. Non-code taps do nothing
+// (the bubble isn't natively selectable). Delegation over the marked-generated HTML — no need
+// to attach handlers to injected nodes.
+function assistantTap(e) {
+  if (asstLpFired) {
+    asstLpFired = false;
+    return; // this click is the tail of a long-press that already opened the sheet
+  }
+  const target = e.target.closest("pre") || e.target.closest("code");
+  if (!target) return;
+  e.preventDefault();
+  copyText(target.textContent);
+}
 
 // Array index of the user turn `upCount` Up-presses from current (the render's
 // `totalUsers − uSeen` walk, inverted) — i.e. where a rewind-to-before-it truncates the
@@ -755,23 +880,24 @@ function List() {
   // reshuffles when a session's status changes. Rows within a group stay sorted by
   // status/recency via orderedSessions above.
   groups.sort((a, b) => repoRank(a.repo) - repoRank(b.repo) || a.repo.localeCompare(b.repo));
-  const attnCount = attentionSessions().length;
-  // Header chip: blocked-on-you first (the loud red queue), else merely-unseen.
-  const chip = needsYou.length
-    ? { n: needsYou.length, label: "need you", target: needsYou[0] }
-    : attnCount
-      ? { n: attnCount, label: "unread", target: attentionSessions()[0] }
-      : null;
+  // Header counts mirror the TUI status-right (⚡ needs-attention, 🔄 running).
+  // Attention = blocked-on-you + unread (unique); loud red when any session is
+  // actually blocked, softer peach when it's only unseen turns. Clicking jumps
+  // to the first needy session (blocked first, else oldest unread).
+  const attnTotal = new Set([...needsYou.map((s) => s.id), ...attentionSessions().map((s) => s.id)]).size;
+  const attnTarget = needsYou[0] || attentionSessions()[0];
+  const runningCount = all.filter((s) => s.status === "running").length;
   return html`
     <div class="screen">
       <div class="scroll">
         <div class="listhead">
           <h1>
             portkey
-            ${chip &&
-            html`<button class="attnchip" onClick=${() => chip.target && open(chip.target.id)}>
-              ${chip.n} ${chip.label} ›
+            ${attnTotal > 0 &&
+            html`<button class="attnchip ${needsYou.length ? "" : "soft"}" onClick=${() => attnTarget && open(attnTarget.id)}>
+              ⚡ ${attnTotal} ›
             </button>`}
+            ${runningCount > 0 && html`<span class="runchip">🔄 ${runningCount}</span>`}
           </h1>
           <button class="newbtn" onClick=${openNewSession} aria-label="New session">+</button>
         </div>
@@ -873,7 +999,15 @@ function Turn({ turn, upCount, canCode }) {
       // Assistant text is markdown-rendered; user text stays literal (it's what you typed).
       els.push(
         role === "assistant"
-          ? html`<div class="bubble assistant md" dangerouslySetInnerHTML=${{ __html: md(shown) }}></div>`
+          ? html`<div
+              class="bubble assistant md"
+              onClick=${assistantTap}
+              onTouchStart=${lpStartAsst(b.text)}
+              onTouchMove=${lpCancel}
+              onTouchEnd=${lpCancel}
+              onContextMenu=${(e) => e.preventDefault()}
+              dangerouslySetInnerHTML=${{ __html: md(shown) }}
+            ></div>`
           : html`<div
               class="bubble user"
               onTouchStart=${lpStart(b.text, upCount, canCode)}
@@ -1178,6 +1312,17 @@ function Composer({ disabled, status }) {
   function selectSlash(cmd) {
     const el = ref.current;
     if (!el || !cmd) return;
+    // /model and /effort are intercepted into a native selection sheet instead of being sent
+    // as text — the sheet drives the arg-form change and reports Claude's confirmation.
+    if (cmd.name === "model" || cmd.name === "effort") {
+      el.value = "";
+      grow();
+      syncHasText();
+      slash.current.open = false;
+      configSheet.value = { kind: cmd.name };
+      rerender();
+      return;
+    }
     el.value = "/" + cmd.name + " "; // trailing space closes Claude's own native / menu in-pane
     grow();
     syncHasText();
@@ -1688,7 +1833,18 @@ function Detail() {
         </div>
         <div class="dock-inner">
           ${archived
-            ? html`<div class="flash archived">Archived — resume from your Mac to continue this session.</div>`
+            ? session && session.restorable
+              ? html`<div class="flash archived restore-row">
+                  <button
+                    class="primary restore-btn"
+                    disabled=${restoring.value}
+                    onClick=${restoreSession}
+                  >
+                    ${restoring.value ? "Restoring…" : "Restore session"}
+                  </button>
+                  ${flash.value && html`<span class="restore-err">${flash.value}</span>`}
+                </div>`
+              : html`<div class="flash archived">Archived — resume from your Mac to continue this session.</div>`
             : flash.value && html`<div class="flash">${flash.value}</div>`}
           <div class="navbar">
             <button class="iconbtn" onClick=${back} aria-label="Back to sessions">‹</button>
@@ -1705,7 +1861,7 @@ function Detail() {
             </span>
             ${otherAttention > 0 &&
             html`<button class="attn" onClick=${gotoNextAttention} aria-label="Next session needing attention">
-              ⏸ ${otherAttention} ›
+              ⚡ ${otherAttention} ›
             </button>`}
           </div>
           ${(statusline || mode) &&
@@ -1739,12 +1895,14 @@ function ActionSheet() {
         <div class="sheetgroup">
           <div class="sheetpreview">${m.text}</div>
           <button onClick=${() => copyMessage(m.text)}>Copy</button>
-          ${!busy &&
+          ${!m.assistant &&
+          !busy &&
           html`<button class="danger" onClick=${() => rewind("conversation")}>Rewind conversation to here</button>`}
-          ${!busy &&
+          ${!m.assistant &&
+          !busy &&
           m.canCode &&
           html`<button class="danger" onClick=${() => rewind("both")}>Rewind code + conversation</button>`}
-          ${busy && html`<div class="sheethint">Rewind is available at the prompt.</div>`}
+          ${!m.assistant && busy && html`<div class="sheethint">Rewind is available at the prompt.</div>`}
           <button class="sheetcancel" onClick=${close}>Cancel</button>
         </div>
       </div>
@@ -1902,7 +2060,74 @@ function App() {
   // Bottom connectivity banner: a failed fetch ("bridge unreachable") is the persistent
   // state (stays until a refresh succeeds); a dropped SSE socket is the transient one.
   const banner = error.value === "bridge unreachable" ? "bridge unreachable" : !connected.value ? "reconnecting…" : null;
-  return html`${screen}${banner && html`<div class="offline">${banner}</div>`}<${ActionSheet} /><${SessionSheet} /><${AgentList} /><${SubagentView} />`;
+  return html`${screen}${banner && html`<div class="offline">${banner}</div>`}<${ActionSheet} /><${SessionSheet} /><${ConfigSheet} /><${AgentList} /><${SubagentView} /><${NoticeToast} /><${CopiedToast} />`;
+}
+
+// A brief centered "✓ copied" pill, shown on any successful clipboard write.
+// Selection sheets for /model and /effort. Options mirror Claude's own pickers. The current
+// value is read from the pane-scraped statusline (transcript.model / .effort, arg keys); note
+// "Default" reads as `opus` on the statusline, so Opus is marked when Default is active.
+const MODEL_OPTS = [
+  { key: "default", label: "Default", sub: "recommended · Opus 4.8 1M" },
+  { key: "opus[1m]", label: "Opus", sub: "Opus 4.8 · 1M context" },
+  { key: "fable", label: "Fable", sub: "Fable 5" },
+  { key: "sonnet", label: "Sonnet", sub: "Sonnet 5" },
+  { key: "haiku", label: "Haiku", sub: "Haiku 4.5" },
+];
+const EFFORT_OPTS = [
+  { key: "low", label: "Low" },
+  { key: "medium", label: "Medium" },
+  { key: "high", label: "High" },
+  { key: "xhigh", label: "xHigh" },
+  { key: "max", label: "Max" },
+  { key: "ultracode", label: "Ultracode", sub: "this session only" },
+];
+
+function ConfigSheet() {
+  const c = configSheet.value;
+  if (c == null) return null;
+  const close = () => (configSheet.value = null);
+  const t = transcript.value;
+  const current = c.kind === "model" ? t && t.model : t && t.effort;
+  const opts = c.kind === "model" ? MODEL_OPTS : EFFORT_OPTS;
+  const title = c.kind === "model" ? "Model" : "Reasoning effort";
+  const apply = async (key) => {
+    const sid = selectedId.value;
+    close();
+    const body = c.kind === "model" ? { model: key } : { effort: key };
+    const data = await actionJson(`/sessions/${encodeURIComponent(sid)}/config`, body);
+    if (data && data.line) notify(data.line); // Claude's verbatim confirmation (states the scope)
+  };
+  return html`
+    <div class="scrim" onClick=${close}>
+      <div class="sheet" onClick=${(e) => e.stopPropagation()}>
+        <div class="sheetgroup">
+          <div class="sheethead"><span class="name">${title}</span></div>
+          ${opts.map(
+            (o) => html`<button
+              key=${o.key}
+              class=${"cfgopt" + (o.key === current ? " current" : "")}
+              onClick=${() => apply(o.key)}
+            >
+              <span class="cfglabel">${o.label}${o.sub ? html`<span class="cfgsub">${o.sub}</span>` : ""}</span>
+              ${o.key === current ? html`<span class="cfgmark">✓</span>` : ""}
+            </button>`,
+          )}
+          <button class="sheetcancel" onClick=${close}>Cancel</button>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function NoticeToast() {
+  if (!notice.value) return null;
+  return html`<div class="notice-toast">${notice.value}</div>`;
+}
+
+function CopiedToast() {
+  if (!copied.value) return null;
+  return html`<div class="copied-toast">✓ copied</div>`;
 }
 
 // Resume sync: iOS suspends backgrounded tabs and standalone PWAs and tears down the SSE

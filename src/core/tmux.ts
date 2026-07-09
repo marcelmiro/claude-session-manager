@@ -230,6 +230,27 @@ export async function launchClaudeWindow(
 }
 
 /**
+ * Resume an existing session in a NEW tmux window: `claude --resume=<sessionId>` in
+ * `repoPath`, inserted after the active window (`-a`). Uses the established resume
+ * convention `zsh -c '…; exec zsh -l'` (index.ts) so a failed resume leaves an inspectable
+ * shell rather than a raced bare-exec close. Returns the new window's pane id so the caller
+ * can wait for that pane's SessionStart hook to re-register the session id.
+ */
+export async function launchResumeWindow(
+  targetSession: string,
+  repoPath: string,
+  name: string,
+  sessionId: string,
+): Promise<string> {
+  const cmd = `claude --resume=${sessionId}; exec zsh -l`;
+  const out =
+    await Bun.$`tmux new-window -a -t ${targetSession} -n ${name} -c ${repoPath} -P -F ${"#{pane_id}"} zsh -c ${cmd}`
+      .quiet()
+      .text();
+  return out.trim();
+}
+
+/**
  * Send keys ONE AT A TIME with a small gap between them.
  *
  * tmux coalesces a multi-key `send-keys` into a single write, and Claude's TUI
