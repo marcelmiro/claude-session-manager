@@ -158,6 +158,7 @@ export interface WizardState {
   worktreeName: string;        // text input: new branch name for worktree (empty = no worktree)
   worktreeNameCursor: number;
   enterDebounceUntil: number;  // timestamp (ms) — ignore Enter until this time (prevents double-fire on step transition)
+  fetchState: "idle" | "fetching" | "done"; // background `git fetch` status for the branch step
 }
 
 export type WizardAction =
@@ -167,6 +168,7 @@ export type WizardAction =
   | { type: "cancel" }
   | { type: "quit" }
   | { type: "loadBranches" }
+  | { type: "fetch" }
   | { type: "launch"; repo: WizardRepo; branch: WizardBranch; worktreeName: string };
 
 // --- Global search types ---

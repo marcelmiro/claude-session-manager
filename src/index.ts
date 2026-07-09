@@ -12,8 +12,8 @@ import { loadConfig } from "./core/config";
 import { loadState, saveState, loadPaneSessions } from "./core/state";
 import { listPendingApprovals, decideApproval } from "./core/approval";
 import { syncWindowPrefix, buildBaseName } from "./core/notifications";
-import { discoverRepos, listBranches } from "./core/git";
-import { initWizard, renderWizard, renderWizardPreview, renderWizardStatusBar, handleWizardKey, worktreeDirName } from "./ui/wizard";
+import { discoverRepos, listBranches, fetchRepo } from "./core/git";
+import { initWizard, renderWizard, renderWizardPreview, renderWizardStatusBar, handleWizardKey, worktreeDirName, setWizardBranches } from "./ui/wizard";
 import { loadAllSessions, filterAndRankEntries, type SearchEntry } from "./core/search";
 import { renderSearchResults } from "./ui/search-list";
 import { createSpaceMenuState, renderSpaceMenu, handleSpaceMenuKey, getMenuDimensions, type SpaceMenuState } from "./ui/space-menu";
@@ -1036,6 +1036,11 @@ screen.key(["n"], async () => {
   renderWizardStatusBar(statusBar, wizardState);
   await renderWizardPreview(previewBox, wizardState);
   screen.render();
+
+  // Auto-skipped straight to the branch step → kick off the background fetch too.
+  if (wizardState.step === "branch" && wizardState.selectedRepo) {
+    void runWizardFetch(wizardState.selectedRepo.path);
+  }
 });
 
 // Flag: true during the tick when `/` activates search, prevents the search
@@ -1368,8 +1373,14 @@ screen.on("keypress", async (_ch: string, key: any) => {
       renderWizardStatusBar(statusBar, wizardState);
       await renderWizardPreview(previewBox, wizardState);
       screen.render();
+      // Non-blocking fetch so branches pushed by others appear without quitting.
+      void runWizardFetch(wizardState.selectedRepo!.path);
       break;
     }
+    case "fetch":
+      // Manual ^R refresh in the branch step.
+      void runWizardFetch(wizardState.selectedRepo!.path);
+      break;
     case "launch": {
       if (wizardLaunching) break;
       wizardLaunching = true;
@@ -1387,6 +1398,34 @@ screen.on("keypress", async (_ch: string, key: any) => {
     }
   }
 });
+
+/** Background `git fetch` for the wizard branch step. Shows a spinner in the
+ *  filter bar, then re-lists branches so remote-only branches pushed by others
+ *  become selectable. Bails silently if the wizard moved on (different repo,
+ *  left the branch step, or cancelled) while the fetch was in flight. */
+async function runWizardFetch(repoPath: string): Promise<void> {
+  if (!wizardState) return;
+  wizardState.fetchState = "fetching";
+  renderWizard(listBox, wizardState);
+  screen.render();
+
+  const result = await fetchRepo(repoPath);
+
+  // Wizard may have advanced/cancelled during the fetch — only apply if still
+  // on the branch step for the same repo.
+  if (!wizardState || wizardState.step !== "branch" || wizardState.selectedRepo?.path !== repoPath) return;
+
+  if (result.ok) {
+    setWizardBranches(wizardState, await listBranches(repoPath));
+  }
+  wizardState.fetchState = "done";
+  renderWizard(listBox, wizardState);
+  renderWizardStatusBar(statusBar, wizardState);
+  await renderWizardPreview(previewBox, wizardState);
+  screen.render();
+
+  if (!result.ok) flashStatusMessage(`{${C.dim}-fg}fetch failed — showing local branches{/${C.dim}-fg}`, 3000);
+}
 
 /** Extract unique repos from display rows */
 function getUniqueRepos(displayRows: DisplayRow[]): Array<{ name: string; path: string }> {

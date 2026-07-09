@@ -39,6 +39,7 @@ export function initWizard(
     worktreeName: "",
     worktreeNameCursor: 0,
     enterDebounceUntil: 0,
+    fetchState: "idle",
   };
 
   // Auto-skip repo step if only one repo
@@ -166,8 +167,12 @@ function renderRepoStep(lines: string[], listBox: Widgets.BoxElement, state: Wiz
 }
 
 function renderBranchStep(lines: string[], _listBox: Widgets.BoxElement, state: WizardState): void {
-  // Filter bar (always visible — type to search)
-  lines.push(`  {${C.peach}-fg}/{/${C.peach}-fg} ${renderTextWithCursor(state.branchFilter, state.branchFilterCursor)}`);
+  // Filter bar (always visible — type to search). A background `git fetch` runs
+  // on entry so branches pushed by others show up without leaving the wizard.
+  const fetchTag = state.fetchState === "fetching"
+    ? `   {${C.dim}-fg}⟳ fetching…{/${C.dim}-fg}`
+    : "";
+  lines.push(`  {${C.peach}-fg}/{/${C.peach}-fg} ${renderTextWithCursor(state.branchFilter, state.branchFilterCursor)}${fetchTag}`);
 
   const branches = state.filteredBranches;
 
@@ -389,6 +394,7 @@ export function renderWizardStatusBar(statusBar: Widgets.BoxElement, state: Wiza
       `{${C.peach}-fg}↑/↓{/${C.peach}-fg} {${C.dim}-fg}move{/${C.dim}-fg}` +
       `  {${C.peach}-fg}type{/${C.peach}-fg} {${C.dim}-fg}to filter{/${C.dim}-fg}` +
       `  {${C.peach}-fg}\u23CE{/${C.peach}-fg} {${C.dim}-fg}select{/${C.dim}-fg}` +
+      `  {${C.peach}-fg}^R{/${C.peach}-fg} {${C.dim}-fg}fetch{/${C.dim}-fg}` +
       `  {${C.peach}-fg}Esc{/${C.peach}-fg} {${C.dim}-fg}back{/${C.dim}-fg}`;
   } else if (state.step === "worktree-choice") {
     content =
@@ -502,6 +508,11 @@ function handleBranchFilterKey(state: WizardState, keyName: string, ch: string):
       state.enterDebounceUntil = Date.now() + 100;
       return { type: "render" };
     }
+    case "C-r":
+      // Manual refresh: re-fetch remote branches on demand (fallback for a
+      // branch a teammate pushed after the on-entry background fetch ran).
+      if (state.fetchState === "fetching") return { type: "noop" };
+      return { type: "fetch" };
   }
 
   // Centralized text input handling
@@ -521,6 +532,15 @@ function handleBranchFilterKey(state: WizardState, keyName: string, ch: string):
   }
 
   return { type: "noop" };
+}
+
+/**
+ * Replace the branch list (e.g. after a fetch) and re-apply the active filter,
+ * preserving the typed query and clamping the selection.
+ */
+export function setWizardBranches(state: WizardState, branches: WizardBranch[]): void {
+  state.branches = branches;
+  applyBranchFilter(state);
 }
 
 function applyBranchFilter(state: WizardState): void {

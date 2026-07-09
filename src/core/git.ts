@@ -250,6 +250,21 @@ export async function listBranches(repoPath: string): Promise<WizardBranch[]> {
 }
 
 /**
+ * Fetch remote refs so branches pushed by others become visible, and prune
+ * refs deleted on the remote. Returns ok:false with the git error on failure
+ * (offline, no remote, etc.) — callers fall back to the local ref list.
+ */
+export async function fetchRepo(repoPath: string): Promise<{ ok: boolean; error?: string }> {
+  try {
+    await Bun.$`git -C ${repoPath} fetch --prune`.quiet();
+    return { ok: true };
+  } catch (e: any) {
+    const error = (e?.stderr?.toString() || e?.message || "fetch failed").trim();
+    return { ok: false, error };
+  }
+}
+
+/**
  * Get git log for a branch (colored, graph format).
  */
 export async function getBranchLog(repoPath: string, branch: string): Promise<string> {
