@@ -225,10 +225,10 @@ export async function generateAIName(firstPrompt: string, summary?: string, bran
       if (branchContext) contextParts.push(`Branch: "${branchContext}"`);
     }
 
-    const namePrompt = `Name this coding session in Title Case, plain English words. Prefer 1-2 words; use 3 only when necessary (keep it short — it also labels a narrow tmux tab). Drop filler words (the, a, for, with, to). Focus on the ACTION and GOAL, not file paths or locations. Do NOT use kebab-case, do NOT abbreviate.
+    const namePrompt = `Name this session in Title Case, plain English words. It may be any kind of task (coding or not) — always produce a name from the content; never introduce yourself or explain. Prefer 1-2 words; use 3 only when necessary (keep it short — it also labels a narrow tmux tab). Drop filler words (the, a, for, with, to). Focus on the ACTION and GOAL, not file paths or locations. Do NOT use kebab-case, do NOT abbreviate.
 
-Good: Fix Auth, Dark Mode, Refactor API, Provider Sync
-Bad: fix-auth, impl-dark-mode, packages-api-src, update-index-ts
+Good: Fix Auth, Dark Mode, Refactor API, Provider Sync, iCloud Photos, Wallet Analysis
+Bad: fix-auth, impl-dark-mode, "I'm Claude Code...", update-index-ts
 
 Reply with ONLY the name, nothing else.
 
