@@ -161,6 +161,7 @@ const FIXTURE_CHANGES = {
   base: "main",
   files: [
     { path: "src/bridge/server.ts", status: "M", add: 34, del: 6, binary: false },
+    { path: "src/bridge/diff-view.ts", status: "R", orig: "src/bridge/file-view.ts", add: 12, del: 3, binary: false },
     { path: "src/bridge/public/app.js", status: "M", add: 88, del: 2, binary: false },
     { path: "src/core/session-api.ts", status: "M", add: 41, del: 0, binary: false },
     { path: "src/bridge/public/index.html", status: "M", add: 22, del: 4, binary: false },

@@ -313,6 +313,8 @@
       .compact-summary > .md > *:first-child { margin-top: 0; }
       .compact-summary > .md > *:last-child { margin-bottom: 0; }
       .typing { color: var(--muted); font-size: 13px; padding: 2px 4px 10px; font-family: var(--mono); }
+      /* Dim system/interrupt notice line — not a user bubble (mirrors the TUI ⊘ event line). */
+      .sysline { color: var(--dim); font-size: 12px; padding: 2px 4px; font-family: var(--mono); text-align: center; }
 
       /* Bottom-align the conversation so the newest message sits just above the dock
          (chat convention) instead of stranding it mid-screen with dead space below.
@@ -938,6 +940,7 @@
       .fl-badge.st-a { color: var(--addgut); }
       .fl-badge.st-m { color: var(--peach); }
       .fl-badge.st-d { color: var(--delgut); }
+      .fl-badge.st-r { color: var(--yellow); }
       .fl-badge.st-o { color: var(--muted); }
       .fl-path { flex: 1; min-width: 0; display: flex; align-items: baseline; font-family: var(--mono); font-size: 12px; overflow: hidden; }
       .fl-dir { flex: 0 1 auto; min-width: 0; color: var(--dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }

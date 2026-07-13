@@ -117,7 +117,7 @@ export async function baseRef(root: string): Promise<{ ref: string; label: strin
   if (sym.exitCode === 0) {
     def = sym.stdout.toString().trim().replace(/^refs\/remotes\//, ""); // e.g. "origin/main"
   } else {
-    for (const cand of ["origin/main", "origin/master", "main", "master"]) {
+    for (const cand of ["origin/main", "origin/master", "origin/develop", "origin/trunk", "main", "master", "develop", "trunk"]) {
       if (
         (await Bun.$`git -C ${root} rev-parse --verify --quiet ${cand}`.nothrow().quiet())
           .exitCode === 0
@@ -127,9 +127,11 @@ export async function baseRef(root: string): Promise<{ ref: string; label: strin
       }
     }
   }
-  if (!def) return { ref: "HEAD", label: "" }; // no base branch → uncommitted-only
+  // No discoverable base branch → diff vs HEAD (uncommitted-only). Label "HEAD" (not "")
+  // so the UI honestly shows "vs HEAD" rather than silently implying a full branch diff.
+  if (!def) return { ref: "HEAD", label: "HEAD" };
   const mb = await Bun.$`git -C ${root} merge-base HEAD ${def}`.nothrow().quiet();
-  if (mb.exitCode !== 0) return { ref: "HEAD", label: "" };
+  if (mb.exitCode !== 0) return { ref: "HEAD", label: "HEAD" }; // unrelated histories → uncommitted-only
   return { ref: mb.stdout.toString().trim(), label: def.replace(/^origin\//, "") };
 }
 
@@ -140,37 +142,75 @@ export async function baseRef(root: string): Promise<{ ref: string; label: strin
  * patch. `--no-renames` keeps paths literal so numstat parses cleanly. `abs` is the
  * pre-validated absolute path (from `safeRepoPath`); `rel` is repo-relative.
  */
-export async function fileDiff(root: string, abs: string, rel: string): Promise<FileDiff> {
+export async function fileDiff(
+  root: string,
+  abs: string,
+  rel: string,
+  orig?: string,
+): Promise<FileDiff> {
   const branch = await currentBranch(root);
   const { ref, label } = await baseRef(root);
 
-  let patch = (
-    await Bun.$`git -C ${root} diff --no-renames ${ref} -- ${rel}`.nothrow().quiet()
-  ).stdout.toString();
-  let numstat = (
-    await Bun.$`git -C ${root} diff --no-renames --numstat ${ref} -- ${rel}`.nothrow().quiet()
-  ).stdout.toString();
-
-  // Empty patch is ambiguous: unchanged, OR an untracked new file (never in `git diff <ref>`).
-  // Only the latter gets the `--no-index` vs /dev/null fallback (renders as all-additions).
-  // Exit 1 = has-diff, not an error (hence `.nothrow()`).
-  const untracked =
-    !patch.trim() &&
-    (await Bun.$`git -C ${root} ls-files --others --exclude-standard -- ${rel}`.nothrow().quiet())
-      .stdout.toString()
-      .trim() !== "";
-  if (untracked) {
-    patch = (
-      await Bun.$`git -C ${root} diff --no-index --no-renames -- /dev/null ${abs}`.nothrow().quiet()
+  // Rename: diff BOTH endpoints (`-M`) so the true content churn shows, not the whole new file
+  // as a fresh add. `changedFiles` supplies `orig` (the old path) for its status-R rows.
+  if (orig && orig !== rel) {
+    const patch = (
+      await Bun.$`git -C ${root} diff -M ${ref} -- ${orig} ${rel}`.nothrow().quiet()
     ).stdout.toString();
-    numstat = (
-      await Bun.$`git -C ${root} diff --no-index --numstat --no-renames -- /dev/null ${abs}`
-        .nothrow()
-        .quiet()
-    ).stdout.toString();
+    if (patch.trim()) {
+      const numstat = (
+        await Bun.$`git -C ${root} diff -M --numstat ${ref} -- ${orig} ${rel}`.nothrow().quiet()
+      ).stdout.toString();
+      const { add, del, binary } = parseNumstat(numstat);
+      if (binary) return { branch, base: label, status: "R", add, del, binary: true };
+      if (patch.length > SIZE_CAP) return { branch, base: label, status: "R", add, del, tooLarge: true };
+      return { branch, base: label, status: "R", add, del, patch };
+    }
   }
 
-  if (!patch.trim()) return { branch, base: label, add: 0, del: 0, empty: true };
+  // Resolve the ref-vs-worktree diff for ONE pathspec form, or null if it yields no diff.
+  // Empty patch is ambiguous: unchanged, OR an untracked new file (never in `git diff <ref>`)
+  // — only the latter gets the `--no-index` vs /dev/null fallback (renders as all-additions).
+  // Exit 1 = has-diff, not an error (hence `.nothrow()`).
+  const resolve = async (pathspec: string, absPath: string) => {
+    let patch = (
+      await Bun.$`git -C ${root} diff --no-renames ${ref} -- ${pathspec}`.nothrow().quiet()
+    ).stdout.toString();
+    let numstat = (
+      await Bun.$`git -C ${root} diff --no-renames --numstat ${ref} -- ${pathspec}`.nothrow().quiet()
+    ).stdout.toString();
+    const untracked =
+      !patch.trim() &&
+      (await Bun.$`git -C ${root} ls-files --others --exclude-standard -- ${pathspec}`.nothrow().quiet())
+        .stdout.toString()
+        .trim() !== "";
+    if (untracked) {
+      patch = (
+        await Bun.$`git -C ${root} diff --no-index --no-renames -- /dev/null ${absPath}`.nothrow().quiet()
+      ).stdout.toString();
+      numstat = (
+        await Bun.$`git -C ${root} diff --no-index --numstat --no-renames -- /dev/null ${absPath}`
+          .nothrow()
+          .quiet()
+      ).stdout.toString();
+    }
+    return patch.trim() ? { patch, numstat, untracked } : null;
+  };
+
+  // macOS keeps the committed tree and the working copy in DIFFERENT Unicode forms (tree NFC
+  // via core.precomposeUnicode, working copy NFD on disk), and `git diff <ref> -- <path>`
+  // matches the pathspec against the WORKING COPY — so the path `changedFiles` emitted (NFC)
+  // can miss and return an empty diff. Try the given form, then the alternate normalizations,
+  // and use whichever actually matches. No-op cost for ASCII paths (first form always matches).
+  let resolved = await resolve(rel, abs);
+  for (const form of ["NFD", "NFC"] as const) {
+    if (resolved) break;
+    const alt = rel.normalize(form);
+    if (alt !== rel) resolved = await resolve(alt, abs.normalize(form));
+  }
+  if (!resolved) return { branch, base: label, add: 0, del: 0, empty: true };
+  const { patch, numstat, untracked } = resolved;
+
   // Status letter from the patch's file header (`--no-renames`, so renames split into D+A):
   // an untracked or "new file mode" is Added, "deleted file mode" is Deleted, else Modified.
   const status = untracked || /^new file mode/m.test(patch) ? "A" : /^deleted file mode/m.test(patch) ? "D" : "M";
@@ -181,8 +221,9 @@ export async function fileDiff(root: string, abs: string, rel: string): Promise<
 }
 
 export interface ChangedFile {
-  path: string;
-  status: string; // git single-letter status vs base: A(dded) / M(odified) / D(eleted) / T(ype)
+  path: string; // for a rename, the NEW path
+  status: string; // git status vs base: A(dded) / M(odified) / D(eleted) / R(enamed) / T(ype)
+  orig?: string; // for a rename (status R), the OLD path — lets the diff view render the true rename
   add: number;
   del: number;
   binary: boolean;
@@ -190,31 +231,55 @@ export interface ChangedFile {
 
 /**
  * Every file changed from `ref` to the working tree (committed on the branch + uncommitted),
- * plus untracked new files as all-additions. Each carries a `--name-status` letter (A/M/D)
- * relative to the base — consistent with the diff (NOT `git status --porcelain`, which would
- * be blank for committed branch files). `--no-renames` keeps paths literal (renames = D + A)
- * so numstat/status parse cleanly. Deduped by path.
+ * plus untracked new files as all-additions. Each carries a status letter vs base (A/M/D/R) —
+ * consistent with the diff, NOT `git status --porcelain` (which would be blank for committed
+ * branch files). Renames are DETECTED (`-M`) and collapsed to one `R` row (new path + real
+ * churn), instead of a misleading delete+add pair. `-z` gives NUL-delimited, raw (unquoted,
+ * un-normalized) UTF-8 paths so non-ASCII names parse cleanly and round-trip to a reachable
+ * diff. Deduped/keyed by the new path.
  */
 export async function changedFiles(root: string, ref: string): Promise<ChangedFile[]> {
   const [numstatR, statusR] = await Promise.all([
-    Bun.$`git -C ${root} diff --no-renames --numstat ${ref}`.nothrow().quiet(),
-    Bun.$`git -C ${root} diff --no-renames --name-status ${ref}`.nothrow().quiet(),
+    Bun.$`git -C ${root} diff -M -z --numstat ${ref}`.nothrow().quiet(),
+    Bun.$`git -C ${root} diff -M -z --name-status ${ref}`.nothrow().quiet(),
   ]);
+  // `-z` records are NUL-separated. A rename spans THREE tokens: the status/counts token, then
+  // the old path, then the new path (numstat's counts token ends with an empty path field;
+  // name-status's token is `R<score>`). Everything else is a two-token (meta, path) pair.
+  const nsTokens = numstatR.stdout.toString().split("\0").filter(Boolean);
+  const stTokens = statusR.stdout.toString().split("\0").filter(Boolean);
+
+  const origByPath = new Map<string, string>(); // new path → old path (renames only)
   const statusByPath = new Map<string, string>();
-  for (const line of statusR.stdout.toString().trim().split("\n").filter(Boolean)) {
-    const [st, ...rest] = line.split("\t");
-    const path = rest.join("\t");
-    if (path) statusByPath.set(path, st![0] || "M");
+  for (let i = 0; i < stTokens.length; ) {
+    const st = stTokens[i++]!;
+    if (st[0] === "R" || st[0] === "C") {
+      const oldP = stTokens[i++]!;
+      const newP = stTokens[i++]!;
+      statusByPath.set(newP, "R");
+      origByPath.set(newP, oldP);
+    } else {
+      const path = stTokens[i++];
+      if (path) statusByPath.set(path, st[0] || "M");
+    }
   }
   const map = new Map<string, ChangedFile>();
-  for (const line of numstatR.stdout.toString().trim().split("\n").filter(Boolean)) {
-    const [a, d, ...rest] = line.split("\t");
-    const path = rest.join("\t");
+  for (let i = 0; i < nsTokens.length; ) {
+    const parts = nsTokens[i++]!.split("\t");
+    const [a, d] = parts;
+    // A rename's counts token has an EMPTY third field, with the old + new paths as the next
+    // two tokens; a normal entry carries its path inline as the third field.
+    let path = parts[2] || "";
+    if (!path) {
+      i++; // skip the old path token
+      path = nsTokens[i++] || ""; // the new path
+    }
     if (!path) continue;
     const binary = a === "-" && d === "-";
     map.set(path, {
       path,
       status: statusByPath.get(path) || "M",
+      ...(origByPath.has(path) ? { orig: origByPath.get(path) } : {}),
       add: binary ? 0 : Number(a) || 0,
       del: binary ? 0 : Number(d) || 0,
       binary,
@@ -222,11 +287,10 @@ export async function changedFiles(root: string, ref: string): Promise<ChangedFi
   }
   // Untracked new files aren't in `git diff <ref>`; add them as all-additions (status A).
   const untracked = (
-    await Bun.$`git -C ${root} ls-files --others --exclude-standard`.nothrow().quiet()
+    await Bun.$`git -C ${root} ls-files -z --others --exclude-standard`.nothrow().quiet()
   ).stdout
     .toString()
-    .trim()
-    .split("\n")
+    .split("\0")
     .filter(Boolean);
   await Promise.all(
     untracked.map(async (path) => {

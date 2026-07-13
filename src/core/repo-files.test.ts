@@ -157,6 +157,79 @@ test("baseRef picks the default branch; changedFiles shows committed + uncommitt
   rmSync(root, { recursive: true, force: true });
 });
 
+test("non-ASCII filename: real UTF-8 path (not git's C-quoted form), and its diff is reachable", async () => {
+  const root = await tempRepo();
+  writeFileSync(`${root}/seed.txt`, "x\n");
+  await Bun.$`git -C ${root} add -A`.quiet();
+  await Bun.$`git -C ${root} commit -qm init`.quiet();
+  await Bun.$`git -C ${root} branch -M main`.quiet();
+  // An accented committed file + an accented untracked file — both would be C-quoted by
+  // default git output ("caf\303\251.txt"), which used to render as garbage and be untappable.
+  writeFileSync(`${root}/café.txt`, "hello\n");
+  await Bun.$`git -C ${root} checkout -q -b feature`.quiet();
+  await Bun.$`git -C ${root} add -A`.quiet();
+  await Bun.$`git -C ${root} commit -qm accented`.quiet();
+  writeFileSync(`${root}/naïve.txt`, "u\n"); // untracked, also accented
+
+  const { ref } = await baseRef(root);
+  const files = await changedFiles(root, ref);
+  const paths = files.map((f) => f.path).sort();
+  expect(paths).toEqual(["café.txt", "naïve.txt"]); // real UTF-8, not "caf\303\251.txt"
+  // The path round-trips to a reachable diff (this is what the phone's tap does).
+  const abs = safeRepoPath(root, "café.txt");
+  expect(abs).toBe(`${root}/café.txt`);
+  const d = await fileDiff(root, abs!, "café.txt");
+  expect(d.empty).toBeUndefined();
+  expect(d.status).toBe("A");
+  expect(d.patch).toContain("hello");
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("rename is one R row (new path + real churn), not a delete+add pair", async () => {
+  const root = await tempRepo();
+  writeFileSync(`${root}/old.txt`, "line1\nline2\nline3\nline4\n");
+  await Bun.$`git -C ${root} add -A`.quiet();
+  await Bun.$`git -C ${root} commit -qm init`.quiet();
+  await Bun.$`git -C ${root} branch -M main`.quiet();
+  await Bun.$`git -C ${root} checkout -q -b feature`.quiet();
+  await Bun.$`git -C ${root} mv old.txt new.txt`.quiet();
+  writeFileSync(`${root}/new.txt`, "line1\nCHANGED\nline3\nline4\nline5\n"); // rename + small edit
+  await Bun.$`git -C ${root} add -A`.quiet();
+  await Bun.$`git -C ${root} commit -qm "rename+edit"`.quiet();
+
+  const { ref } = await baseRef(root);
+  const files = await changedFiles(root, ref);
+  expect(files.length).toBe(1); // ONE row, not old.txt(D) + new.txt(A)
+  const f = files[0]!;
+  expect(f.status).toBe("R");
+  expect(f.path).toBe("new.txt");
+  expect(f.orig).toBe("old.txt");
+  expect(f.add).toBeLessThan(5); // real churn, NOT the whole 5-line file re-added
+  // Tapping it renders the true rename diff (the CHANGED hunk), not a fresh add of new.txt.
+  const d = await fileDiff(root, `${root}/new.txt`, "new.txt", "old.txt");
+  expect(d.status).toBe("R");
+  expect(d.patch).toContain("CHANGED");
+  expect(d.add).toBeLessThan(5);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("baseRef discovers a non-standard default branch (develop)", async () => {
+  const root = await tempRepo();
+  writeFileSync(`${root}/base.txt`, "one\n");
+  await Bun.$`git -C ${root} add -A`.quiet();
+  await Bun.$`git -C ${root} commit -qm base`.quiet();
+  await Bun.$`git -C ${root} branch -M develop`.quiet(); // default branch is neither main nor master
+  await Bun.$`git -C ${root} checkout -q -b feature`.quiet();
+  writeFileSync(`${root}/committed.txt`, "added\n");
+  await Bun.$`git -C ${root} add -A`.quiet();
+  await Bun.$`git -C ${root} commit -qm feat`.quiet();
+  const { label } = await baseRef(root);
+  expect(label).toBe("develop"); // committed branch work is now visible vs develop
+  const paths = (await changedFiles(root, (await baseRef(root)).ref)).map((f) => f.path);
+  expect(paths).toContain("committed.txt");
+  rmSync(root, { recursive: true, force: true });
+});
+
 test("changedFiles: on the default branch with no divergence → only uncommitted show", async () => {
   const root = await tempRepo();
   writeFileSync(`${root}/a.txt`, "x\n");

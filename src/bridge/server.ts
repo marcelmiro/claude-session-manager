@@ -614,7 +614,11 @@ async function route(req: Request): Promise<Response> {
     if (!root) return json({ ok: false, reason: "no-repo" }, 404);
     const abs = safeRepoPath(root, decodeURIComponent(rel));
     if (!abs) return json({ ok: false, reason: "not-found" }, 404);
-    return json(await fileDiff(root, abs, relTo(root, abs)));
+    // `orig` (old path of a rename) is optional; validate it through the same containment
+    // guard and pass its repo-relative form so the diff shows the true rename, not a fresh add.
+    const origParam = url.searchParams.get("orig");
+    const origAbs = origParam ? safeRepoPath(root, decodeURIComponent(origParam)) : null;
+    return json(await fileDiff(root, abs, relTo(root, abs), origAbs ? relTo(root, origAbs) : undefined));
   }
 
   const decision = path.match(/^\/sessions\/([^/]+)\/decision$/);

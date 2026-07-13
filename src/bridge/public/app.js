@@ -64,6 +64,58 @@ const filesView = signal(false); // full changed-files list pushed over the deta
 // (its notebook_path isn't in the server's TOOL_ARG_FIELDS) — so NotebookEdit stays a
 // checkpoint boundary for rewind but is never tappable-to-diff.
 const EDIT_TOOLS = new Set(["Edit", "Write", "MultiEdit", "NotebookEdit"]);
+// A whole-line bracketed user turn (e.g. "[Request interrupted by user for tool use]") is a
+// system notice Claude appends on interrupt — not a typed message. It's shown as a dim event
+// line, and Claude's /rewind picker never lists it as a checkpoint. Mirrors preview-pane.ts.
+const isSystemMarkerText = (t) => /^\[.*\]$/.test((t || "").trim());
+const turnMarkerText = (turn) => {
+  const c = turn.content || [];
+  return c.length === 1 && c[0].type === "text" && isSystemMarkerText(c[0].text) ? c[0].text : null;
+};
+
+// A real typed prompt — a `user` turn carrying text or an image (excluding the system marker
+// above). Claude records tool results as `user` turns too (content is a lone `tool_result`
+// block), but those are NOT checkpoints in the /rewind picker and render as nothing in the
+// thread. The rewind `upCount` walk must count ONLY prompt turns, or every tool result /
+// interrupt marker inflates the count and the picker cursor overshoots → the server aborts
+// with rewind-mismatch.
+const isPromptTurn = (turn) =>
+  turn.role === "user" &&
+  !turnMarkerText(turn) &&
+  (turn.content || []).some((b) => b.type === "text" || b.type === "image");
+
+// Ordered turn indices that are actual /rewind CHECKPOINTS. A typed prompt only becomes a
+// checkpoint once it starts producing output — i.e. an assistant turn follows it before the
+// next prompt. A prompt interrupted before its first token (double-tap Stop right after
+// sending) creates NO checkpoint and is absent from Claude's picker, so counting it would
+// shift every earlier prompt's upCount by one → the picker cursor lands wrong → the server
+// aborts with rewind-mismatch. Verified against claude 2.1.x's picker. Non-prompt user turns
+// (tool_result, interrupt markers) sit between and are simply skipped, not treated as prompts.
+function promptCheckpointIndices(turns) {
+  const out = [];
+  for (let i = 0; i < turns.length; i++) {
+    if (!isPromptTurn(turns[i])) continue;
+    let started = false;
+    for (let j = i + 1; j < turns.length; j++) {
+      if (isPromptTurn(turns[j])) break; // reached the next prompt with no output in between
+      if (turns[j].role === "assistant") {
+        started = true;
+        break;
+      }
+    }
+    if (started) out.push(i);
+  }
+  return out;
+}
+
+// Map each checkpoint's turn index → its upCount (Up-presses from "(current)": the newest
+// checkpoint is 1, counting back). Non-checkpoint turns are absent (→ upCount 0, no rewind).
+function upCountByIndex(turns) {
+  const idx = promptCheckpointIndices(turns);
+  const map = new Map();
+  idx.forEach((turnIndex, pos) => map.set(turnIndex, idx.length - pos));
+  return map;
+}
 // Optimistic rewind view: {keepTurns, rev} while a rewind is committed on-pane but not yet
 // written to the JSONL (Claude's /rewind is an in-memory checkpoint until the next send, so
 // the transcript still returns the abandoned branch). We truncate the displayed thread to
@@ -550,8 +602,9 @@ function legacyCopy(text) {
 
 // Long-press detection for message actions. A single shared timer (only one press at a
 // time); a move or release before the threshold cancels it, so it never fights swipes.
-// The menu payload carries the message text + its rewind target (upCount = Up-presses
-// from "(current)" in Claude's /rewind picker = totalUserMessages − thisMessageIndex).
+// The menu payload carries the message text + its rewind target (upCount = Up-presses from
+// "(current)" in Claude's /rewind picker; 0 = not a checkpoint, so no rewind — see
+// upCountByIndex). canCode gates the code-restore option.
 let lpTimer = null;
 const lpStart = (text, upCount, canCode) => () => {
   clearTimeout(lpTimer);
@@ -587,16 +640,12 @@ function assistantTap(e) {
   copyText(target.textContent);
 }
 
-// Array index of the user turn `upCount` Up-presses from current (the render's
-// `totalUsers − uSeen` walk, inverted) — i.e. where a rewind-to-before-it truncates the
-// thread. -1 if not found (stale menu / count drift), signalling "don't truncate".
+// Turn index of the checkpoint `upCount` Up-presses from current (the inverse of the render's
+// upCountByIndex map) — i.e. where a rewind-to-before-it truncates the thread. -1 if not found
+// (stale menu / count drift), signalling "don't truncate".
 function keepTurnsForUpCount(turns, upCount) {
-  const totalUsers = turns.filter((x) => x.role === "user").length;
-  let uSeen = 0;
-  for (let i = 0; i < turns.length; i++) {
-    if (turns[i].role !== "user") continue;
-    if (totalUsers - uSeen === upCount) return i;
-    uSeen++;
+  for (const [turnIndex, up] of upCountByIndex(turns)) {
+    if (up === upCount) return turnIndex;
   }
   return -1;
 }
@@ -993,6 +1042,13 @@ function Turn({ turn, upCount, canCode }) {
         <div class="md" dangerouslySetInnerHTML=${{ __html: md(text) }}></div>
       </details>
     </div>`;
+  }
+
+  // Interrupt / system markers ("[Request interrupted by user…]") render as a dim event
+  // line, never a user bubble — they're not typed messages and aren't rewind checkpoints.
+  const marker = turnMarkerText(turn);
+  if (marker) {
+    return html`<div class="turn"><div class="sysline">⊘ ${marker.replace(/^\[|\]$/g, "")}</div></div>`;
   }
 
   const role = turn.role === "user" ? "user" : "assistant";
@@ -1787,10 +1843,11 @@ function Detail() {
       <div class="scroll thread" ref=${scrollRef} onScroll=${syncFloat}>
         ${!t && html`<div class="sub" style="padding:8px">loading…</div>`}
         ${(() => {
-          // Per user turn: upCount = Up-presses to reach it in the /rewind picker
-          // = (total user turns) − (its index among user turns); canCode = whether any
-          // file-editing tool ran after it (so we offer code-restore only when there's
-          // code to restore — Bash edits aren't checkpointed, matching Claude).
+          // Per user turn: upCount = Up-presses to reach it in the /rewind picker (0 = not a
+          // checkpoint, so no rewind offered); canCode = whether any file-editing tool ran
+          // after it (offer code-restore only when there's code to restore — Bash edits aren't
+          // checkpointed, matching Claude). Both derive from the FULL branch (Claude's picker
+          // is un-rewound until the resend), so a second rewind mid-window still targets right.
           const n = turns.length;
           const editAfter = new Array(n).fill(false);
           let sawEdit = false;
@@ -1800,10 +1857,9 @@ function Detail() {
               sawEdit = true;
             }
           }
-          const totalUsers = turns.filter((x) => x.role === "user").length;
-          let uSeen = 0;
+          const upByIndex = upCountByIndex(turns);
           return turns.map((turn, i) => {
-            const up = turn.role === "user" ? totalUsers - uSeen++ : 0; // over the FULL branch
+            const up = upByIndex.get(i) || 0;
             if (i >= keepTurns) return null; // truncated by an optimistic rewind
             return html`<${Turn} key=${i} turn=${turn} upCount=${up} canCode=${editAfter[i]} />`;
           });
@@ -1825,7 +1881,7 @@ function Detail() {
       </div>
       <div class="dock">
         <div class="dockbtns">
-          ${displayTurns.filter((x) => x.role === "user").length >= 2 &&
+          ${displayTurns.filter(isPromptTurn).length >= 2 &&
           html`<div class=${`promptnav${showJump ? " show" : ""}`}>
             <button onClick=${() => jumpPrompt(-1)} aria-label="Previous prompt">
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
@@ -1917,9 +1973,11 @@ function ActionSheet() {
           <button onClick=${() => copyMessage(m.text)}>Copy</button>
           ${!m.assistant &&
           !busy &&
+          m.upCount > 0 &&
           html`<button class="danger" onClick=${() => rewind("conversation")}>Rewind conversation to here</button>`}
           ${!m.assistant &&
           !busy &&
+          m.upCount > 0 &&
           m.canCode &&
           html`<button class="danger" onClick=${() => rewind("both")}>Rewind code + conversation</button>`}
           ${!m.assistant && busy && html`<div class="sheethint">Rewind is available at the prompt.</div>`}
@@ -2072,7 +2130,7 @@ function SubagentView() {
 const baseName = (p) => (p || "").split("/").pop();
 
 // Git status letter → color class (A added, M modified, D deleted; else muted).
-const STATUS_CLASS = { A: "st-a", M: "st-m", D: "st-d" };
+const STATUS_CLASS = { A: "st-a", M: "st-m", D: "st-d", R: "st-r" };
 
 // One file's status badge + path (dir dimmed, filename bright) + LOC delta — shared by the
 // changed-files card preview and the full list so both read identically.
@@ -2184,6 +2242,7 @@ function DiffView() {
   const { rootRef, onTouchStart, onTouchEnd } = useSwipeBack(() => (diffView.value = null), [v ? v.path : null]);
   const sid = selectedId.value;
   const path = v ? v.path : null;
+  const orig = v ? v.orig : null; // old path of a rename → the route diffs both endpoints
   useEffect(() => {
     if (!path) return;
     setData(null);
@@ -2191,7 +2250,8 @@ function DiffView() {
     let stale = false;
     (async () => {
       try {
-        const r = await fetch(`/sessions/${encodeURIComponent(sid)}/diff?path=${encodeURIComponent(path)}`);
+        const q = `path=${encodeURIComponent(path)}${orig ? `&orig=${encodeURIComponent(orig)}` : ""}`;
+        const r = await fetch(`/sessions/${encodeURIComponent(sid)}/diff?${q}`);
         const d = r.ok ? await r.json() : { error: true };
         if (!stale) setData(d);
       } catch {
@@ -2199,7 +2259,7 @@ function DiffView() {
       }
     })();
     return () => (stale = true);
-  }, [path, sid]);
+  }, [path, orig, sid]);
   if (!v) return null;
   const parsed = data && !data.error && data.patch ? parseDiffLines(data.patch) : [];
   // A non-empty patch that strips to zero display lines is a metadata-only change (file
@@ -2300,7 +2360,7 @@ function FilesView() {
             role="button"
             tabindex="0"
             key=${f.path}
-            onClick=${() => (diffView.value = { path: f.path })}
+            onClick=${() => (diffView.value = { path: f.path, orig: f.orig })}
           >
             ${fileLine(f)}
           </div>`,
