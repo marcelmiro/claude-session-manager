@@ -3,7 +3,8 @@ import { homedir } from "os";
 import type { WizardState, WizardRepo, WizardBranch, WizardAction } from "../types";
 import { C } from "./colors";
 import { ansiToBlessedMarkup } from "./preview-pane";
-import { getBranchLog } from "../core/git";
+import { getBranchLog, cleanBranchToDir } from "../core/git";
+import { worktreeDirName } from "../core/launch-command";
 import { handleTextInputKey, renderTextWithCursor } from "./text-input";
 
 /**
@@ -35,7 +36,9 @@ export function initWizard(
     branchFilterCursor: 0,
     branchFilterActive: false,
     selectedBranch: null,
+    defaultBranch: "",
     worktreeChoiceIndex: 0,
+    worktreeMode: "new-branch",
     worktreeName: "",
     worktreeNameCursor: 0,
     enterDebounceUntil: 0,
@@ -94,7 +97,8 @@ function getSelectedLine(state: WizardState): number {
     return headerLines + 1 + state.branchIndex; // +1 for always-visible filter bar
   }
   if (state.step === "worktree-choice") return headerLines + state.worktreeChoiceIndex;
-  if (state.step === "worktree") return headerLines + 2; // instruction + blank + input line
+  // input line = instruction + blank; reuse mode prepends a read-only "Branch:" line.
+  if (state.step === "worktree") return headerLines + (state.worktreeMode === "reuse" ? 3 : 2);
   return -1;
 }
 
@@ -109,9 +113,10 @@ function renderBreadcrumb(state: WizardState): string {
   return `  ${parts.join(" ")}`;
 }
 
-/** Compute worktree directory path from repo name + branch name. Sanitizes / → - for flat sibling dirs. */
-export function worktreeDirName(repoName: string, branchName: string): string {
-  return `../${repoName}-${branchName.replace(/\//g, "-")}`;
+/** True when the branch is the repo's trunk (default branch, or main/master when unknown). */
+export function isTrunk(branch: WizardBranch, defaultBranch: string): boolean {
+  const trunk = defaultBranch || "main";
+  return branch.name === trunk || branch.name === "main" || branch.name === "master";
 }
 
 function abbreviatePath(path: string): string {
@@ -214,9 +219,8 @@ function renderBranchStep(lines: string[], _listBox: Widgets.BoxElement, state: 
 
 function renderWorktreeChoiceStep(lines: string[], state: WizardState): void {
   const branch = state.selectedBranch!;
-  const repo = state.selectedRepo!;
 
-  const choices = getWorktreeChoices(branch, repo);
+  const choices = getWorktreeChoices(branch);
 
   for (let i = 0; i < choices.length; i++) {
     const isSelected = i === state.worktreeChoiceIndex;
@@ -239,36 +243,44 @@ function renderWorktreeChoiceStep(lines: string[], state: WizardState): void {
   }
 }
 
-function getWorktreeChoices(branch: WizardBranch, repo: WizardRepo): Array<{ label: string; hint: string }> {
-  if (branch.isRemote) {
-    return [
-      { label: "Checkout locally", hint: `create local ${branch.name} tracking origin` },
-      { label: "New worktree", hint: `new branch off origin/${branch.name}` },
-    ];
-  }
+export function getWorktreeChoices(branch: WizardBranch): Array<{ label: string; hint: string }> {
+  const checkoutHint = branch.isRemote
+    ? `create local ${branch.name} tracking origin`
+    : `checkout ${branch.name}`;
   return [
-    { label: "Switch branch", hint: `checkout ${branch.name}` },
-    { label: "New worktree", hint: `worktree on ${branch.name}` },
+    { label: "New worktree + new branch", hint: `new branch off ${branch.name}` },
+    { label: "New worktree on this branch", hint: `worktree on ${branch.name}, no fork` },
+    { label: "Checkout in place", hint: checkoutHint },
   ];
 }
 
 function renderWorktreeStep(lines: string[], state: WizardState): void {
   const repo = state.selectedRepo!;
   const branch = state.selectedBranch!;
+  const reuse = state.worktreeMode === "reuse";
 
-  lines.push(`  {${C.muted}-fg}New branch name:{/${C.muted}-fg}`);
+  if (reuse) {
+    // Reusing the selected branch: the branch is fixed, the text field edits the dir.
+    lines.push(`  {${C.dim}-fg}Branch:{/${C.dim}-fg} {${C.fg}-fg}${branch.name}{/${C.fg}-fg} {${C.dim}-fg}(reused){/${C.dim}-fg}`);
+    lines.push(`  {${C.muted}-fg}Directory name:{/${C.muted}-fg}`);
+  } else {
+    lines.push(`  {${C.muted}-fg}New branch name:{/${C.muted}-fg}`);
+  }
   lines.push("");
   lines.push(`{${C.surface}-bg}  {${C.peach}-fg}>{/${C.peach}-fg} ${renderTextWithCursor(state.worktreeName, state.worktreeNameCursor)}{/${C.surface}-bg}`);
 
   if (state.worktreeName) {
-    const wtPath = worktreeDirName(repo.name, state.worktreeName);
+    const wtPath = worktreeDirName(repo.name, cleanBranchToDir(state.worktreeName));
     const baseRef = branch.isRemote ? `origin/${branch.name}` : branch.name;
+    const command = reuse
+      ? `git worktree add ${wtPath} ${branch.name}`
+      : `git worktree add ${wtPath} -b ${state.worktreeName} ${baseRef}`;
     lines.push("");
     lines.push(`  {${C.dim}-fg}Path:{/${C.dim}-fg}    {${C.fg}-fg}${wtPath}{/${C.fg}-fg}`);
-    lines.push(`  {${C.dim}-fg}Command:{/${C.dim}-fg} {${C.mint}-fg}git worktree add ${wtPath} -b ${state.worktreeName} ${baseRef}{/${C.mint}-fg}`);
+    lines.push(`  {${C.dim}-fg}Command:{/${C.dim}-fg} {${C.mint}-fg}${command}{/${C.mint}-fg}`);
   } else {
     lines.push("");
-    lines.push(`  {${C.dim}-fg}Type a branch name to create a worktree{/${C.dim}-fg}`);
+    lines.push(`  {${C.dim}-fg}${reuse ? "Type a directory name for the worktree" : "Type a branch name to create a worktree"}{/${C.dim}-fg}`);
   }
 }
 
@@ -322,7 +334,20 @@ export async function renderWizardPreview(previewBox: Widgets.BoxElement, state:
     ];
 
     if (state.worktreeChoiceIndex === 0) {
-      // Switch/checkout preview
+      // New worktree + new branch off the selected branch
+      const baseRef = branch.isRemote ? `origin/${branch.name}` : branch.name;
+      lines.push(
+        "",
+        `  {${C.dim}-fg}Will create a new worktree with a new branch off ${baseRef}{/${C.dim}-fg}`,
+      );
+    } else if (state.worktreeChoiceIndex === 1) {
+      // New worktree reusing the selected branch (no new branch)
+      lines.push(
+        "",
+        `  {${C.dim}-fg}Will create a worktree on ${branch.name} (no new branch){/${C.dim}-fg}`,
+      );
+    } else {
+      // Checkout in place
       if (branch.isRemote) {
         lines.push(
           "",
@@ -336,13 +361,6 @@ export async function renderWizardPreview(previewBox: Widgets.BoxElement, state:
           `  {${C.mint}-fg}git checkout ${branch.name}{/${C.mint}-fg}`,
         );
       }
-    } else {
-      // Worktree preview
-      const baseRef = branch.isRemote ? `origin/${branch.name}` : branch.name;
-      lines.push(
-        "",
-        `  {${C.dim}-fg}Will create a new worktree off ${baseRef}{/${C.dim}-fg}`,
-      );
     }
 
     previewBox.setContent(lines.join("\n"));
@@ -359,18 +377,28 @@ export async function renderWizardPreview(previewBox: Widgets.BoxElement, state:
     ];
 
     if (state.worktreeName) {
-      const wtPath = worktreeDirName(repo.name, state.worktreeName);
-      const baseRef = branch.isRemote ? `origin/${branch.name}` : branch.name;
-      lines.push(
-        `  {${C.dim}-fg}Branch:{/${C.dim}-fg} {${C.fg}-fg}${state.worktreeName}{/${C.fg}-fg}`,
-        "",
-        `  {${C.dim}-fg}Command:{/${C.dim}-fg}`,
-        `  {${C.mint}-fg}git worktree add ${wtPath} -b ${state.worktreeName} ${baseRef}{/${C.mint}-fg}`,
-      );
+      const wtPath = worktreeDirName(repo.name, cleanBranchToDir(state.worktreeName));
+      if (state.worktreeMode === "reuse") {
+        lines.push(
+          `  {${C.dim}-fg}Branch:{/${C.dim}-fg} {${C.fg}-fg}${branch.name}{/${C.fg}-fg} {${C.dim}-fg}(reused){/${C.dim}-fg}`,
+          `  {${C.dim}-fg}Dir:{/${C.dim}-fg}    {${C.fg}-fg}${wtPath}{/${C.fg}-fg}`,
+          "",
+          `  {${C.dim}-fg}Command:{/${C.dim}-fg}`,
+          `  {${C.mint}-fg}git worktree add ${wtPath} ${branch.name}{/${C.mint}-fg}`,
+        );
+      } else {
+        const baseRef = branch.isRemote ? `origin/${branch.name}` : branch.name;
+        lines.push(
+          `  {${C.dim}-fg}Branch:{/${C.dim}-fg} {${C.fg}-fg}${state.worktreeName}{/${C.fg}-fg}`,
+          "",
+          `  {${C.dim}-fg}Command:{/${C.dim}-fg}`,
+          `  {${C.mint}-fg}git worktree add ${wtPath} -b ${state.worktreeName} ${baseRef}{/${C.mint}-fg}`,
+        );
+      }
     } else {
       lines.push(
         "",
-        `  {${C.dim}-fg}Enter a branch name for the worktree{/${C.dim}-fg}`,
+        `  {${C.dim}-fg}${state.worktreeMode === "reuse" ? "Enter a directory name for the worktree" : "Enter a branch name for the worktree"}{/${C.dim}-fg}`,
       );
     }
 
@@ -402,8 +430,9 @@ export function renderWizardStatusBar(statusBar: Widgets.BoxElement, state: Wiza
       `  {${C.peach}-fg}\u23CE{/${C.peach}-fg} {${C.dim}-fg}select{/${C.dim}-fg}` +
       `  {${C.peach}-fg}Esc{/${C.peach}-fg} {${C.dim}-fg}back{/${C.dim}-fg}`;
   } else if (state.step === "worktree") {
+    const label = state.worktreeMode === "reuse" ? "directory name" : "branch name";
     content =
-      `{${C.peach}-fg}type{/${C.peach}-fg} {${C.dim}-fg}branch name{/${C.dim}-fg}` +
+      `{${C.peach}-fg}type{/${C.peach}-fg} {${C.dim}-fg}${label}{/${C.dim}-fg}` +
       `  {${C.peach}-fg}\u23CE{/${C.peach}-fg} {${C.dim}-fg}launch{/${C.dim}-fg}` +
       `  {${C.peach}-fg}Esc{/${C.peach}-fg} {${C.dim}-fg}back{/${C.dim}-fg}`;
   }
@@ -446,7 +475,7 @@ function handleRepoKey(state: WizardState, keyName: string): WizardAction {
         // Existing worktree: launch Claude there directly on its current branch.
         const branch: WizardBranch = { name: sel.currentBranch, isRemote: false, isCurrent: true, fullRef: sel.currentBranch };
         state.selectedBranch = branch;
-        return { type: "launch", repo: sel, branch, worktreeName: "" };
+        return { type: "launch", repo: sel, branch, mode: "current", text: "" };
       }
       state.step = "branch";
       state.branchIndex = 0;
@@ -500,11 +529,12 @@ function handleBranchFilterKey(state: WizardState, keyName: string, ch: string):
 
       if (branch.isCurrent) {
         // Current branch: launch directly, no chooser needed
-        return { type: "launch", repo: state.selectedRepo!, branch, worktreeName: "" };
+        return { type: "launch", repo: state.selectedRepo!, branch, mode: "current", text: "" };
       }
 
       state.step = "worktree-choice";
-      state.worktreeChoiceIndex = 0;
+      // Feature branch → default to "reuse" (option 1); trunk → "new branch" (option 0).
+      state.worktreeChoiceIndex = isTrunk(branch, state.defaultBranch) ? 0 : 1;
       state.enterDebounceUntil = Date.now() + 100;
       return { type: "render" };
     }
@@ -574,7 +604,7 @@ function handleWorktreeChoiceKey(state: WizardState, keyName: string): WizardAct
   switch (keyName) {
     case "j":
     case "down":
-      state.worktreeChoiceIndex = Math.min(state.worktreeChoiceIndex + 1, 1);
+      state.worktreeChoiceIndex = Math.min(state.worktreeChoiceIndex + 1, 2);
       return { type: "render" };
     case "k":
     case "up":
@@ -586,17 +616,26 @@ function handleWorktreeChoiceKey(state: WizardState, keyName: string): WizardAct
       const branch = state.selectedBranch!;
       const repo = state.selectedRepo!;
 
-      if (state.worktreeChoiceIndex === 0) {
-        // Switch branch / Checkout locally → launch directly
-        return { type: "launch", repo, branch, worktreeName: "" };
+      if (state.worktreeChoiceIndex === 2) {
+        // Checkout in place → launch directly (isCurrent can't reach here, but guard anyway)
+        return { type: "launch", repo, branch, mode: branch.isCurrent ? "current" : "checkout", text: "" };
       }
 
-      // New worktree → advance to name input
+      // New worktree (new-branch or reuse) → advance to name input
       state.step = "worktree";
-      // Prefill: local branch name for local, blank for remote
-      const prefill = branch.isRemote ? "" : branch.name;
-      state.worktreeName = prefill;
-      state.worktreeNameCursor = prefill.length;
+      if (state.worktreeChoiceIndex === 1) {
+        // Reuse branch: text field edits the dir, prefilled with the cleaned branch name.
+        state.worktreeMode = "reuse";
+        const prefill = cleanBranchToDir(branch.name);
+        state.worktreeName = prefill;
+        state.worktreeNameCursor = prefill.length;
+      } else {
+        // New branch: text field edits the new branch name; blank for remote, branch name for local.
+        state.worktreeMode = "new-branch";
+        const prefill = branch.isRemote ? "" : branch.name;
+        state.worktreeName = prefill;
+        state.worktreeNameCursor = prefill.length;
+      }
       state.enterDebounceUntil = Date.now() + 100;
       return { type: "render" };
     }
@@ -621,7 +660,7 @@ function handleWorktreeKey(state: WizardState, keyName: string, ch: string): Wiz
       if (!state.worktreeName.trim()) return { type: "noop" };
       const repo = state.selectedRepo!;
       const branch = state.selectedBranch!;
-      return { type: "launch", repo, branch, worktreeName: state.worktreeName };
+      return { type: "launch", repo, branch, mode: state.worktreeMode, text: state.worktreeName };
     }
     case "escape":
       // Go back to worktree-choice step

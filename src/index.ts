@@ -12,16 +12,16 @@ import { loadConfig } from "./core/config";
 import { loadState, saveState, loadPaneSessions } from "./core/state";
 import { listPendingApprovals, decideApproval } from "./core/approval";
 import { syncWindowPrefix, buildBaseName } from "./core/notifications";
-import { discoverRepos, listBranches, fetchRepo } from "./core/git";
-import { initWizard, renderWizard, renderWizardPreview, renderWizardStatusBar, handleWizardKey, worktreeDirName, setWizardBranches } from "./ui/wizard";
+import { discoverRepos, listBranches, fetchRepo, getDefaultBranch, branchCheckedOutPath } from "./core/git";
+import { buildLaunchCommand } from "./core/launch-command";
+import { initWizard, renderWizard, renderWizardPreview, renderWizardStatusBar, handleWizardKey, setWizardBranches } from "./ui/wizard";
 import { loadAllSessions, filterAndRankEntries, type SearchEntry } from "./core/search";
 import { recoverWorktreeTranscript } from "./core/recover";
 import { renderSearchResults } from "./ui/search-list";
 import { createSpaceMenuState, renderSpaceMenu, handleSpaceMenuKey, getMenuDimensions, type SpaceMenuState } from "./ui/space-menu";
 import { createQuestionPicker, renderQuestionPicker, handleQuestionPickerKey, getPickerDimensions, type QuestionPickerState } from "./ui/question-picker";
 import { C } from "./ui/colors";
-import type { DisplayRow, Session, CsmConfig, WizardState, WizardRepo, GlobalSearchState } from "./types";
-import { resolve } from "path";
+import type { DisplayRow, Session, CsmConfig, WizardState, WizardRepo, GlobalSearchState, WorktreeMode } from "./types";
 import { existsSync, readFileSync } from "fs";
 import { homedir } from "os";
 
@@ -988,7 +988,7 @@ screen.key(["S-n"], async () => {
   const branch = { name: currentBranch, isRemote: false, isCurrent: true };
 
   flashStatusMessage(`{${C.muted}-fg}Launching in ${repoName}…{/${C.muted}-fg}`);
-  const error = await handleWizardLaunch(repo, branch, "");
+  const error = await handleWizardLaunch(repo, branch, "current", "");
   if (error) {
     flashStatusMessage(`{${C.red}-fg}${error}{/${C.red}-fg}`, 4000);
   }
@@ -1030,11 +1030,14 @@ screen.key(["n"], async () => {
     return;
   }
 
-  // If auto-skipped to branch step, load branches
+  // If auto-skipped to branch step, load branches + resolve the trunk (drives the
+  // worktree-choice default cursor). Single-repo users skip the `loadBranches`
+  // action, so this must set defaultBranch too.
   if (wizardState.step === "branch" && wizardState.selectedRepo) {
     const branches = await listBranches(wizardState.selectedRepo.path);
     wizardState.branches = branches;
     wizardState.filteredBranches = branches;
+    wizardState.defaultBranch = await getDefaultBranch(wizardState.selectedRepo.path);
   }
 
   renderWizard(listBox, wizardState);
@@ -1374,6 +1377,7 @@ screen.on("keypress", async (_ch: string, key: any) => {
       const branches = await listBranches(wizardState.selectedRepo!.path);
       wizardState.branches = branches;
       wizardState.filteredBranches = branches;
+      wizardState.defaultBranch = await getDefaultBranch(wizardState.selectedRepo!.path);
       renderWizard(listBox, wizardState);
       renderWizardStatusBar(statusBar, wizardState);
       await renderWizardPreview(previewBox, wizardState);
@@ -1391,10 +1395,11 @@ screen.on("keypress", async (_ch: string, key: any) => {
       wizardLaunching = true;
       statusBar.setContent(`  {${C.muted}-fg}Launching…{/${C.muted}-fg}`);
       screen.render();
-      const error = await handleWizardLaunch(action.repo, action.branch, action.worktreeName);
+      const error = await handleWizardLaunch(action.repo, action.branch, action.mode, action.text);
       wizardLaunching = false;
       if (error) {
-        // Only reachable if tmux session lookup fails
+        // Reachable when tmux session lookup fails, or when a "reuse branch"
+        // worktree is refused because the branch is already checked out elsewhere.
         renderWizard(listBox, wizardState!);
         screen.render();
         flashStatusMessage(`{${C.red}-fg}${error}{/${C.red}-fg}`, 4000);
@@ -1448,9 +1453,23 @@ function getUniqueRepos(displayRows: DisplayRow[]): Array<{ name: string; path: 
 async function handleWizardLaunch(
   repo: WizardRepo,
   branch: { name: string; isRemote: boolean; isCurrent: boolean },
-  worktreeName: string,
+  mode: WorktreeMode,
+  text: string,
 ): Promise<string | null> {
   if (isExiting) return null;
+
+  // Collision pre-check for "reuse": git refuses `worktree add` on a branch that
+  // is already checked out elsewhere. Run it BEFORE committing to exit so the
+  // wizard can stay open and flash the conflict. NOTE: this only catches branch
+  // collisions — other `worktree add` failures (e.g. the target dir already
+  // exists) surface inside the spawned window, not here.
+  if (mode === "reuse") {
+    const existing = await branchCheckedOutPath(repo.path, branch.name);
+    if (existing) {
+      return `${branch.name} is already checked out at ${existing}`;
+    }
+  }
+
   isExiting = true;
   const targetSession = await getMainSession();
   if (!targetSession) {
@@ -1460,27 +1479,8 @@ async function handleWizardLaunch(
   wizardState = null;
   cleanup();
   try {
-    // Build compound command: git operations (if needed) then claude.
-    // For remote branches, fetch first so we branch off the latest upstream state
-    // rather than whatever `origin/<branch>` happened to point at from the last fetch.
-    const fetchPrefix = branch.isRemote
-      ? `git fetch origin ${shellQuote(branch.name)} && `
-      : "";
-    let cmd: string;
-    if (worktreeName) {
-      const wtPath = worktreeDirName(repo.name, worktreeName);
-      const wtAbsPath = resolve(repo.path, wtPath);
-      const baseRef = branch.isRemote ? `origin/${branch.name}` : branch.name;
-      // Braces group the create-or-fallback so the fetch's && short-circuits the whole worktree step on failure.
-      cmd = `${fetchPrefix}{ git worktree add ${shellQuote(wtAbsPath)} -b ${shellQuote(worktreeName)} ${shellQuote(baseRef)} 2>/dev/null || git worktree add ${shellQuote(wtAbsPath)} ${shellQuote(worktreeName)}; } && cd ${shellQuote(wtAbsPath)} && claude`;
-    } else if (!branch.isCurrent) {
-      const checkout = branch.isRemote
-        ? `{ git checkout -b ${shellQuote(branch.name)} --track origin/${shellQuote(branch.name)} 2>/dev/null || git checkout ${shellQuote(branch.name)}; }`
-        : `git checkout ${shellQuote(branch.name)}`;
-      cmd = `${fetchPrefix}${checkout} && claude`;
-    } else {
-      cmd = "claude";
-    }
+    // Compound command: git setup (if any) then claude, run inside the new window.
+    const cmd = buildLaunchCommand(mode, repo, branch, text);
 
     if (cmd === "claude") {
       // Simple case: launch claude directly as the window command (no shell race)
@@ -1495,12 +1495,6 @@ async function handleWizardLaunch(
     // ignore — window may already exist
   }
   process.exit(0);
-}
-
-/** Shell-quote a string for safe embedding in tmux send-keys commands. */
-function shellQuote(s: string): string {
-  if (/^[a-zA-Z0-9._\-\/]+$/.test(s)) return s;
-  return `'${s.replace(/'/g, "'\\''")}'`;
 }
 
 // Render loading state immediately so the TUI appears instantly

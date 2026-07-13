@@ -96,6 +96,65 @@ async function listWorktrees(basePath: string): Promise<Array<{ path: string; br
   }
 }
 
+// Persistent cache: repo path → default branch short name (survives refreshes)
+const defaultBranchCache = new Map<string, string>();
+
+/**
+ * Resolve a repo's default branch (the trunk). Reads `origin/HEAD`, falling back
+ * to whichever of `main`/`master` exists locally, else `"main"`. Repos cloned
+ * without `git remote set-head origin -a` have no `origin/HEAD`, so the fallback
+ * is the common case, not just a theoretical edge. Cached across refreshes.
+ */
+export async function getDefaultBranch(repoPath: string): Promise<string> {
+  if (defaultBranchCache.has(repoPath)) return defaultBranchCache.get(repoPath)!;
+  let result = "main";
+  try {
+    // `--short` yields e.g. `origin/main`; strip the remote prefix for a bare branch name.
+    const ref = (await Bun.$`git -C ${repoPath} symbolic-ref --short refs/remotes/origin/HEAD`.quiet().text()).trim();
+    if (ref) {
+      result = ref.replace(/^origin\//, "");
+    } else {
+      result = await fallbackDefaultBranch(repoPath);
+    }
+  } catch {
+    result = await fallbackDefaultBranch(repoPath);
+  }
+  defaultBranchCache.set(repoPath, result);
+  return result;
+}
+
+/** When `origin/HEAD` is unset, pick whichever of main/master has a local ref, else "main". */
+async function fallbackDefaultBranch(repoPath: string): Promise<string> {
+  for (const name of ["main", "master"]) {
+    const exists = await Bun.$`git -C ${repoPath} show-ref --verify --quiet refs/heads/${name}`.quiet().then(() => true, () => false);
+    if (exists) return name;
+  }
+  return "main";
+}
+
+/**
+ * Return the working-tree path where `branch` is currently checked out (main repo
+ * or a linked worktree), or `null` if it isn't checked out anywhere. Used to
+ * pre-check the "reuse branch" worktree flow, which git refuses when the branch is
+ * already checked out elsewhere.
+ */
+export async function branchCheckedOutPath(repoPath: string, branch: string): Promise<string | null> {
+  const worktrees = await listWorktrees(repoPath);
+  if (!worktrees) return null;
+  const match = worktrees.find((w) => w.branch === branch);
+  return match ? match.path : null;
+}
+
+/**
+ * Derive a default worktree directory name from a branch: strip everything up to
+ * and including the first `/` (`cursor/ev-4-…-031d` → `ev-4-…-031d`). Branches
+ * without a slash pass through unchanged.
+ */
+export function cleanBranchToDir(branch: string): string {
+  const slash = branch.indexOf("/");
+  return slash >= 0 ? branch.slice(slash + 1) : branch;
+}
+
 /**
  * Base-repo ordering: priority repos first (in configured order), then repos with an
  * active session, then alphabetical. Shared so callers can insert extra entries (e.g.
@@ -202,6 +261,13 @@ export async function listBranches(repoPath: string): Promise<WizardBranch[]> {
 
       // Skip HEAD pointer
       if (line.includes("HEAD")) continue;
+
+      // Drop branches whose short name starts with "-": a hostile remote can name
+      // a branch `--upload-pack=…`, which git would parse as an option (not a ref)
+      // when interpolated into `git fetch`/`checkout`/`worktree add`. Such names
+      // aren't safely usable anyway, so never surface them in the wizard.
+      const shortName = line.replace(/^remotes\/origin\//, "");
+      if (shortName.startsWith("-")) continue;
 
       if (line.startsWith("remotes/origin/")) {
         const name = line.replace("remotes/origin/", "");

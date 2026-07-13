@@ -146,6 +146,9 @@ export interface WizardBranch {
 
 export type WizardStep = "repo" | "branch" | "worktree-choice" | "worktree";
 
+/** How a launched session sets up its working tree. */
+export type WorktreeMode = "new-branch" | "reuse" | "checkout" | "current";
+
 export interface WizardState {
   step: WizardStep;
   repos: WizardRepo[];
@@ -158,8 +161,10 @@ export interface WizardState {
   branchFilterCursor: number;
   branchFilterActive: boolean;
   selectedBranch: WizardBranch | null;
-  worktreeChoiceIndex: number; // 0 = switch/checkout, 1 = new worktree
-  worktreeName: string;        // text input: new branch name for worktree (empty = no worktree)
+  defaultBranch: string;       // repo trunk (from origin/HEAD); drives the worktree-choice default cursor
+  worktreeChoiceIndex: number; // 0 = new worktree + new branch, 1 = new worktree (reuse branch), 2 = checkout
+  worktreeMode: "new-branch" | "reuse"; // what the worktree step's text field edits: a new branch name, or a dir name
+  worktreeName: string;        // text input: new branch name (new-branch) or dir name (reuse)
   worktreeNameCursor: number;
   enterDebounceUntil: number;  // timestamp (ms) — ignore Enter until this time (prevents double-fire on step transition)
   fetchState: "idle" | "fetching" | "done"; // background `git fetch` status for the branch step
@@ -173,7 +178,7 @@ export type WizardAction =
   | { type: "quit" }
   | { type: "loadBranches" }
   | { type: "fetch" }
-  | { type: "launch"; repo: WizardRepo; branch: WizardBranch; worktreeName: string };
+  | { type: "launch"; repo: WizardRepo; branch: WizardBranch; mode: WorktreeMode; text: string };
 
 // --- Global search types ---
 
