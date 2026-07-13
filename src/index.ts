@@ -15,6 +15,7 @@ import { syncWindowPrefix, buildBaseName } from "./core/notifications";
 import { discoverRepos, listBranches, fetchRepo } from "./core/git";
 import { initWizard, renderWizard, renderWizardPreview, renderWizardStatusBar, handleWizardKey, worktreeDirName, setWizardBranches } from "./ui/wizard";
 import { loadAllSessions, filterAndRankEntries, type SearchEntry } from "./core/search";
+import { recoverWorktreeTranscript } from "./core/recover";
 import { renderSearchResults } from "./ui/search-list";
 import { createSpaceMenuState, renderSpaceMenu, handleSpaceMenuKey, getMenuDimensions, type SpaceMenuState } from "./ui/space-menu";
 import { createQuestionPicker, renderQuestionPicker, handleQuestionPickerKey, getPickerDimensions, type QuestionPickerState } from "./ui/question-picker";
@@ -614,11 +615,13 @@ async function handleResume() {
   const targetSession = await getMainSession();
   if (!targetSession) return;
 
-  const repoName = session.repoPath.split("/").filter(Boolean).pop() ?? "claude";
+  // Relocate to the base repo if the session's worktree was deleted, so the resume lands.
+  const effectivePath = await recoverWorktreeTranscript(session.id, session.repoPath, session.baseRepoPath);
+  const repoName = effectivePath.split("/").filter(Boolean).pop() ?? "claude";
   cleanup();
   try {
     const cmd = `claude --resume=${session.id}; exec zsh -l`;
-    await Bun.$`tmux new-window -a -t ${targetSession} -n ${repoName} -c ${session.repoPath} zsh -c ${cmd}`.quiet();
+    await Bun.$`tmux new-window -a -t ${targetSession} -n ${repoName} -c ${effectivePath} zsh -c ${cmd}`.quiet();
   } catch {
     // ignore
   }
@@ -694,13 +697,15 @@ async function handleFork() {
   const targetSession = await getMainSession();
   if (!targetSession) return;
 
-  const repoName = session.repoPath.split("/").filter(Boolean).pop() ?? "claude";
+  // Relocate to the base repo if the session's worktree was deleted, so the fork resume lands.
+  const effectivePath = await recoverWorktreeTranscript(session.id, session.repoPath, session.baseRepoPath);
+  const repoName = effectivePath.split("/").filter(Boolean).pop() ?? "claude";
   const forkName = buildBaseName(repoName, session.name ? slugify(session.name) || undefined : undefined, true);
 
   cleanup();
   try {
     const cmd = `claude --resume=${session.id} --fork-session; exec zsh -l`;
-    await Bun.$`tmux new-window -a -t ${targetSession} -n ${forkName} -c ${session.repoPath} zsh -c ${cmd}`.quiet();
+    await Bun.$`tmux new-window -a -t ${targetSession} -n ${forkName} -c ${effectivePath} zsh -c ${cmd}`.quiet();
   } catch {
     // ignore
   }
@@ -1135,8 +1140,8 @@ async function handleSearchEnter() {
   const targetSession = await getMainSession();
   if (!targetSession) return;
 
-  // Determine directory: use base repo if worktree is deleted
-  const effectivePath = entry.isDeletedWorktree ? entry.baseRepoPath : entry.projectPath;
+  // Use base repo if the worktree is deleted, relocating the transcript there so the resume lands.
+  const effectivePath = await recoverWorktreeTranscript(entry.sessionId, entry.projectPath, entry.baseRepoPath);
   const repoName = entry.repo;
 
   globalSearch = null;

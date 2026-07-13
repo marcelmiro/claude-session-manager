@@ -234,10 +234,20 @@ export async function restoreSession(sessionId: string, repoPath: string): Promi
   const paneId = await launchResumeWindow(target, repoPath, name, sessionId);
 
   let registered = false;
+  let trusted = false;
   for (let i = 0; i < 24; i++) {
     await Bun.sleep(500); // up to ~12s for claude to boot, fire SessionStart, and reach the prompt
     if (!registered && (await loadPaneSessions())[paneId] === sessionId) registered = true;
     if (registered && (await readPaneStatusline(paneId)).statusline) return { ok: true, sessionId };
+    // Clear the one-time "trust this folder?" gate. On RESUME (unlike a new session) the
+    // SessionStart hook can fire — registering the pane — while the trust prompt is still up
+    // and blocking the statusline/input, so this is NOT gated on `!registered`: check every
+    // cycle until the statusline confirms the prompt is live. Option 1 ("Yes, I trust this
+    // folder") is the default cursor → one Enter confirms.
+    if (!trusted && (await capturePane(paneId)).includes(TRUST_PROMPT)) {
+      await sendKey(paneId, "Enter");
+      trusted = true;
+    }
   }
   // Registered but the prompt never rendered in time → launched, just slow (small residual
   // send-drop risk, matches createSession). Never registered → the resume itself failed.
@@ -388,9 +398,20 @@ export async function rewindByPane(
 export async function resolveTranscriptPath(sessionId: string): Promise<string | null> {
   const dir = `${homedir()}/.claude/projects`;
   try {
+    // A session's cwd can move between project dirs (e.g. worktree → base repo), leaving
+    // the SAME id as a JSONL in several dirs. Pick the most-recently-written so readers
+    // (transcript, mark-read, restore) follow the live conversation, not a frozen copy.
+    let best: string | null = null;
+    let bestMtime = -Infinity;
     for await (const match of new Glob(`*/${sessionId}.jsonl`).scan({ cwd: dir })) {
-      return `${dir}/${match}`;
+      const path = `${dir}/${match}`;
+      const mtime = Bun.file(path).lastModified;
+      if (mtime > bestMtime) {
+        bestMtime = mtime;
+        best = path;
+      }
     }
+    return best;
   } catch {
     // missing projects dir or scan failure — no transcript
   }
