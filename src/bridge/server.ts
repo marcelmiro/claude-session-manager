@@ -14,6 +14,7 @@
 
 import { createHash, timingSafeEqual, randomUUID } from "node:crypto";
 import { existsSync, readdirSync, statSync, rmSync } from "node:fs";
+import { relative } from "node:path";
 import { discoverSessions } from "../core/sessions";
 import {
   getTranscript,
@@ -38,6 +39,8 @@ import { nativeStatus } from "../core/session-state";
 import { homedir } from "os";
 import { discoverRepos, getBaseRepoPath, compareRepos } from "../core/git";
 import { listSlashCommands } from "../core/skills";
+import { repoRootForSession, safeRepoPath, fileDiff, branchChanges } from "../core/repo-files";
+import { recoverWorktreeTranscript } from "../core/recover";
 import { loadConfig, PATHS } from "../core/config";
 import { listPendingApprovals, decideApproval } from "../core/approval";
 import { markPortkeySource } from "../core/input-source";
@@ -586,6 +589,34 @@ async function route(req: Request): Promise<Response> {
     return json(await sessionSkills(decodeURIComponent(skills[1]!)));
   }
 
+  // --- Repo-scoped read-only diff access (Portkey Layer 1) — containment-guarded to the
+  // session's live repo root. 404 on no-live-repo (idle/archived) or an escaping path.
+  // `relTo` re-derives the repo-relative path from the guard's validated abs (which may have
+  // normalized `..`), so git only ever sees a path known to be inside the repo. ---
+  const relTo = (root: string, abs: string) => relative(root, abs);
+
+  // Files this branch changed vs its base branch (committed + uncommitted) — the changed-files
+  // card + full list. Only changed files, never the whole repo.
+  const changes = path.match(/^\/sessions\/([^/]+)\/changes$/);
+  if (method === "GET" && changes) {
+    const data = await branchChanges(decodeURIComponent(changes[1]!));
+    if (!data) return json({ ok: false, reason: "no-repo" }, 404);
+    return json(data);
+  }
+
+  // Single-file working-tree diff vs HEAD (+ untracked). `path` = repo-relative, sent by the
+  // Edit/Write chip; git calls use `-- <rel>` so a leading-dash path can't be read as a flag.
+  const diff = path.match(/^\/sessions\/([^/]+)\/diff$/);
+  if (method === "GET" && diff) {
+    const rel = url.searchParams.get("path");
+    if (!rel) return json({ ok: false, reason: "no-path" }, 400);
+    const root = await repoRootForSession(decodeURIComponent(diff[1]!));
+    if (!root) return json({ ok: false, reason: "no-repo" }, 404);
+    const abs = safeRepoPath(root, decodeURIComponent(rel));
+    if (!abs) return json({ ok: false, reason: "not-found" }, 404);
+    return json(await fileDiff(root, abs, relTo(root, abs)));
+  }
+
   const decision = path.match(/^\/sessions\/([^/]+)\/decision$/);
   if (method === "POST" && decision) {
     const body = (await req.json().catch(() => ({}))) as { decision?: unknown; reason?: unknown };
@@ -697,7 +728,10 @@ async function route(req: Request): Promise<Response> {
     if (!s) return json({ ok: false, reason: "not-found" }, 404);
     // Already live (the Mac resumed it between list-render and tap) — the client just opens it.
     if (s.status !== "archived") return json({ ok: true, sessionId: id });
-    const result = await restoreSession(id, s.repoPath);
+    // Relocate to the base repo if the session's worktree was deleted, so the resume lands
+    // (and doesn't fail `restoreSession`'s isDirectory guard). Mirrors the TUI resume path.
+    const effectivePath = await recoverWorktreeTranscript(id, s.repoPath, s.baseRepoPath);
+    const result = await restoreSession(id, effectivePath);
     sessionsCache = null; // drop the 1s projection cache so the refetch re-derives the now-live status
     broadcast({ type: "session-changed", id });
     return sendResult(result);

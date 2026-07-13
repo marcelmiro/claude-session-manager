@@ -154,6 +154,49 @@ export const FIXTURE_REPOS = [
   { name: "wiki", path: "/Users/throxy/Documents/wiki", branch: "main", isWorktree: false },
 ];
 
+// Branch-vs-base changed files for the changed-files card/list demo (latest-modified first).
+const FIXTURE_CHANGES = {
+  root: "/Users/throxy/Documents/csm",
+  branch: "eng-2687-cookie-auth",
+  base: "main",
+  files: [
+    { path: "src/bridge/server.ts", status: "M", add: 34, del: 6, binary: false },
+    { path: "src/bridge/public/app.js", status: "M", add: 88, del: 2, binary: false },
+    { path: "src/core/session-api.ts", status: "M", add: 41, del: 0, binary: false },
+    { path: "src/bridge/public/index.html", status: "M", add: 22, del: 4, binary: false },
+    { path: "src/core/repo-files.ts", status: "A", add: 190, del: 0, binary: false },
+    { path: "public/icons/badge.png", status: "A", add: 0, del: 0, binary: true },
+  ],
+};
+
+// Single-file diff for the diff-view demo — mirrors FileDiff (status letter + a small
+// unified patch the client colors). Served for any /diff path so tapping any changed-files
+// row renders a representative diff (with the A/M/D status badge in the header).
+const FIXTURE_DIFF = {
+  branch: "eng-2687-cookie-auth",
+  base: "main",
+  status: "M",
+  add: 34,
+  del: 6,
+  patch: [
+    "diff --git a/src/bridge/server.ts b/src/bridge/server.ts",
+    "index 1111111..2222222 100644",
+    "--- a/src/bridge/server.ts",
+    "+++ b/src/bridge/server.ts",
+    "@@ -40,7 +40,9 @@ export function serve() {",
+    '   const token = req.headers.get("authorization");',
+    "-  if (!token) return unauthorized();",
+    '+  const cookie = parseCookie(req.headers.get("cookie"));',
+    "+  if (!cookie?.csm) return unauthorized();",
+    "+  // token now lives in an HttpOnly cookie, never in JS",
+    "   return handler(req);",
+    "@@ -80,3 +82,4 @@ function routes() {",
+    '   res.set("cache-control", "no-cache");',
+    "+  res.set(\"set-cookie\", `csm=${tok}; HttpOnly; SameSite=Strict`);",
+    " }",
+  ].join("\n"),
+};
+
 /**
  * Canned payload for a request, or `undefined` if this isn't a fixture route (so the
  * caller falls through to the real handler — e.g. `/stream` keeps its live SSE).
@@ -163,6 +206,8 @@ export function fixtureData(method: string, path: string): unknown | undefined {
   if (method === "GET" && path === "/repos") return FIXTURE_REPOS;
   if (method === "GET" && path === "/pending") return [];
   if (method === "GET" && /^\/sessions\/[^/]+\/transcript$/.test(path)) return FIXTURE_TRANSCRIPT;
+  if (method === "GET" && /^\/sessions\/[^/]+\/changes$/.test(path)) return FIXTURE_CHANGES;
+  if (method === "GET" && /^\/sessions\/[^/]+\/diff$/.test(path)) return FIXTURE_DIFF;
   // Stub the mutating actions so the UI's optimistic flows resolve cleanly in a demo.
   if (method === "POST" && path === "/sessions/new") return { ok: true, sessionId: FIXTURE_SESSIONS[0]!.id };
   if (method === "POST" && /^\/sessions\/[^/]+\/(decision|message|answer|read|rewind)$/.test(path)) {

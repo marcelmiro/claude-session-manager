@@ -56,6 +56,14 @@ const connected = signal(true); // SSE stream health — false shows a "reconnec
 const showAgents = signal(false); // subagent-list sheet open over the detail
 const openSubagent = signal(null); // drilled-in agent {agentId, description, agentType, siblings:[]} | null
 const subTranscript = signal(null); // the open subagent's conversation {turns} | null
+const diffView = signal(null); // {path} → single-file diff pushed over the detail (null = closed)
+const filesView = signal(false); // full changed-files list pushed over the detail
+
+// File-editing tools, shared by the rewind-checkpoint calc (canCode) and the diff chips.
+// Diff chips gate additionally on `input.file_path`, which NotebookEdit never carries
+// (its notebook_path isn't in the server's TOOL_ARG_FIELDS) — so NotebookEdit stays a
+// checkpoint boundary for rewind but is never tappable-to-diff.
+const EDIT_TOOLS = new Set(["Edit", "Write", "MultiEdit", "NotebookEdit"]);
 // Optimistic rewind view: {keepTurns, rev} while a rewind is committed on-pane but not yet
 // written to the JSONL (Claude's /rewind is an in-memory checkpoint until the next send, so
 // the transcript still returns the abandoned branch). We truncate the displayed thread to
@@ -348,6 +356,8 @@ function open(id) {
   rewindFloor.value = null; // never carry an optimistic rewind across sessions
   composerPrefill.value = null;
   closeAgents(); // drop any agent list/drill-in from the previously-open session
+  diffView.value = null; // drop any diff / changed-files view from the previous session
+  filesView.value = false;
   clearAttachments();
   refreshTranscript();
   markRead(id);
@@ -1019,7 +1029,17 @@ function Turn({ turn, upCount, canCode }) {
     } else if (b.type === "tool_use") {
       const input = b.input || {};
       const arg = input.command || input.file_path || input.pattern || "";
-      els.push(html`<div class="tool">▸ ${b.name || "tool"}${arg && html` <span class="arg">${arg}</span>`}</div>`);
+      // Edit/Write/MultiEdit chips with a file_path are tappable → open that file's diff.
+      const tappable = EDIT_TOOLS.has(b.name) && !!input.file_path;
+      els.push(
+        html`<div
+          class=${"tool" + (tappable ? " tap" : "")}
+          onClick=${tappable ? () => (diffView.value = { path: input.file_path }) : undefined}
+        >
+          ▸ ${b.name || "tool"}${arg && html` <span class="arg">${arg}</span>`}${tappable &&
+          html`<span class="tapchev">›</span>`}
+        </div>`,
+      );
     }
   }
   return els.length ? html`<div class="turn">${els}</div>` : null;
@@ -1771,7 +1791,6 @@ function Detail() {
           // = (total user turns) − (its index among user turns); canCode = whether any
           // file-editing tool ran after it (so we offer code-restore only when there's
           // code to restore — Bash edits aren't checkpointed, matching Claude).
-          const EDIT_TOOLS = new Set(["Edit", "Write", "MultiEdit", "NotebookEdit"]);
           const n = turns.length;
           const editAfter = new Array(n).fill(false);
           let sawEdit = false;
@@ -1802,6 +1821,7 @@ function Detail() {
           )}
         ${t && t.pendingTool && !blocked && html`<${RunningTool} tool=${t.pendingTool} />`}
         ${status === "running" && !blocked && html`<div class="typing">working…</div>`}
+        ${!archived && html`<${ChangesCard} />`}
       </div>
       <div class="dock">
         <div class="dockbtns">
@@ -2049,6 +2069,247 @@ function SubagentView() {
   `;
 }
 
+const baseName = (p) => (p || "").split("/").pop();
+
+// Git status letter → color class (A added, M modified, D deleted; else muted).
+const STATUS_CLASS = { A: "st-a", M: "st-m", D: "st-d" };
+
+// One file's status badge + path (dir dimmed, filename bright) + LOC delta — shared by the
+// changed-files card preview and the full list so both read identically.
+function fileLine(f) {
+  const slash = f.path.lastIndexOf("/");
+  const dir = slash >= 0 ? f.path.slice(0, slash + 1) : "";
+  const base = slash >= 0 ? f.path.slice(slash + 1) : f.path;
+  return html`
+    <span class=${"fl-badge " + (STATUS_CLASS[f.status] || "st-o")}>${f.status || "M"}</span>
+    <span class="fl-path"><span class="fl-dir">${dir}</span><span class="fl-base">${base}</span></span>
+    <span class="fl-stat">
+      ${f.binary
+        ? html`<span class="cbin">bin</span>`
+        : html`<span class="cadd">+${f.add}</span> <span class="cdel">−${f.del}</span>`}
+    </span>`;
+}
+
+// A 5-cell diffstat bar (GitHub-style): cells filled green for the additions proportion, red
+// for deletions, dim for the remainder. Guarantees ≥1 colored cell when a side is non-zero.
+function diffBar(add, del) {
+  const total = add + del;
+  let g = total ? Math.round((add / total) * 5) : 0;
+  let r = total ? 5 - g : 0;
+  if (add > 0 && g === 0) (g = 1), (r = 4);
+  if (del > 0 && r === 0) (r = 1), (g = Math.min(g, 4));
+  const cells = [];
+  for (let i = 0; i < 5; i++) cells.push(html`<span class=${"db " + (i < g ? "db-a" : i < g + r ? "db-d" : "db-o")}></span>`);
+  return html`<span class="diffbar">${cells}</span>`;
+}
+
+// The changed-files card at the END of the scrollable thread (not the fixed dock, so it costs
+// no composer viewport). Previews the latest-modified files (server-ordered) with LOC; a
+// "+N more" row appears past the preview cap. Tapping ANYWHERE opens the full list (FilesView).
+// Hidden entirely when the session changed nothing. Refetches on each new transcript revision.
+const CHANGES_PREVIEW = 3;
+function ChangesCard() {
+  const sid = selectedId.value;
+  const rev = transcript.value && transcript.value.rev;
+  const [data, setData] = useState(null);
+  useEffect(() => {
+    if (!sid) return;
+    let stale = false;
+    (async () => {
+      try {
+        const r = await fetch(`/sessions/${encodeURIComponent(sid)}/changes`);
+        const d = r.ok ? await r.json() : { files: [] };
+        if (!stale) setData(d);
+      } catch {
+        if (!stale) setData({ files: [] });
+      }
+    })();
+    return () => (stale = true);
+  }, [sid, rev]);
+  const files = (data && data.files) || [];
+  if (files.length === 0) return null;
+  const preview = files.slice(0, CHANGES_PREVIEW);
+  const extra = files.length - preview.length;
+  const totAdd = files.reduce((s, f) => s + f.add, 0);
+  const totDel = files.reduce((s, f) => s + f.del, 0);
+  // A <div role=button>, NOT a <button>: WebKit (iOS Safari) refuses to render block/flex
+  // children inside a <button>, collapsing the card to an empty padded box. A div renders
+  // its block children everywhere and still takes the click.
+  return html`
+    <div class="changes-card" role="button" tabindex="0" onClick=${() => (filesView.value = true)}>
+      <div class="cc-head">
+        <span class="cc-title">Changed files</span>
+        <span class="cc-sum">
+          <span class="cadd">+${totAdd}</span>
+          <span class="cdel">−${totDel}</span>
+          ${diffBar(totAdd, totDel)}
+        </span>
+      </div>
+      ${preview.map((f) => html`<div class="cc-row" key=${f.path}>${fileLine(f)}</div>`)}
+      <div class="cc-more">
+        <span>${extra > 0 ? `+${extra} more` : "View all"}</span>
+        <span class="cc-chev">→</span>
+      </div>
+    </div>
+  `;
+}
+
+// Parse a raw unified patch into display lines, dropping git's file/hunk-metadata headers
+// (diff/index/---/+++, mode/rename/binary markers, and "\ No newline…"). Coloring is by
+// leading char; content strips that char so gutters align. A trailing empty context line
+// from the final newline is dropped.
+function parseDiffLines(patch) {
+  const out = [];
+  for (const raw of patch.split("\n")) {
+    if (/^(diff |index |--- |\+\+\+ |old mode|new mode|similarity|dissimilarity|rename |copy |new file|deleted file|Binary files)/.test(raw)) continue;
+    if (raw.startsWith("@@")) out.push({ t: "hunk", s: raw });
+    else if (raw.startsWith("\\")) continue;
+    else if (raw.startsWith("+")) out.push({ t: "add", s: raw.slice(1) });
+    else if (raw.startsWith("-")) out.push({ t: "del", s: raw.slice(1) });
+    else out.push({ t: "ctx", s: raw.startsWith(" ") ? raw.slice(1) : raw });
+  }
+  if (out.length && out[out.length - 1].t === "ctx" && out[out.length - 1].s === "") out.pop();
+  return out;
+}
+
+// Full-screen diff for one file (raw `git diff HEAD` patch, colored here). Header labels the
+// baseline honestly as "uncommitted on <branch>" (working tree, not "what this session did").
+// A big diff collapses to the first 380 lines behind a "Load full diff" tap.
+const DIFF_COLLAPSE = 380;
+function DiffView() {
+  const v = diffView.value;
+  const [data, setData] = useState(null);
+  const [wrap, setWrap] = useState(false);
+  const [full, setFull] = useState(false);
+  const { rootRef, onTouchStart, onTouchEnd } = useSwipeBack(() => (diffView.value = null), [v ? v.path : null]);
+  const sid = selectedId.value;
+  const path = v ? v.path : null;
+  useEffect(() => {
+    if (!path) return;
+    setData(null);
+    setFull(false);
+    let stale = false;
+    (async () => {
+      try {
+        const r = await fetch(`/sessions/${encodeURIComponent(sid)}/diff?path=${encodeURIComponent(path)}`);
+        const d = r.ok ? await r.json() : { error: true };
+        if (!stale) setData(d);
+      } catch {
+        if (!stale) setData({ error: true });
+      }
+    })();
+    return () => (stale = true);
+  }, [path, sid]);
+  if (!v) return null;
+  const parsed = data && !data.error && data.patch ? parseDiffLines(data.patch) : [];
+  // A non-empty patch that strips to zero display lines is a metadata-only change (file
+  // mode, pure rename) — render a notice, not a blank body.
+  const metaOnly = data && !data.error && data.patch && parsed.length === 0;
+  const ok = parsed.length > 0;
+  const lines = parsed;
+  const shown = full ? lines : lines.slice(0, DIFF_COLLAPSE);
+  const sub = data && !data.error
+    ? `${data.branch || "—"}${data.base && data.base !== data.branch ? ` vs ${data.base}` : ""} · +${data.add} −${data.del}`
+    : path;
+  return html`
+    <div class="screen files-view diff-view" ref=${rootRef} onTouchStart=${onTouchStart} onTouchEnd=${onTouchEnd}>
+      <div class="subagent-head">
+        <button class="iconbtn" onClick=${() => (diffView.value = null)} aria-label="Back to session">‹</button>
+        <span class="grow"
+          ><span class="name"
+            >${data && data.status
+              ? html`<span class=${"fl-badge " + (STATUS_CLASS[data.status] || "st-o")}>${data.status}</span> `
+              : ""}${baseName(path)}</span
+          ><span class="sub">${sub}</span></span
+        >
+      </div>
+      ${ok &&
+      html`<div class="wraptoggle">
+        wrap long lines
+        <button onClick=${() => setWrap(!wrap)}>${wrap ? "on" : "off"}</button>
+      </div>`}
+      <div class="scroll" style="padding:0">
+        ${!data && html`<div class="sub" style="padding:12px">loading…</div>`}
+        ${data && data.error && html`<div class="guard">No changes vs HEAD — the file may have moved.</div>`}
+        ${data && data.empty && html`<div class="guard">No changes vs HEAD.</div>`}
+        ${metaOnly && html`<div class="guard">Metadata-only change (file mode or rename) — no content diff.</div>`}
+        ${data && data.binary && html`<div class="guard">Binary file — not shown.</div>`}
+        ${data && data.tooLarge && html`<div class="guard">Diff too large to preview.</div>`}
+        ${ok &&
+        html`<div class=${"diffbody" + (wrap ? " wrap" : "")}>
+          ${shown.map(
+            (l, i) => html`<div class=${"dl " + l.t} key=${i}>
+              <span class="g">${l.t === "add" ? "+" : l.t === "del" ? "−" : ""}</span>
+              <span class="c">${l.s}</span>
+            </div>`,
+          )}
+          ${!full &&
+          lines.length > DIFF_COLLAPSE &&
+          html`<button class="loadfull" onClick=${() => setFull(true)}>Load full diff (${lines.length} lines)</button>`}
+        </div>`}
+      </div>
+    </div>
+  `;
+}
+
+// Full changed-files list pushed over the detail (the card's "view all" target). Same
+// session-scoped /changes source, latest-modified first; tapping a row opens that file's diff.
+function FilesView() {
+  const open = filesView.value;
+  const rev = transcript.value && transcript.value.rev;
+  const [data, setData] = useState(null);
+  const { rootRef, onTouchStart, onTouchEnd } = useSwipeBack(() => (filesView.value = false), [open]);
+  const sid = selectedId.value;
+  useEffect(() => {
+    if (!open) return;
+    let stale = false;
+    (async () => {
+      try {
+        const r = await fetch(`/sessions/${encodeURIComponent(sid)}/changes`);
+        const d = r.ok ? await r.json() : { error: true };
+        if (!stale) setData(d);
+      } catch {
+        if (!stale) setData({ error: true });
+      }
+    })();
+    return () => (stale = true);
+  }, [open, sid, rev]);
+  if (!open) return null;
+  const files = (data && data.files) || [];
+  return html`
+    <div class="screen files-view" ref=${rootRef} onTouchStart=${onTouchStart} onTouchEnd=${onTouchEnd}>
+      <div class="subagent-head">
+        <button class="iconbtn" onClick=${() => (filesView.value = false)} aria-label="Back to session">‹</button>
+        <span class="grow"
+          ><span class="name">Changed files</span>${data &&
+          !data.error &&
+          html`<span class="sub"
+            >${files.length}${data.branch ? ` · ${data.branch}` : ""}${data.base && data.base !== data.branch
+              ? ` vs ${data.base}`
+              : ""}</span
+          >`}</span
+        >
+      </div>
+      <div class="scroll">
+        ${!data && html`<div class="sub" style="padding:8px">loading…</div>`}
+        ${data && data.error && html`<div class="guard">No live repo for this session.</div>`}
+        ${data && !data.error && files.length === 0 && html`<div class="guard">No file changes yet.</div>`}
+        ${files.map(
+          (f) => html`<div
+            class="changerow"
+            role="button"
+            tabindex="0"
+            key=${f.path}
+            onClick=${() => (diffView.value = { path: f.path })}
+          >
+            ${fileLine(f)}
+          </div>`,
+        )}
+      </div>
+    </div>
+  `;
+}
+
 function App() {
   if (loadingAuth.value) return html`<${Spinner} />`;
   if (!authed.value) return html`<${Login} />`;
@@ -2060,7 +2321,7 @@ function App() {
   // Bottom connectivity banner: a failed fetch ("bridge unreachable") is the persistent
   // state (stays until a refresh succeeds); a dropped SSE socket is the transient one.
   const banner = error.value === "bridge unreachable" ? "bridge unreachable" : !connected.value ? "reconnecting…" : null;
-  return html`${screen}${banner && html`<div class="offline">${banner}</div>`}<${ActionSheet} /><${SessionSheet} /><${ConfigSheet} /><${AgentList} /><${SubagentView} /><${NoticeToast} /><${CopiedToast} />`;
+  return html`${screen}${banner && html`<div class="offline">${banner}</div>`}<${ActionSheet} /><${SessionSheet} /><${ConfigSheet} /><${AgentList} /><${SubagentView} /><${DiffView} /><${FilesView} /><${NoticeToast} /><${CopiedToast} />`;
 }
 
 // A brief centered "✓ copied" pill, shown on any successful clipboard write.

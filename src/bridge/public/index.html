@@ -57,6 +57,10 @@
         --danger-border: rgba(255, 128, 128, 0.4);
         --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, monospace; /* code-style tags/labels */
         --bubble-pad-x: 13px; /* .bubble horizontal padding — negated by full-bleed tables */
+        --addbg: rgba(153, 255, 228, 0.09); /* diff added-line row (mint tint) */
+        --delbg: rgba(255, 128, 128, 0.1); /* diff removed-line row (red tint) */
+        --addgut: #99ffe4; /* diff added-line gutter mark */
+        --delgut: #ff8080; /* diff removed-line gutter mark */
       }
       * { box-sizing: border-box; }
       html, body {
@@ -868,6 +872,83 @@
         text-overflow: ellipsis;
       }
       .sibnav:active { background: var(--hover); }
+
+      /* Diff chip affordance + the diff / file-browser / reader pushed views. */
+      .tool.tap { border: 1px solid var(--peach); border-radius: 8px; }
+      .tool.tap:active { background: var(--hover); }
+      .tapchev { color: var(--peach); margin-left: 4px; }
+      .files-view {
+        position: fixed;
+        inset: 0;
+        z-index: 16;
+        max-width: 680px;
+        margin: 0 auto;
+        background: var(--bg);
+        display: flex;
+        flex-direction: column;
+        padding-top: env(safe-area-inset-top);
+        touch-action: pan-y;
+        animation: push-in 0.26s cubic-bezier(0.2, 0.85, 0.25, 1);
+      }
+      .files-view .scroll { padding-bottom: calc(12px + env(safe-area-inset-bottom)); }
+      /* The single-file diff pushes OVER the changed-files list (tap a row → diff), so it
+         must stack above it — both share .files-view (z-index 16); this lifts the diff. */
+      .diff-view { z-index: 17; }
+      .guard { padding: 14px 16px; color: var(--muted); font-size: 13px; }
+      .wraptoggle {
+        flex: none;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 6px 12px;
+        color: var(--muted);
+        font-size: 11px;
+        background: #161616;
+        border-bottom: 1px solid var(--border);
+      }
+      .wraptoggle button { background: none; border: 1px solid var(--dim); color: var(--muted); border-radius: 8px; padding: 2px 8px; font-size: 11px; }
+      .diffbody { overflow-x: auto; }
+      .diffbody.wrap { overflow-x: visible; }
+      .dl { display: flex; font-family: var(--mono); font-size: 11.5px; line-height: 1.5; white-space: pre; }
+      .diffbody.wrap .dl { white-space: pre-wrap; overflow-wrap: anywhere; }
+      .dl .g { flex: none; width: 22px; text-align: center; color: var(--dim); user-select: none; }
+      .dl .c { flex: 1; padding-right: 10px; }
+      .dl.add { background: var(--addbg); } .dl.add .g { color: var(--addgut); } .dl.add .c { color: #cffff1; }
+      .dl.del { background: var(--delbg); } .dl.del .g { color: var(--delgut); } .dl.del .c { color: #ffd6d6; }
+      .dl.hunk { background: #161616; } .dl.hunk .c { color: var(--muted); }
+      .loadfull { display: block; width: 100%; background: #161616; border: none; border-top: 1px solid var(--border); color: var(--peach); padding: 12px; font-size: 12px; }
+
+      /* Changed-files card at the end of the thread + the full list it opens. */
+      .changes-card { flex: none; width: 100%; align-self: stretch; margin: 12px 0 4px; border: 1px solid var(--border); border-radius: 12px; overflow: hidden; background: var(--surface); color: var(--fg); cursor: pointer; -webkit-tap-highlight-color: transparent; }
+      .changes-card:active { background: var(--hover); }
+      .cc-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 10px 13px; border-bottom: 1px solid var(--border); }
+      .cc-title { font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); }
+      .cc-sum { display: flex; align-items: center; gap: 8px; font-family: var(--mono); font-size: 11px; }
+      .cc-count { font-family: var(--mono); font-size: 11px; color: var(--peach); background: var(--peach-tint); border-radius: 999px; padding: 1px 8px; }
+      .diffbar { display: inline-flex; gap: 2px; align-items: center; }
+      .db { width: 7px; height: 7px; border-radius: 2px; }
+      .db-a { background: var(--addgut); }
+      .db-d { background: var(--delgut); }
+      .db-o { background: var(--dim); }
+      .cc-row { display: flex; align-items: center; gap: 10px; padding: 9px 13px; }
+      .cc-more { display: flex; align-items: center; justify-content: space-between; padding: 10px 13px; border-top: 1px solid var(--border); color: var(--peach); font-size: 12px; }
+      .cc-chev { color: var(--peach); font-size: 15px; }
+      /* File row: status badge + dimmed dir (truncates) + always-visible filename, LOC right. */
+      .fl-badge { flex: none; width: 14px; text-align: center; font-family: var(--mono); font-size: 11px; font-weight: 600; }
+      .fl-badge.st-a { color: var(--addgut); }
+      .fl-badge.st-m { color: var(--peach); }
+      .fl-badge.st-d { color: var(--delgut); }
+      .fl-badge.st-o { color: var(--muted); }
+      .fl-path { flex: 1; min-width: 0; display: flex; align-items: baseline; font-family: var(--mono); font-size: 12px; overflow: hidden; }
+      .fl-dir { flex: 0 1 auto; min-width: 0; color: var(--dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      .fl-base { flex: 0 0 auto; white-space: nowrap; color: var(--fg); }
+      .fl-stat { flex: none; font-family: var(--mono); font-size: 11px; white-space: nowrap; }
+      .changerow { display: flex; align-items: center; gap: 10px; width: 100%; text-align: left; border-bottom: 1px solid var(--border); padding: 11px 12px; color: var(--fg); cursor: pointer; -webkit-tap-highlight-color: transparent; }
+      .changerow:last-child { border-bottom: none; }
+      .changerow:active { background: var(--hover); }
+      .cadd { color: var(--addgut); }
+      .cdel { color: var(--delgut); }
+      .cbin { color: var(--muted); }
     </style>
   </head>
   <body>
