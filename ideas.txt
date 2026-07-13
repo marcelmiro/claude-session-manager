@@ -37,6 +37,12 @@ CSM Ideas Backlog
 - Worktree path template
 - Configurable IDE command (not just Cursor)
 
+## Post-hoc Re-flag (mark session as needs-attention)
+- Problem: once ⚡ clears on focus, a session that's STILL `waiting` never re-flags — the monitor flags on the running→waiting *transition*, not on standing state. So a glanced-at-but-deferred block loses its ⚡ for the rest of its life.
+- Idea: a key in the session list (or Space menu) that re-adds ⚡ to any session, pressable *whenever* you notice — no foresight required (unlike a pre-switch "keep unread" shortcut, which fails exactly when you forget).
+- Dead simple: just set `needsAttention` back on. No `attentionType` gating, no `!waiting` resolve predicate, no `next`-rotation redesign. `csm next` picks it up automatically (already sorts by `lastTransition`).
+- Only worth building IF parallel-block triage becomes a real recurring pain — native notification + phone push already give two redundant reminders per block, so the vanishing ⚡ isn't leaving you blind. Considered & deferred 2026-07 as polish, not a confirmed need.
+
 ## Instant Prefix Updates via Claude Hooks
 - Use Claude Code hooks (UserPromptSubmit, Stop, Notification) to update ⚡/🔄 window prefixes instantly instead of waiting for poll cycle
 - UserPromptSubmit → add 🔄, Notification(permission_prompt) → add ⚡, Stop → add ⚡ or clear
