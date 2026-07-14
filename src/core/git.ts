@@ -228,7 +228,7 @@ export async function discoverRepos(
       .filter((w) => w !== main)
       .sort((a, b) => a.branch.localeCompare(b.branch));
 
-    repos.push({ name: base.name, path: base.path, currentBranch: main?.branch || "main", hasSession: base.hasSession });
+    repos.push({ name: base.name, path: base.path, currentBranch: main?.branch || "main", hasSession: base.hasSession, worktreeCount: linked.length });
     linked.forEach((w, i) => {
       repos.push({
         name: base.name,

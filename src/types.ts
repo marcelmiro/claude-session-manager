@@ -135,6 +135,7 @@ export interface WizardRepo {
   isWorktree?: boolean;   // true = a linked worktree row nested under its base repo
   isLastWorktree?: boolean; // true = last worktree child of its base (tree connector)
   hasSession?: boolean;   // true = base repo has an active/recent session (sorts to top)
+  worktreeCount?: number; // linked worktrees under this base (from git worktree list); drives the collapsed-row badge
 }
 
 export interface WizardBranch {
@@ -151,8 +152,11 @@ export type WorktreeMode = "new-branch" | "reuse" | "checkout" | "current";
 
 export interface WizardState {
   step: WizardStep;
-  repos: WizardRepo[];
-  repoIndex: number;
+  repos: WizardRepo[];          // all rows (bases + nested worktrees) in discovery order
+  filteredRepos: WizardRepo[];  // currently-visible rows the cursor indexes into: bases-only when repoFilter is empty, scored flat matches otherwise
+  repoIndex: number;            // index into filteredRepos
+  repoFilter: string;           // repo-step type-to-filter query
+  repoFilterCursor: number;
   selectedRepo: WizardRepo | null;
   branches: WizardBranch[];
   filteredBranches: WizardBranch[];
@@ -175,7 +179,6 @@ export type WizardAction =
   | { type: "render" }
   | { type: "preview" }
   | { type: "cancel" }
-  | { type: "quit" }
   | { type: "loadBranches" }
   | { type: "fetch" }
   | { type: "launch"; repo: WizardRepo; branch: WizardBranch; mode: WorktreeMode; text: string };

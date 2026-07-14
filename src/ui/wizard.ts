@@ -17,17 +17,13 @@ export function initWizard(
 ): WizardState | null {
   if (sessionRepos.length === 0) return null;
 
-  // Find preselected repo index
-  let repoIndex = 0;
-  if (preselectedRepo) {
-    const idx = sessionRepos.findIndex((r) => r.path === preselectedRepo);
-    if (idx >= 0) repoIndex = idx;
-  }
-
   const state: WizardState = {
     step: "repo",
     repos: sessionRepos,
-    repoIndex,
+    filteredRepos: [],
+    repoIndex: 0,
+    repoFilter: "",
+    repoFilterCursor: 0,
     selectedRepo: null,
     branches: [],
     filteredBranches: [],
@@ -45,6 +41,14 @@ export function initWizard(
     fetchState: "idle",
   };
 
+  // Seed the visible list (empty filter → bases only) and place the cursor on
+  // the preselected base repo if one was given.
+  applyRepoFilter(state);
+  if (preselectedRepo) {
+    const idx = state.filteredRepos.findIndex((r) => r.path === preselectedRepo);
+    if (idx >= 0) state.repoIndex = idx;
+  }
+
   // Auto-skip repo step if only one repo
   if (sessionRepos.length === 1) {
     state.selectedRepo = sessionRepos[0];
@@ -53,6 +57,37 @@ export function initWizard(
   }
 
   return state;
+}
+
+/**
+ * Rebuild `filteredRepos` from `repoFilter`. Empty filter → base repos only
+ * (worktrees collapsed), in discovery order. Non-empty → every repo (bases by
+ * name, worktrees by branch) scored exact > prefix > contains, bases before
+ * worktrees on ties, non-matches dropped. Clamps `repoIndex` into range.
+ */
+export function applyRepoFilter(state: WizardState): void {
+  const filter = state.repoFilter.toLowerCase();
+  if (!filter) {
+    state.filteredRepos = state.repos.filter((r) => !r.isWorktree);
+  } else {
+    const scored = state.repos
+      .map((r, i) => ({ repo: r, index: i, score: scoreRepoMatch(r, filter) }))
+      .filter((x) => x.score > 0)
+      .sort((a, b) => b.score - a.score || a.index - b.index);
+    state.filteredRepos = scored.map((x) => x.repo);
+  }
+  state.repoIndex = Math.min(state.repoIndex, Math.max(0, state.filteredRepos.length - 1));
+}
+
+/** Score a repo row against a lowercased filter. Bases match on name, worktrees on branch. */
+function scoreRepoMatch(repo: WizardRepo, filter: string): number {
+  const hay = (repo.isWorktree ? repo.currentBranch : repo.name).toLowerCase();
+  const base = repo.isWorktree ? 0 : 1; // bases outrank worktrees on ties
+
+  if (hay === filter) return 60 + base;         // exact
+  if (hay.startsWith(filter)) return 40 + base; // prefix
+  if (hay.includes(filter)) return 20 + base;   // contains
+  return 0;
 }
 
 /**
@@ -92,7 +127,7 @@ export function renderWizard(listBox: Widgets.BoxElement, state: WizardState): v
 
 function getSelectedLine(state: WizardState): number {
   const headerLines = 2; // breadcrumb + blank
-  if (state.step === "repo") return headerLines + state.repoIndex;
+  if (state.step === "repo") return headerLines + 1 + state.repoIndex; // +1 for always-visible filter bar
   if (state.step === "branch") {
     return headerLines + 1 + state.branchIndex; // +1 for always-visible filter bar
   }
@@ -124,49 +159,59 @@ function abbreviatePath(path: string): string {
   return path.startsWith(home) ? "~" + path.slice(home.length) : path;
 }
 
+/** Truncate a plain label to `max` chars, appending an ellipsis when clipped. */
+function truncLabel(s: string, max: number): string {
+  if (max < 1) return "";
+  return s.length > max ? s.slice(0, max - 1) + "…" : s;
+}
+
 function renderRepoStep(lines: string[], listBox: Widgets.BoxElement, state: WizardState): void {
   const boxWidth = typeof listBox.width === "number" ? listBox.width : 60;
 
-  for (let i = 0; i < state.repos.length; i++) {
-    const repo = state.repos[i];
+  // Always-visible filter bar (type to search). Worktrees are collapsed until
+  // the query matches a base name or a worktree branch.
+  lines.push(`  {${C.peach}-fg}/{/${C.peach}-fg} ${renderTextWithCursor(state.repoFilter, state.repoFilterCursor)}`);
+
+  if (state.filteredRepos.length === 0) {
+    lines.push(`  {${C.dim}-fg}${state.repoFilter ? "No matching repos" : "No repos found"}{/${C.dim}-fg}`);
+    return;
+  }
+
+  for (let i = 0; i < state.filteredRepos.length; i++) {
+    const repo = state.filteredRepos[i];
     const isSelected = i === state.repoIndex;
     const cursor = isSelected ? `{${C.peach}-fg}▸{/${C.peach}-fg}` : " ";
-    const abbrevPath = abbreviatePath(repo.path);
 
-    // Name cell: base repos show their name; worktrees show their branch, tree-indented.
-    // Build the plain string (for width-aware padding) and the colored markup separately.
-    let namePlain: string;
-    let nameColored: string;
+    // Compose plain text first for width-aware truncation, then color it.
+    let body: string;
     if (repo.isWorktree) {
-      const conn = repo.isLastWorktree ? "└" : "├";
-      const label = repo.currentBranch;
-      namePlain = `  ${conn} ${label}`;
+      // Filtered flat view: show the branch plus its base repo for context.
+      // Budget reserves the "▸ " cursor prefix (6) AND the "└ " connector (2)
+      // that base rows don't have, so a max-length branch never wraps.
+      const suffix = `  ${repo.name}`;
+      const label = truncLabel(repo.currentBranch, Math.max(8, boxWidth - 8 - suffix.length));
       const labelColor = isSelected ? C.fg : C.muted;
-      nameColored = `  {${C.dim}-fg}${conn}{/${C.dim}-fg} {${labelColor}-fg}${label}{/${labelColor}-fg}`;
+      body =
+        `{${C.dim}-fg}└{/${C.dim}-fg} {${labelColor}-fg}${label}{/${labelColor}-fg}` +
+        `  {${C.dim}-fg}${repo.name}{/${C.dim}-fg}`;
     } else {
-      namePlain = repo.name;
-      nameColored = isSelected
-        ? `{bold}{${C.fg}-fg}${repo.name}{/${C.fg}-fg}{/bold}`
-        : `{${C.muted}-fg}${repo.name}{/${C.muted}-fg}`;
+      const badge = repo.worktreeCount ? ` (${repo.worktreeCount})` : "";
+      // Show the branch only when it isn't the trunk (main/master).
+      const offTrunk = repo.currentBranch && repo.currentBranch !== "main" && repo.currentBranch !== "master";
+      const branchTag = offTrunk ? `  ${repo.currentBranch}` : "";
+      const label = truncLabel(repo.name, Math.max(8, boxWidth - 6 - badge.length - branchTag.length));
+      const nameColored = isSelected
+        ? `{bold}{${C.fg}-fg}${label}{/${C.fg}-fg}{/bold}`
+        : `{${C.muted}-fg}${label}{/${C.muted}-fg}`;
+      body =
+        `${nameColored}${badge ? `{${C.dim}-fg}${badge}{/${C.dim}-fg}` : ""}` +
+        `${branchTag ? `{${C.dim}-fg}${branchTag}{/${C.dim}-fg}` : ""}`;
     }
-    const namePad = " ".repeat(Math.max(1, 20 - namePlain.length));
-
-    // Right column: base repos show their branch; worktrees a "worktree" tag.
-    const rightLabel = repo.isWorktree ? "worktree" : repo.currentBranch;
-    const maxPathLen = Math.max(10, boxWidth - 30 - rightLabel.length);
-    const pathStr = abbrevPath.length > maxPathLen ? "…" + abbrevPath.slice(-maxPathLen + 1) : abbrevPath;
-    const rightStr = `{${C.dim}-fg}${rightLabel}{/${C.dim}-fg}`;
 
     if (isSelected) {
-      lines.push(
-        `{${C.surface}-bg} ${cursor} ${nameColored}${namePad}` +
-        `{${C.muted}-fg}${pathStr.padEnd(maxPathLen)}{/${C.muted}-fg} ${rightStr}{/${C.surface}-bg}`,
-      );
+      lines.push(`{${C.surface}-bg} ${cursor} ${body}{/${C.surface}-bg}`);
     } else {
-      lines.push(
-        ` ${cursor} ${nameColored}${namePad}` +
-        `{${C.dim}-fg}${pathStr.padEnd(maxPathLen)}{/${C.dim}-fg} ${rightStr}`,
-      );
+      lines.push(` ${cursor} ${body}`);
     }
   }
 }
@@ -289,19 +334,43 @@ function renderWorktreeStep(lines: string[], state: WizardState): void {
  */
 export async function renderWizardPreview(previewBox: Widgets.BoxElement, state: WizardState): Promise<void> {
   if (state.step === "repo") {
-    const sel = state.repos[state.repoIndex];
-    if (sel?.isWorktree) {
-      previewBox.setContent(
-        `{${C.muted}-fg}  Worktree{/${C.muted}-fg}\n\n` +
-        `  {${C.dim}-fg}Branch:{/${C.dim}-fg} {${C.fg}-fg}${sel.currentBranch}{/${C.fg}-fg}\n` +
-        `  {${C.dim}-fg}Path:{/${C.dim}-fg}   {${C.fg}-fg}${abbreviatePath(sel.path)}{/${C.fg}-fg}\n\n` +
-        `  {${C.dim}-fg}⏎ launches Claude here directly{/${C.dim}-fg}`,
-      );
-    } else {
+    const sel = state.filteredRepos[state.repoIndex];
+    if (!sel) {
       previewBox.setContent(
         `\n{${C.muted}-fg}  Select a repo to start a new Claude session{/${C.muted}-fg}`,
       );
+      return;
     }
+    if (sel.isWorktree) {
+      // Detached worktrees have no branch — label them by their directory name.
+      const label = sel.currentBranch === "detached"
+        ? `${sel.path.split("/").filter(Boolean).pop()} {${C.dim}-fg}(detached){/${C.dim}-fg}`
+        : sel.currentBranch;
+      previewBox.setContent(
+        `{${C.muted}-fg}  Worktree{/${C.muted}-fg}\n\n` +
+        `  {${C.dim}-fg}Branch:{/${C.dim}-fg} {${C.fg}-fg}${label}{/${C.fg}-fg}\n` +
+        `  {${C.dim}-fg}Path:{/${C.dim}-fg}   {${C.fg}-fg}${abbreviatePath(sel.path)}{/${C.fg}-fg}\n\n` +
+        `  {${C.dim}-fg}⏎ launches Claude here directly{/${C.dim}-fg}`,
+      );
+      return;
+    }
+    // Base repo: live info panel — last commit, worktree count, session state.
+    const wtLine = sel.worktreeCount
+      ? `  {${C.dim}-fg}Worktrees:{/${C.dim}-fg} {${C.fg}-fg}${sel.worktreeCount}{/${C.fg}-fg}\n`
+      : "";
+    const sessionLine = sel.hasSession
+      ? `  {${C.dim}-fg}Session:{/${C.dim}-fg}   {${C.mint}-fg}active{/${C.mint}-fg}\n`
+      : "";
+    const log = await getBranchLog(sel.path, sel.currentBranch);
+    const logBlock = log
+      ? `\n{${C.muted}-fg}  Recent commits{/${C.muted}-fg}\n\n${ansiToBlessedMarkup(log)}`
+      : `\n{${C.dim}-fg}  No log available{/${C.dim}-fg}`;
+    previewBox.setContent(
+      `{${C.muted}-fg}  ${sel.name}{/${C.muted}-fg}\n\n` +
+      `  {${C.dim}-fg}Branch:{/${C.dim}-fg}    {${C.fg}-fg}${sel.currentBranch}{/${C.fg}-fg}\n` +
+      `  {${C.dim}-fg}Path:{/${C.dim}-fg}      {${C.fg}-fg}${abbreviatePath(sel.path)}{/${C.fg}-fg}\n` +
+      wtLine + sessionLine + logBlock,
+    );
     return;
   }
 
@@ -414,12 +483,13 @@ export function renderWizardStatusBar(statusBar: Widgets.BoxElement, state: Wiza
 
   if (state.step === "repo") {
     content =
-      `{${C.peach}-fg}j/k{/${C.peach}-fg} {${C.dim}-fg}move{/${C.dim}-fg}` +
+      `{${C.peach}-fg}type{/${C.peach}-fg} {${C.dim}-fg}filter{/${C.dim}-fg}` +
+      `  {${C.peach}-fg}\u2191/\u2193 ^J/^K{/${C.peach}-fg} {${C.dim}-fg}move{/${C.dim}-fg}` +
       `  {${C.peach}-fg}\u23CE{/${C.peach}-fg} {${C.dim}-fg}select{/${C.dim}-fg}` +
       `  {${C.peach}-fg}Esc{/${C.peach}-fg} {${C.dim}-fg}cancel{/${C.dim}-fg}`;
   } else if (state.step === "branch") {
     content =
-      `{${C.peach}-fg}↑/↓{/${C.peach}-fg} {${C.dim}-fg}move{/${C.dim}-fg}` +
+      `{${C.peach}-fg}↑/↓ ^J/^K{/${C.peach}-fg} {${C.dim}-fg}move{/${C.dim}-fg}` +
       `  {${C.peach}-fg}type{/${C.peach}-fg} {${C.dim}-fg}to filter{/${C.dim}-fg}` +
       `  {${C.peach}-fg}\u23CE{/${C.peach}-fg} {${C.dim}-fg}select{/${C.dim}-fg}` +
       `  {${C.peach}-fg}^R{/${C.peach}-fg} {${C.dim}-fg}fetch{/${C.dim}-fg}` +
@@ -445,7 +515,7 @@ export function renderWizardStatusBar(statusBar: Widgets.BoxElement, state: Wiza
  */
 export function handleWizardKey(state: WizardState, keyName: string, ch: string): WizardAction {
   if (state.step === "repo") {
-    return handleRepoKey(state, keyName);
+    return handleRepoKey(state, keyName, ch);
   } else if (state.step === "branch") {
     return handleBranchFilterKey(state, keyName, ch);
   } else if (state.step === "worktree-choice") {
@@ -457,19 +527,29 @@ export function handleWizardKey(state: WizardState, keyName: string, ch: string)
   return { type: "noop" };
 }
 
-function handleRepoKey(state: WizardState, keyName: string): WizardAction {
+function handleRepoKey(state: WizardState, keyName: string, ch: string): WizardAction {
+  // Step-specific keys first (nav + select + cancel). Plain letters fall
+  // through to the filter, so movement uses arrows or ctrl+j/ctrl+k — note
+  // blessed delivers ctrl+j as keyName "linefeed", not "C-j".
   switch (keyName) {
-    case "j":
     case "down":
-      state.repoIndex = Math.min(state.repoIndex + 1, state.repos.length - 1);
-      return { type: "render" };
-    case "k":
+    case "linefeed": // ctrl+j
+      if (state.filteredRepos.length > 0) {
+        state.repoIndex = Math.min(state.repoIndex + 1, state.filteredRepos.length - 1);
+        return { type: "preview" };
+      }
+      return { type: "noop" };
     case "up":
-      state.repoIndex = Math.max(state.repoIndex - 1, 0);
-      return { type: "render" };
+    case "C-k": // ctrl+k
+      if (state.filteredRepos.length > 0) {
+        state.repoIndex = Math.max(state.repoIndex - 1, 0);
+        return { type: "preview" };
+      }
+      return { type: "noop" };
     case "enter":
     case "return": {
-      const sel = state.repos[state.repoIndex];
+      if (state.filteredRepos.length === 0) return { type: "noop" };
+      const sel = state.filteredRepos[state.repoIndex];
       state.selectedRepo = sel;
       if (sel.isWorktree) {
         // Existing worktree: launch Claude there directly on its current branch.
@@ -486,11 +566,25 @@ function handleRepoKey(state: WizardState, keyName: string): WizardAction {
     }
     case "escape":
       return { type: "cancel" };
-    case "q":
-      return { type: "quit" };
-    default:
-      return { type: "noop" };
   }
+
+  // Centralized text input handling → updates the filter.
+  const prevText = state.repoFilter;
+  const prevCursor = state.repoFilterCursor;
+  const result = handleTextInputKey(state.repoFilter, state.repoFilterCursor, keyName, ch);
+  if (result.handled) {
+    state.repoFilter = result.text;
+    state.repoFilterCursor = result.cursor;
+    if (result.text !== prevText) {
+      applyRepoFilter(state);
+    }
+    if (result.text !== prevText || result.cursor !== prevCursor) {
+      return { type: "preview" };
+    }
+    return { type: "noop" };
+  }
+
+  return { type: "noop" };
 }
 
 function handleBranchFilterKey(state: WizardState, keyName: string, ch: string): WizardAction {
@@ -510,12 +604,14 @@ function handleBranchFilterKey(state: WizardState, keyName: string, ch: string):
       state.branchFilterActive = false;
       return { type: "render" };
     case "up":
+    case "C-k": // ctrl+k
       if (state.filteredBranches.length > 0) {
         state.branchIndex = Math.max(state.branchIndex - 1, 0);
         return { type: "preview" };
       }
       return { type: "noop" };
     case "down":
+    case "linefeed": // ctrl+j (blessed remaps \n, so it's never "C-j")
       if (state.filteredBranches.length > 0) {
         state.branchIndex = Math.min(state.branchIndex + 1, state.filteredBranches.length - 1);
         return { type: "preview" };

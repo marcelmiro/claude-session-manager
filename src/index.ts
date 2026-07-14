@@ -1370,9 +1370,6 @@ screen.on("keypress", async (_ch: string, key: any) => {
       refreshTimer = setInterval(refresh, 3000);
       await refresh();
       break;
-    case "quit":
-      cleanup();
-      process.exit(0);
     case "loadBranches": {
       const branches = await listBranches(wizardState.selectedRepo!.path);
       wizardState.branches = branches;

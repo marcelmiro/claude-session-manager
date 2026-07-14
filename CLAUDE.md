@@ -191,13 +191,13 @@ Lightweight poller for `tmux status-right` and sole authority for window naming.
 
 Inline step-through UI that replaces the session list (no modal). Steps: repo → branch → worktree? → launch.
 
-- **Repo step**: j/k navigate repos discovered from active sessions + `repoPaths` config dirs. Single repo auto-skips
-- **Branch step**: j/k navigate, `/` activates type-to-filter mode (Esc clears). Preview pane shows `git log` for highlighted branch
+- **Repo step**: always-visible filter bar — type to search, arrows or `^J`/`^K` navigate (plain `j`/`k` type into the filter). Repos discovered from active sessions + `repoPaths` config dirs. Worktrees are **collapsed by default** (base rows show a `(N)` count badge); typing a query reveals matching worktrees flat (base matches by name, worktree by branch). Empty filter → base repos only. Enter on a base advances to the branch step; Enter on a worktree launches Claude there directly (`mode:"current"`). Preview pane shows a base-repo info panel (recent commits, worktree count, active-session indicator, path). Single repo auto-skips. Preselects the base repo of the home-screen selection. `^J` arrives as blessed keyName `linefeed` (not `C-j`); `^K` is `C-k`
+- **Branch step**: arrows or `^J`/`^K` navigate, type activates type-to-filter (Esc clears). Preview pane shows `git log` for highlighted branch
 - **Worktree-choice step**: Only shown when selected branch != current. Three options (fixed order): "New worktree + new branch" (fork off the selected branch), "New worktree on this branch" (reuse the branch as-is — no fork, so an agent's feature branch stays one branch/one PR), "Checkout in place" (last). Default cursor is context-aware: trunk (`origin/HEAD`, or main/master) → new-branch; feature branch → reuse. Reuse pre-checks `branchCheckedOutPath` and flashes a conflict (staying in the wizard) if the branch is already checked out elsewhere.
 - **Worktree name step**: For new-branch, the field edits the new branch name; for reuse, it edits the worktree **directory** name (pre-filled with the branch name minus any `prefix/`, e.g. `cursor/ev-4-x` → `ev-4-x`). The dir is always `../{repo}-{name}` (the `{repo}-` prefix is required by worktree grouping).
 - **Launch**: The git setup + `claude` run as one shell command inside the spawned tmux window (built by `buildLaunchCommand` in `core/launch-command.ts`), then exits the TUI
 
-Refresh loop paused during wizard. Esc pops back one step (or cancels from first step). `q` quits from repo step. Git errors flash as status messages and keep wizard open for retry. Progress messages shown during checkout/worktree operations.
+Refresh loop paused during wizard. Esc pops back one step (or cancels from the repo step). Git errors flash as status messages and keep wizard open for retry. Progress messages shown during checkout/worktree operations.
 
 Config `repoPaths` (default `["~/Documents"]`): directories scanned 1-level deep for git repos to include alongside session repos.
 
