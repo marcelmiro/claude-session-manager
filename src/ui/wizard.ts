@@ -24,6 +24,7 @@ export function initWizard(
     repoIndex: 0,
     repoFilter: "",
     repoFilterCursor: 0,
+    expandedRepos: [],
     selectedRepo: null,
     branches: [],
     filteredBranches: [],
@@ -60,15 +61,29 @@ export function initWizard(
 }
 
 /**
- * Rebuild `filteredRepos` from `repoFilter`. Empty filter → base repos only
- * (worktrees collapsed), in discovery order. Non-empty → every repo (bases by
- * name, worktrees by branch) scored exact > prefix > contains, bases before
- * worktrees on ties, non-matches dropped. Clamps `repoIndex` into range.
+ * Rebuild `filteredRepos` from `repoFilter`. Empty filter → the browse view:
+ * base repos in discovery order, each followed by its worktrees only when that
+ * base is expanded (`expandedRepos`). Non-empty → flat scored matches: bases by
+ * name, worktrees by branch *or* their base repo name, exact > prefix >
+ * contains, bases before worktrees on ties, non-matches dropped. Clamps
+ * `repoIndex` into range.
  */
 export function applyRepoFilter(state: WizardState): void {
   const filter = state.repoFilter.toLowerCase();
   if (!filter) {
-    state.filteredRepos = state.repos.filter((r) => !r.isWorktree);
+    // Worktrees follow their base in `repos`, so track the last base while
+    // walking and include its worktrees only when it's expanded.
+    const visible: WizardRepo[] = [];
+    let baseExpanded = false;
+    for (const r of state.repos) {
+      if (!r.isWorktree) {
+        baseExpanded = state.expandedRepos.includes(r.path);
+        visible.push(r);
+      } else if (baseExpanded) {
+        visible.push(r);
+      }
+    }
+    state.filteredRepos = visible;
   } else {
     const scored = state.repos
       .map((r, i) => ({ repo: r, index: i, score: scoreRepoMatch(r, filter) }))
@@ -79,15 +94,39 @@ export function applyRepoFilter(state: WizardState): void {
   state.repoIndex = Math.min(state.repoIndex, Math.max(0, state.filteredRepos.length - 1));
 }
 
-/** Score a repo row against a lowercased filter. Bases match on name, worktrees on branch. */
-function scoreRepoMatch(repo: WizardRepo, filter: string): number {
-  const hay = (repo.isWorktree ? repo.currentBranch : repo.name).toLowerCase();
-  const base = repo.isWorktree ? 0 : 1; // bases outrank worktrees on ties
-
-  if (hay === filter) return 60 + base;         // exact
-  if (hay.startsWith(filter)) return 40 + base; // prefix
-  if (hay.includes(filter)) return 20 + base;   // contains
+/** Tier a haystack against a lowercased filter: exact > prefix > contains > none. */
+function matchTier(hay: string, filter: string): number {
+  if (hay === filter) return 60;
+  if (hay.startsWith(filter)) return 40;
+  if (hay.includes(filter)) return 20;
   return 0;
+}
+
+/**
+ * Score a repo row against a lowercased filter. Bases match on name; worktrees
+ * match on their branch OR their base repo name (so typing the repo name
+ * reveals its worktrees, not just the base row).
+ */
+function scoreRepoMatch(repo: WizardRepo, filter: string): number {
+  if (!repo.isWorktree) {
+    const s = matchTier(repo.name.toLowerCase(), filter);
+    return s > 0 ? s + 1 : 0; // bases outrank worktrees on ties
+  }
+  const s = Math.max(
+    matchTier(repo.currentBranch.toLowerCase(), filter),
+    matchTier(repo.name.toLowerCase(), filter),
+  );
+  return s;
+}
+
+/** Set a base repo's expanded state, rebuild the visible list, keep the cursor on it. */
+function setRepoExpanded(state: WizardState, path: string, expanded: boolean): void {
+  const has = state.expandedRepos.includes(path);
+  if (expanded && !has) state.expandedRepos.push(path);
+  else if (!expanded && has) state.expandedRepos = state.expandedRepos.filter((p) => p !== path);
+  applyRepoFilter(state);
+  const idx = state.filteredRepos.findIndex((r) => r.path === path);
+  if (idx >= 0) state.repoIndex = idx;
 }
 
 /**
@@ -185,17 +224,28 @@ function renderRepoStep(lines: string[], listBox: Widgets.BoxElement, state: Wiz
     // Compose plain text first for width-aware truncation, then color it.
     let body: string;
     if (repo.isWorktree) {
-      // Filtered flat view: show the branch plus its base repo for context.
-      // Budget reserves the "▸ " cursor prefix (6) AND the "└ " connector (2)
-      // that base rows don't have, so a max-length branch never wraps.
-      const suffix = `  ${repo.name}`;
-      const label = truncLabel(repo.currentBranch, Math.max(8, boxWidth - 8 - suffix.length));
       const labelColor = isSelected ? C.fg : C.muted;
-      body =
-        `{${C.dim}-fg}└{/${C.dim}-fg} {${labelColor}-fg}${label}{/${labelColor}-fg}` +
-        `  {${C.dim}-fg}${repo.name}{/${C.dim}-fg}`;
+      if (state.repoFilter) {
+        // Filtered flat view: worktrees can appear detached from their base, so
+        // show the branch plus its base repo for context. Budget reserves the
+        // "▸ " cursor prefix (6) AND the "└ " connector (2), so it never wraps.
+        const suffix = `  ${repo.name}`;
+        const label = truncLabel(repo.currentBranch, Math.max(8, boxWidth - 8 - suffix.length));
+        body =
+          `{${C.dim}-fg}└{/${C.dim}-fg} {${labelColor}-fg}${label}{/${labelColor}-fg}` +
+          `  {${C.dim}-fg}${repo.name}{/${C.dim}-fg}`;
+      } else {
+        // Browse view: nested under its (visible) base, no redundant repo suffix.
+        const conn = repo.isLastWorktree ? "└" : "├";
+        const label = truncLabel(repo.currentBranch, Math.max(8, boxWidth - 8));
+        body = `{${C.dim}-fg}${conn}{/${C.dim}-fg} {${labelColor}-fg}${label}{/${labelColor}-fg}`;
+      }
     } else {
-      const badge = repo.worktreeCount ? ` (${repo.worktreeCount})` : "";
+      // Chevron affordance: bases with worktrees show expand state + count.
+      const chev = repo.worktreeCount
+        ? (state.expandedRepos.includes(repo.path) ? "▾ " : "▸ ")
+        : "";
+      const badge = repo.worktreeCount ? ` ${chev}${repo.worktreeCount}` : "";
       // Show the branch only when it isn't the trunk (main/master).
       const offTrunk = repo.currentBranch && repo.currentBranch !== "main" && repo.currentBranch !== "master";
       const branchTag = offTrunk ? `  ${repo.currentBranch}` : "";
@@ -484,12 +534,13 @@ export function renderWizardStatusBar(statusBar: Widgets.BoxElement, state: Wiza
   if (state.step === "repo") {
     content =
       `{${C.peach}-fg}type{/${C.peach}-fg} {${C.dim}-fg}filter{/${C.dim}-fg}` +
-      `  {${C.peach}-fg}\u2191/\u2193 ^J/^K{/${C.peach}-fg} {${C.dim}-fg}move{/${C.dim}-fg}` +
+      `  {${C.peach}-fg}\u2191/\u2193{/${C.peach}-fg} {${C.dim}-fg}move{/${C.dim}-fg}` +
+      `  {${C.peach}-fg}\u2192{/${C.peach}-fg} {${C.dim}-fg}worktrees{/${C.dim}-fg}` +
       `  {${C.peach}-fg}\u23CE{/${C.peach}-fg} {${C.dim}-fg}select{/${C.dim}-fg}` +
       `  {${C.peach}-fg}Esc{/${C.peach}-fg} {${C.dim}-fg}cancel{/${C.dim}-fg}`;
   } else if (state.step === "branch") {
     content =
-      `{${C.peach}-fg}↑/↓ ^J/^K{/${C.peach}-fg} {${C.dim}-fg}move{/${C.dim}-fg}` +
+      `{${C.peach}-fg}↑/↓{/${C.peach}-fg} {${C.dim}-fg}move{/${C.dim}-fg}` +
       `  {${C.peach}-fg}type{/${C.peach}-fg} {${C.dim}-fg}to filter{/${C.dim}-fg}` +
       `  {${C.peach}-fg}\u23CE{/${C.peach}-fg} {${C.dim}-fg}select{/${C.dim}-fg}` +
       `  {${C.peach}-fg}^R{/${C.peach}-fg} {${C.dim}-fg}fetch{/${C.dim}-fg}` +
@@ -546,6 +597,44 @@ function handleRepoKey(state: WizardState, keyName: string, ch: string): WizardA
         return { type: "preview" };
       }
       return { type: "noop" };
+    case "tab": {
+      // Toggle the highlighted base's worktrees inline (browse view only).
+      if (state.repoFilter) return { type: "noop" };
+      const sel = state.filteredRepos[state.repoIndex];
+      if (sel && !sel.isWorktree && sel.worktreeCount) {
+        setRepoExpanded(state, sel.path, !state.expandedRepos.includes(sel.path));
+        return { type: "preview" };
+      }
+      return { type: "noop" };
+    }
+    case "right": {
+      // Expand the highlighted base. When filtering, left/right move the text
+      // cursor instead — fall through to the text-input handler below.
+      if (state.repoFilter) break;
+      const sel = state.filteredRepos[state.repoIndex];
+      if (sel && !sel.isWorktree && sel.worktreeCount && !state.expandedRepos.includes(sel.path)) {
+        setRepoExpanded(state, sel.path, true);
+        return { type: "preview" };
+      }
+      return { type: "noop" };
+    }
+    case "left": {
+      if (state.repoFilter) break; // text cursor while filtering
+      const sel = state.filteredRepos[state.repoIndex];
+      if (!sel) return { type: "noop" };
+      if (sel.isWorktree) {
+        // Collapse the parent base and land the cursor on it.
+        let p = state.repoIndex;
+        while (p > 0 && state.filteredRepos[p].isWorktree) p--;
+        setRepoExpanded(state, state.filteredRepos[p].path, false);
+        return { type: "preview" };
+      }
+      if (sel.worktreeCount && state.expandedRepos.includes(sel.path)) {
+        setRepoExpanded(state, sel.path, false);
+        return { type: "preview" };
+      }
+      return { type: "noop" };
+    }
     case "enter":
     case "return": {
       if (state.filteredRepos.length === 0) return { type: "noop" };

@@ -157,6 +157,7 @@ export interface WizardState {
   repoIndex: number;            // index into filteredRepos
   repoFilter: string;           // repo-step type-to-filter query
   repoFilterCursor: number;
+  expandedRepos: string[];      // base repo paths whose worktrees are expanded inline (empty-filter browse view)
   selectedRepo: WizardRepo | null;
   branches: WizardBranch[];
   filteredBranches: WizardBranch[];

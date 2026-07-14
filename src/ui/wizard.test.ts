@@ -17,6 +17,7 @@ function baseState(over: Partial<WizardState> = {}): WizardState {
     repoIndex: 0,
     repoFilter: "",
     repoFilterCursor: 0,
+    expandedRepos: [],
     selectedRepo: { name: "csm", path: "/tmp/csm", currentBranch: "main" },
     branches: [],
     filteredBranches: [],
@@ -167,6 +168,28 @@ describe("applyRepoFilter", () => {
     expect(state.filteredRepos[0].path).toBe("/d/dup"); // base first
   });
 
+  test("filtering by the base repo name reveals that repo's worktrees", () => {
+    const state = baseState({ step: "repo", repos: REPOS, repoFilter: "throxy" });
+    applyRepoFilter(state);
+    // base first (exact name match), then its two worktrees (matched by base name).
+    expect(state.filteredRepos.map((r) => r.path)).toEqual([
+      "/d/throxy",
+      "/d/throxy-feat-a",
+      "/d/throxy-tf-90",
+    ]);
+  });
+
+  test("expanded base shows its worktrees nested in the empty-filter browse view", () => {
+    const state = baseState({ step: "repo", repos: REPOS, repoFilter: "", expandedRepos: ["/d/throxy"] });
+    applyRepoFilter(state);
+    expect(state.filteredRepos.map((r) => r.path)).toEqual([
+      "/d/throxy",
+      "/d/throxy-feat-a",
+      "/d/throxy-tf-90",
+      "/d/wiki",
+    ]);
+  });
+
   test("no match yields an empty list", () => {
     const state = baseState({ step: "repo", repos: REPOS, repoFilter: "zzz" });
     applyRepoFilter(state);
@@ -226,6 +249,47 @@ describe("repo step key handling", () => {
 
   test("Esc cancels the wizard from the repo step", () => {
     expect(handleWizardKey(repoState(), "escape", "").type).toBe("cancel");
+  });
+
+  test("→ expands the highlighted base's worktrees; cursor stays on the base", () => {
+    const state = repoState(); // cursor on throxy (index 0)
+    handleWizardKey(state, "right", "");
+    expect(state.expandedRepos).toEqual(["/d/throxy"]);
+    expect(state.filteredRepos.map((r) => r.path)).toEqual(["/d/throxy", "/d/throxy-feat-a", "/d/throxy-tf-90", "/d/wiki"]);
+    expect(state.repoIndex).toBe(0);
+  });
+
+  test("← collapses an expanded base", () => {
+    const state = repoState({ expandedRepos: ["/d/throxy"] });
+    applyRepoFilter(state);
+    handleWizardKey(state, "left", "");
+    expect(state.expandedRepos).toEqual([]);
+    expect(state.filteredRepos.map((r) => r.path)).toEqual(["/d/throxy", "/d/wiki"]);
+  });
+
+  test("Tab toggles the highlighted base", () => {
+    const state = repoState();
+    handleWizardKey(state, "tab", "");
+    expect(state.expandedRepos).toEqual(["/d/throxy"]);
+    handleWizardKey(state, "tab", "");
+    expect(state.expandedRepos).toEqual([]);
+  });
+
+  test("← on a worktree collapses its parent and lands the cursor on it", () => {
+    const state = repoState({ expandedRepos: ["/d/throxy"] });
+    applyRepoFilter(state);
+    state.repoIndex = 2; // a throxy worktree row
+    handleWizardKey(state, "left", "");
+    expect(state.expandedRepos).toEqual([]);
+    expect(state.filteredRepos[state.repoIndex].path).toBe("/d/throxy");
+  });
+
+  test("→/← fall through to the text cursor while filtering (no expand)", () => {
+    const state = repoState({ repoFilter: "throxy", repoFilterCursor: 3 });
+    applyRepoFilter(state);
+    handleWizardKey(state, "left", "");
+    expect(state.expandedRepos).toEqual([]); // did not toggle
+    expect(state.repoFilterCursor).toBe(2);  // moved the text cursor instead
   });
 });
 
