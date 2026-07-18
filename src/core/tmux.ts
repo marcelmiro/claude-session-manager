@@ -231,8 +231,10 @@ export async function launchClaudeWindow(
   sessionId: string,
 ): Promise<string> {
   const cmd = `claude --session-id ${sessionId}; exec zsh -l`;
+  // `-d`: don't make the new window active. This launch is driven from the phone (Portkey),
+  // so the Mac's tmux client must stay on whatever window the user was in — no focus steal.
   const out =
-    await Bun.$`tmux new-window -a -t ${targetSession} -n ${name} -c ${repoPath} -P -F ${"#{pane_id}"} zsh -c ${cmd}`
+    await Bun.$`tmux new-window -a -d -t ${targetSession} -n ${name} -c ${repoPath} -P -F ${"#{pane_id}"} zsh -c ${cmd}`
       .quiet()
       .text();
   return out.trim();
@@ -240,7 +242,7 @@ export async function launchClaudeWindow(
 
 /**
  * Resume an existing session in a NEW tmux window: `claude --resume=<sessionId>` in
- * `repoPath`, inserted after the active window (`-a`). Uses the established resume
+ * `repoPath`, inserted after the active window but not focused (`-a -d`). Uses the established resume
  * convention `zsh -c '…; exec zsh -l'` (index.ts) so a failed resume leaves an inspectable
  * shell rather than a raced bare-exec close. Returns the new window's pane id so the caller
  * can wait for that pane's SessionStart hook to re-register the session id.
@@ -252,8 +254,10 @@ export async function launchResumeWindow(
   sessionId: string,
 ): Promise<string> {
   const cmd = `claude --resume=${sessionId}; exec zsh -l`;
+  // `-d`: don't make the new window active. Phone-driven (Portkey) resume, so the Mac's tmux
+  // client stays on the user's current window — no focus steal.
   const out =
-    await Bun.$`tmux new-window -a -t ${targetSession} -n ${name} -c ${repoPath} -P -F ${"#{pane_id}"} zsh -c ${cmd}`
+    await Bun.$`tmux new-window -a -d -t ${targetSession} -n ${name} -c ${repoPath} -P -F ${"#{pane_id}"} zsh -c ${cmd}`
       .quiet()
       .text();
   return out.trim();
