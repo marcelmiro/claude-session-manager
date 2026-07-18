@@ -9,7 +9,7 @@
 
 import { statSync, realpathSync } from "node:fs";
 import { resolve, dirname, sep } from "node:path";
-import { resolveSessionPane } from "./session-api";
+import { resolveSessionPane, resolveTranscriptPath, latestTranscriptCwd } from "./session-api";
 import { listPanes } from "./tmux";
 
 // git's empty-tree object — diff target for an unborn HEAD (repo with no commits).
@@ -30,12 +30,19 @@ export interface FileDiff {
   empty?: boolean;
 }
 
-/** Resolve a session's live repo root: pane cwd → `git rev-parse --show-toplevel`. */
+/**
+ * Resolve a session's live repo root: session cwd → `git rev-parse --show-toplevel`.
+ * The cwd prefers the transcript's last-recorded `cwd` (which tracks `/cd`) over the tmux
+ * pane's cwd — `/cd` moves Claude's directory forward but not the launching shell's, so the
+ * pane still reports the original dir. Falls back to the pane cwd when no transcript is found.
+ */
 export async function repoRootForSession(sessionId: string): Promise<string | null> {
   const paneId = await resolveSessionPane(sessionId);
   if (!paneId) return null;
+  const transcript = await resolveTranscriptPath(sessionId);
+  const claudeCwd = transcript ? await latestTranscriptCwd(transcript) : null;
   const pane = (await listPanes()).find((p) => p.paneId === paneId);
-  const cwd = pane?.currentPath;
+  const cwd = claudeCwd ?? pane?.currentPath;
   if (!cwd) return null;
   const r = await Bun.$`git -C ${cwd} rev-parse --show-toplevel`.nothrow().quiet();
   if (r.exitCode !== 0) return null;
