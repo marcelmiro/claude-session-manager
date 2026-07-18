@@ -5,7 +5,9 @@
  *
  * Step through questions with ←/→ (or n/p), select options per question with 1-9
  * (single-select replaces, multi-select toggles), then `s` to submit. Produces a
- * per-question `selections` array for `answerQuestion` (number | number[] per entry).
+ * per-question `selections` array that the caller feeds to `buildAnswersMap` +
+ * `decideQuestion` (file channel) when the focus-aware hook is holding the question,
+ * falling back to `answerQuestion` send-keys for the un-intercepted native widget.
  */
 
 import { C } from "./colors";

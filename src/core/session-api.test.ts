@@ -16,7 +16,7 @@
 
 import "../../test/helpers/home";
 import { test, expect, beforeEach } from "bun:test";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   pickPane,
@@ -46,6 +46,7 @@ import {
 } from "./session-api";
 import { parseTranscript } from "./transcript";
 import { EVENTS_DIR } from "./hook-events";
+import { PENDING_DIR, DECISIONS_DIR } from "./approval";
 import { PATHS } from "./config";
 import { fixture } from "../../test/helpers/fixture";
 import type { PendingToolCall } from "./jsonl-reader";
@@ -57,7 +58,27 @@ beforeEach(() => {
   mkdirSync(EVENTS_DIR, { recursive: true });
   mkdirSync(PATHS.dir, { recursive: true });
   rmSync(PANE_SESSIONS, { force: true });
+  rmSync(PENDING_DIR, { recursive: true, force: true });
+  rmSync(DECISIONS_DIR, { recursive: true, force: true });
 });
+
+/** Seed the event log so `pendingToolCall(id)` surfaces an open AskUserQuestion. */
+function seedQuestionEvent(id: string, toolUseId: string): void {
+  writeFileSync(
+    join(EVENTS_DIR, `${id}.jsonl`),
+    JSON.stringify({
+      session_id: id,
+      hook_event_name: "PreToolUse",
+      tool_name: "AskUserQuestion",
+      tool_use_id: toolUseId,
+      tool_input: {
+        questions: [
+          { question: "Pick", header: "H", options: [{ label: "A" }, { label: "B" }], multiSelect: false },
+        ],
+      },
+    }) + "\n",
+  );
+}
 
 // --- pickPane (the resolver) ---------------------------------------------------
 
@@ -422,9 +443,36 @@ test("sendMessage: no pane mapping → no-pane, sends nothing", async () => {
   expect(r).toEqual({ ok: false, reason: "no-pane" });
 });
 
-test("answerSessionQuestion: no pane mapping → no-pane, sends nothing", async () => {
+test("answerSessionQuestion: no open question → no-question (gates before the pane check)", async () => {
   const r = await answerSessionQuestion("ghost-session", [0]);
+  expect(r).toEqual({ ok: false, reason: "no-question" });
+});
+
+test("answerSessionQuestion: open question, no hook holding, no pane → no-pane (send-keys fallback)", async () => {
+  const id = "q-nopane";
+  seedQuestionEvent(id, "tuq_1");
+  // No pending question file → decideQuestion returns false → falls through to the pane
+  // path, which has no mapping for this ghost session.
+  const r = await answerSessionQuestion(id, [0]);
   expect(r).toEqual({ ok: false, reason: "no-pane" });
+});
+
+test("answerSessionQuestion: hook holding → decideQuestion resolves via the file channel, no pane needed", async () => {
+  const id = "q-intercept";
+  seedQuestionEvent(id, "tuq_1");
+  // Simulate the question-hook holding this question.
+  mkdirSync(PENDING_DIR, { recursive: true });
+  writeFileSync(
+    join(PENDING_DIR, `${id}.json`),
+    JSON.stringify({ sessionId: id, kind: "question", tool_use_id: "tuq_1" }),
+  );
+  const r = await answerSessionQuestion(id, [1]);
+  expect(r).toEqual({ ok: true });
+  // A question decision was written carrying the selected label (keyed by question text).
+  const dec = JSON.parse(readFileSync(join(DECISIONS_DIR, `${id}.json`), "utf8"));
+  expect(dec.kind).toBe("question");
+  expect(dec.tool_use_id).toBe("tuq_1");
+  expect(dec.answers).toEqual({ Pick: "B" });
 });
 
 test("interruptSession: no pane mapping → no-pane, sends nothing", async () => {

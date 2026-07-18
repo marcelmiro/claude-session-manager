@@ -13,7 +13,7 @@
  */
 
 import { createHash, timingSafeEqual, randomUUID } from "node:crypto";
-import { existsSync, readdirSync, statSync, rmSync } from "node:fs";
+import { existsSync, readdirSync, statSync, rmSync, openSync, closeSync, unlinkSync } from "node:fs";
 import { relative } from "node:path";
 import { discoverSessions } from "../core/sessions";
 import {
@@ -443,6 +443,26 @@ function maybeGenerateNames(sessions: Session[], cache: NameCache): void {
 const clients = new Set<ReadableStreamDefaultController>();
 const encoder = new TextEncoder();
 
+// Liveness marker for the focus-aware question-intercept hook: its mtime is the only
+// on-disk signal that a phone is actually connected (the `clients` set is in-memory).
+// The hook holds an AskUserQuestion for 600s ONLY when this marker is fresh (≤40s old),
+// so nobody's-phone-connected never causes a 600s stall. Never crash the bridge.
+const BRIDGE_CONSUMER = `${PATHS.dir}/bridge-consumer`;
+function touchBridgeConsumer(): void {
+  try {
+    closeSync(openSync(BRIDGE_CONSUMER, "w")); // create/truncate → bumps mtime to now
+  } catch {
+    /* marker is best-effort */
+  }
+}
+function clearBridgeConsumer(): void {
+  try {
+    unlinkSync(BRIDGE_CONSUMER);
+  } catch {
+    /* already gone */
+  }
+}
+
 function pushAll(frame: Uint8Array): void {
   for (const c of clients) {
     try {
@@ -482,10 +502,12 @@ function streamResponse(): Response {
     start(controller) {
       self = controller;
       clients.add(controller);
+      touchBridgeConsumer(); // a phone is now connected — mark it fresh
       controller.enqueue(encoder.encode(": connected\n\n"));
     },
     cancel() {
       clients.delete(self);
+      if (clients.size === 0) clearBridgeConsumer(); // last phone gone — go stale now
     },
   });
   return new Response(stream, {
@@ -631,8 +653,9 @@ async function route(req: Request): Promise<Response> {
     const id = decodeURIComponent(decision[1]!);
     // Detached (blocking-hook) approvals resolve via the decision file; an attached
     // session has no such file, so drive its on-screen prompt with pane keystrokes.
-    if (listPendingApprovals().some((a) => a.sessionId === id)) {
-      decideApproval(id, body.decision, reason);
+    const blocked = listPendingApprovals().find((a) => a.sessionId === id);
+    if (blocked) {
+      decideApproval(id, body.decision, { reason, toolUseId: blocked.tool_use_id });
       markPortkeySource(id);
       return json({ ok: true });
     }
@@ -809,7 +832,10 @@ export function startBridge(): void {
     console.error("EVENTS_DIR not found: live push disabled; restart bridge after csm setup");
   }
   watchEvents((id) => broadcast({ type: "session-changed", id }));
-  setInterval(() => pushAll(encoder.encode(":\n\n")), 15_000);
+  setInterval(() => {
+    if (clients.size > 0) touchBridgeConsumer(); // keep the marker fresh while a phone is live
+    pushAll(encoder.encode(":\n\n"));
+  }, 15_000);
 
   // Sync the unread/⚡ set from the monitor (which rewrites state.json ~every 3s). Only
   // broadcast when the set of needs-attention panes actually changes, so a Mac-side

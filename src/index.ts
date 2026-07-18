@@ -10,7 +10,7 @@ import { switchToPane, getMainSession, killPane, sendKeys, sendKeysSequential, s
 import { loadNameCache, getSessionName, generateAIName, saveNameCache, normalizeName, slugify, type NameCache } from "./core/names";
 import { loadConfig } from "./core/config";
 import { loadState, saveState, loadPaneSessions } from "./core/state";
-import { listPendingApprovals, decideApproval } from "./core/approval";
+import { listPendingApprovals, decideApproval, decideQuestion, buildAnswersMap } from "./core/approval";
 import { syncWindowPrefix, buildBaseName } from "./core/notifications";
 import { discoverRepos, listBranches, fetchRepo, getDefaultBranch, branchCheckedOutPath } from "./core/git";
 import { buildLaunchCommand } from "./core/launch-command";
@@ -393,6 +393,16 @@ async function safeUpdatePreview(
   const pending = await updatePreview(previewBox, session, opts);
   if (gen === previewGeneration) {
     cachedPendingToolCall = pending ?? null;
+    // Keep an open multi-question picker in sync with the live prompt: if the pending
+    // question cleared, close it; if a DIFFERENT question opened (Q1 resolved, Q2 up —
+    // new tool_use_id), re-open on the new set rather than answering the stale one.
+    if (multiQuestionPicker) {
+      const openId = multiQuestionPicker.questions[0]?.toolUseId;
+      const liveQs = cachedPendingToolCall?.questions;
+      const liveId = liveQs?.[0]?.toolUseId;
+      if (!liveQs || liveQs.length <= 1) closeQuestionPicker();
+      else if (liveId !== openId) openQuestionPicker(liveQs);
+    }
     return true;
   }
   return false;
@@ -704,7 +714,8 @@ async function handleFork() {
 
   cleanup();
   try {
-    const cmd = `claude --resume=${session.id} --fork-session; exec zsh -l`;
+    const forkId = crypto.randomUUID();
+    const cmd = `claude --session-id ${forkId} --resume=${session.id} --fork-session; exec zsh -l`;
     await Bun.$`tmux new-window -a -t ${targetSession} -n ${forkName} -c ${effectivePath} zsh -c ${cmd}`.quiet();
   } catch {
     // ignore
@@ -822,9 +833,11 @@ screen.on("keypress", async (_ch: string, key: any) => {
   if (ch === "y" && !key.shift && !key.ctrl && !key.meta) {
     spaceMenuHandledKey = true;
     queueMicrotask(() => { spaceMenuHandledKey = false; });
-    const blocked = session.id && listPendingApprovals().some((p) => p.sessionId === session.id);
+    const blocked = session.id
+      ? listPendingApprovals().find((p) => p.sessionId === session.id)
+      : undefined;
     if (blocked) {
-      decideApproval(session.id, "allow");
+      decideApproval(session.id, "allow", { toolUseId: blocked.tool_use_id });
     } else {
       await sendKeys(paneId, ["Enter"]);
     }
@@ -866,8 +879,13 @@ screen.on("keypress", async (_ch: string, key: any) => {
         spaceMenuHandledKey = true;
         queueMicrotask(() => { spaceMenuHandledKey = false; });
         const idx = num - 1;
+        const selections = [q.multiSelect ? [idx] : idx];
+        // Intercepted (you answered from the phone / walked away, hook holding) → resolve
+        // via the decision file; else drive the live native widget with keys (at the desk).
         // multiSelect submits via the Submit tab; single-select Enters on the option.
-        await answerQuestion(paneId, [q.multiSelect ? [idx] : idx]);
+        if (!decideQuestion(session.id, cachedPendingToolCall.toolUseId, buildAnswersMap([q], selections))) {
+          await answerQuestion(paneId, selections);
+        }
         optimisticApprove(session);
         await advanceToNextWaiting();
         screen.render();
@@ -917,12 +935,22 @@ screen.on("keypress", async (_ch: string, key: any) => {
     case "submit": {
       const session = getSelectedSession();
       const paneId = session?.tmuxPane?.paneId;
+      // Capture the picker's questions before closing — they're the exact set
+      // `action.selections` was scored against, and share one tool_use_id.
+      const qs = multiQuestionPicker.questions;
+      const toolUseId = qs[0]?.toolUseId ?? "";
       closeQuestionPicker();
-      if (!paneId) {
-        flashStatusMessage(`{${C.dim}-fg}No active pane{/${C.dim}-fg}`);
-        break;
+      // Intercepted → resolve via the decision file (no live pane needed); else send keys.
+      const resolved = session
+        ? decideQuestion(session.id, toolUseId, buildAnswersMap(qs, action.selections))
+        : false;
+      if (!resolved) {
+        if (!paneId) {
+          flashStatusMessage(`{${C.dim}-fg}No active pane{/${C.dim}-fg}`);
+          break;
+        }
+        await answerQuestion(paneId, action.selections);
       }
-      await answerQuestion(paneId, action.selections);
       if (session) optimisticApprove(session);
       await advanceToNextWaiting();
       screen.render();

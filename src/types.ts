@@ -275,4 +275,7 @@ export interface PendingApproval {
   tool: string;
   tool_use_id: string;
   input: unknown;
+  /** Absent ⇒ approval (back-compat with in-flight files). "question" records are a
+   * held AskUserQuestion intercept and are filtered out of the approvals list. */
+  kind?: "approval" | "question";
 }

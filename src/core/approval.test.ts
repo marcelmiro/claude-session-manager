@@ -11,6 +11,8 @@ import { test, expect, beforeEach } from "bun:test";
 import { mkdirSync, rmSync, writeFileSync, readFileSync, existsSync } from "node:fs";
 import {
   decideApproval,
+  decideQuestion,
+  buildAnswersMap,
   listPendingApprovals,
   reapDeadSessionFiles,
   PENDING_DIR,
@@ -18,6 +20,12 @@ import {
 } from "./approval";
 import { EVENTS_DIR, eventLogPath } from "./hook-events";
 import type { HookEvent } from "../types";
+import type { PendingQuestion } from "./jsonl-reader";
+
+/** Minimal PendingQuestion for the answers-map tests. */
+function q(question: string, labels: string[], multiSelect = false): PendingQuestion {
+  return { question, header: "H", options: labels.map((label) => ({ label })), multiSelect, toolUseId: "tu_q" };
+}
 
 beforeEach(() => {
   for (const dir of [EVENTS_DIR, PENDING_DIR, DECISIONS_DIR]) {
@@ -36,10 +44,59 @@ test("decideApproval(allow) writes a decision file with no reason", () => {
 });
 
 test("decideApproval(deny, reason) records the reason", () => {
-  decideApproval("sess-b", "deny", "not allowed here");
+  decideApproval("sess-b", "deny", { reason: "not allowed here" });
   const payload = JSON.parse(readFileSync(`${DECISIONS_DIR}/sess-b.json`, "utf8"));
   expect(payload.decision).toBe("deny");
   expect(payload.reason).toBe("not allowed here");
+});
+
+test("decideApproval records kind:approval + tool_use_id when supplied", () => {
+  decideApproval("sess-tu", "allow", { toolUseId: "tu_42" });
+  const payload = JSON.parse(readFileSync(`${DECISIONS_DIR}/sess-tu.json`, "utf8"));
+  expect(payload.kind).toBe("approval");
+  expect(payload.tool_use_id).toBe("tu_42");
+});
+
+test("buildAnswersMap: single-select → label; multi-select → comma-joined; multi-question", () => {
+  const questions = [q("Pick a fruit", ["Apple", "Banana", "Cherry"]), q("Toppings", ["Nuts", "Sauce"], true)];
+  expect(buildAnswersMap(questions, [2, [0, 1]])).toEqual({
+    "Pick a fruit": "Cherry",
+    Toppings: "Nuts,Sauce",
+  });
+});
+
+test("decideQuestion writes a matching question decision and returns true", () => {
+  const id = "q-hold";
+  writeFileSync(
+    `${PENDING_DIR}/${id}.json`,
+    JSON.stringify({ sessionId: id, kind: "question", tool_use_id: "tu_q" }),
+  );
+  expect(decideQuestion(id, "tu_q", { Pick: "B" })).toBe(true);
+  const dec = JSON.parse(readFileSync(`${DECISIONS_DIR}/${id}.json`, "utf8"));
+  expect(dec.kind).toBe("question");
+  expect(dec.tool_use_id).toBe("tu_q");
+  expect(dec.answers).toEqual({ Pick: "B" });
+});
+
+test("decideQuestion returns false (no channel) when no hook is holding — drives the send-keys fallback", () => {
+  // No pending file at all.
+  expect(decideQuestion("q-absent", "tu_q", { Pick: "B" })).toBe(false);
+  // Pending file exists but tool_use_id mismatches → still false (stale hold).
+  const id = "q-mismatch";
+  writeFileSync(
+    `${PENDING_DIR}/${id}.json`,
+    JSON.stringify({ sessionId: id, kind: "question", tool_use_id: "tu_other" }),
+  );
+  expect(decideQuestion(id, "tu_q", { Pick: "B" })).toBe(false);
+  expect(existsSync(`${DECISIONS_DIR}/${id}.json`)).toBe(false);
+});
+
+test("listPendingApprovals skips kind:question records (they're not approvals)", () => {
+  writeFileSync(
+    `${PENDING_DIR}/q-only.json`,
+    JSON.stringify({ sessionId: "q-only", kind: "question", tool_use_id: "tu_q", tool: "AskUserQuestion" }),
+  );
+  expect(listPendingApprovals()).toEqual([]);
 });
 
 test("listPendingApprovals enriches `input` from the logged PreToolUse event", () => {

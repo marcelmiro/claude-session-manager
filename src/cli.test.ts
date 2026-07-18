@@ -1,7 +1,7 @@
 /**
  * `setup()` idempotency (Inc setup). Two runs under a temp $HOME must leave exactly
  * one CSM registration per event, preserve pre-existing user hooks + other settings
- * keys, and write the hook scripts stamped CSM_HOOK_VERSION=7.
+ * keys, and write the hook scripts stamped CSM_HOOK_VERSION=10.
  *
  * `home` helper first — cli → hook-events → config freezes paths from $HOME; setup
  * itself re-reads homedir() at call time, so it targets the same temp HOME.
@@ -78,11 +78,23 @@ test("running setup() twice leaves exactly one CSM entry per event and preserves
   expect(pre.hooks[0].timeout).toBe(600);
 });
 
-test("setup() writes the three hook scripts stamped CSM_HOOK_VERSION=7", async () => {
+test("setup() writes the three hook scripts stamped CSM_HOOK_VERSION=10", async () => {
   await setup();
   for (const name of ["session-start", "event", "pretooluse"]) {
     const path = `${hooksDir}/${name}.sh`;
     expect(existsSync(path)).toBe(true);
-    expect(readFileSync(path, "utf8")).toContain("# CSM_HOOK_VERSION=7");
+    expect(readFileSync(path, "utf8")).toContain("# CSM_HOOK_VERSION=10");
   }
+});
+
+test("pretooluse.sh branches AskUserQuestion to the focus-aware question intercept", async () => {
+  await setup();
+  const pre = readFileSync(`${hooksDir}/pretooluse.sh`, "utf8");
+  // The intercept branch: tracked pane + live marker + focus, then csm question-hook.
+  expect(pre).toContain('if [ "$TOOL" = "AskUserQuestion" ]');
+  expect(pre).toContain("csm question-hook");
+  expect(pre).toContain("bridge-consumer");
+  // No claude-version gate (dropped 2026-07-18) — updatedInput is assumed forward-compatible.
+  expect(pre).not.toContain("claude --version");
+  expect(pre).not.toContain("RUNNING");
 });

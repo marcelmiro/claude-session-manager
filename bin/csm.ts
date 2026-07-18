@@ -59,6 +59,10 @@ switch (cmd) {
   case "restore-sessions":
     await import("../src/cli").then((m) => m.restoreSessions());
     break;
+  case "question-hook":
+    // Internal — invoked by pretooluse.sh to hold+answer an intercepted AskUserQuestion.
+    await import("../src/cli").then((m) => m.questionHook());
+    break;
   case "bridge":
     try {
       await import("../src/bridge/server").then((m) => m.startBridge());

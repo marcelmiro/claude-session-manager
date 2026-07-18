@@ -19,6 +19,8 @@ import { eventSourcedStatus } from "./core/hook-events";
 import { nativeStatus } from "./core/session-state";
 import { loadNameCache, slugify } from "./core/names";
 import { PATHS } from "./core/config";
+import { PENDING_DIR, DECISIONS_DIR } from "./core/approval";
+import { mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 
 const home = homedir();
 
@@ -449,7 +451,7 @@ function isSubsequence(sub: string, str: string): boolean {
 // csm setup
 // ---------------------------------------------------------------------------
 
-const HOOK_VERSION = 7;
+const HOOK_VERSION = 10;
 
 // SessionStart pane→session mapper. Writes one file per pane (panes/<paneId> → sessionId)
 // atomically (temp+rename) — the hook OWNS the map, so there's no shared-file write race and
@@ -508,7 +510,8 @@ ${LOG_EVENT_SNIPPET}
 // full tool_input is recovered by listPendingApprovals from the logged event.
 const PRETOOLUSE_HOOK_SCRIPT = `#!/bin/bash
 # CSM_HOOK_VERSION=${HOOK_VERSION}
-# CSM PreToolUse handler — log, then attach-aware blocking approval.
+# CSM PreToolUse handler — log, then focus-aware AskUserQuestion intercept, then
+# attach-aware blocking approval.
 ${LOG_EVENT_SNIPPET}
 
 # Derive the session from \$TMUX_PANE (A6). Outside tmux → neutral, never block.
@@ -517,15 +520,50 @@ SESS=$(tmux display-message -p -t "\$TMUX_PANE" '#{session_name}' 2>/dev/null)
 [ -z "\$SESS" ] && exit 0
 [ -z "\$SESSION_ID" ] && exit 0
 
+# Tool + tool_use_id, derived once — shared by the question intercept and the
+# approval block-poll below.
+TOOL=$(printf '%s' "\$INPUT" | grep -oE '"tool_name"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | cut -d'"' -f4)
+TUID=$(printf '%s' "\$INPUT" | grep -oE '"tool_use_id"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | cut -d'"' -f4)
+
+# AskUserQuestion → focus-aware intercept. Checks run cheap→expensive; ANY miss or
+# ambiguity exits 0 (native 60s widget) — never hold a session hostage when unsure.
+# The one spawn (lsappinfo ~8ms) runs ONLY on this path, and only inside the
+# possibly-focused sub-branch after the cheap file/tmux checks already say intercept.
+# No claude-version gate: updatedInput.answers is assumed forward-compatible; if a
+# future claude breaks it the phone-answer just won't take (visibly degraded) rather
+# than silently reverting the feature on every routine patch bump.
+if [ "\$TOOL" = "AskUserQuestion" ]; then
+  # 1. CSM-tracked pane (rules out an ad-hoc bare-terminal claude).
+  [ -f "\$HOME/.config/csm/panes/\$TMUX_PANE" ] || exit 0
+  # 2. Live bridge consumer: marker mtime <=40s (tolerates one missed 15s heartbeat).
+  #    Stale/absent → nobody can answer → native widget, no 600s stall.
+  M="\$HOME/.config/csm/bridge-consumer"
+  MT=$(stat -f %m "\$M" 2>/dev/null || echo 0)
+  if [ "\$MT" = 0 ] || [ $(( $(date +%s) - MT )) -ge 40 ]; then exit 0; fi
+  # 3. Focus (three-part): active window + attached client (cheap tmux), and only then
+  #    the frontmost app (lsappinfo — no TCC prompt, unlike osascript). All three true
+  #    ⇒ you're looking ⇒ let the native widget render (the reverted-plan regression).
+  WA=$(tmux display-message -p -t "\$TMUX_PANE" '#{window_active}' 2>/dev/null)
+  CL=$(tmux list-clients -t "\$SESS" 2>/dev/null)
+  if [ "\$WA" = "1" ] && [ -n "\$CL" ]; then
+    FRONT=$(lsappinfo info -only name "$(lsappinfo front)" 2>/dev/null)
+    # Fail toward native: unreadable/empty frontmost ⇒ treat as focused (exit 0). Only a
+    # positively-identified OTHER app frontmost (you're on your phone) is NOT focused.
+    case "\$FRONT" in
+      ''|*'"Ghostty"'*) exit 0 ;;
+    esac
+  fi
+  # All gates passed → hold (600s) and answer via the file channel.
+  printf '%s' "\$INPUT" | csm question-hook
+  exit \$?
+fi
+
 # Attached client → fall through to the instant desk TUI prompt (no lag).
 if [ -n "$(tmux list-clients -t "\$SESS" 2>/dev/null)" ]; then
   exit 0
 fi
 
 # Detached → register the pending approval and block-poll for a decision.
-TOOL=$(printf '%s' "\$INPUT" | grep -oE '"tool_name"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | cut -d'"' -f4)
-TUID=$(printf '%s' "\$INPUT" | grep -oE '"tool_use_id"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | cut -d'"' -f4)
-
 # ADR-3 fix: don't block on calls Claude would auto-approve anyway, or a detached
 # (autonomous/subagent-heavy) session stalls up to 600s per call. bypassPermissions
 # never prompts; read-only tools never prompt in any mode. Only tools that could
@@ -545,15 +583,21 @@ printf '{"sessionId":"%s","ts":%s,"tool":"%s","tool_use_id":"%s"}\\n' "\$SESSION
 i=0
 while [ "\$i" -lt 1200 ]; do          # 1200 × 0.5s = 600s (the hook timeout)
   if [ -f "\$DFILE" ]; then
-    DECISION=$(grep -oE '"decision"[[:space:]]*:[[:space:]]*"[^"]*"' "\$DFILE" | head -1 | cut -d'"' -f4)
-    REASON=$(grep -oE '"reason"[[:space:]]*:[[:space:]]*"[^"]*"' "\$DFILE" | head -1 | cut -d'"' -f4)
-    rm -f "\$DFILE" "\$PDIR/\$SESSION_ID".json
-    if [ "\$DECISION" = "allow" ]; then
-      printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow"}}\\n'
-      exit 0
-    elif [ "\$DECISION" = "deny" ]; then
-      printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"%s"}}\\n' "\$REASON"
-      exit 0
+    KIND=$(grep -oE '"kind"[[:space:]]*:[[:space:]]*"[^"]*"' "\$DFILE" | head -1 | cut -d'"' -f4)
+    DTUID=$(grep -oE '"tool_use_id"[[:space:]]*:[[:space:]]*"[^"]*"' "\$DFILE" | head -1 | cut -d'"' -f4)
+    # Consume only our OWN approval decision: skip a stale question decision, and skip
+    # an approval whose tool_use_id (when present) belongs to a different call.
+    if [ "\$KIND" != "question" ] && { [ -z "\$DTUID" ] || [ "\$DTUID" = "\$TUID" ]; }; then
+      DECISION=$(grep -oE '"decision"[[:space:]]*:[[:space:]]*"[^"]*"' "\$DFILE" | head -1 | cut -d'"' -f4)
+      REASON=$(grep -oE '"reason"[[:space:]]*:[[:space:]]*"[^"]*"' "\$DFILE" | head -1 | cut -d'"' -f4)
+      rm -f "\$DFILE" "\$PDIR/\$SESSION_ID".json
+      if [ "\$DECISION" = "allow" ]; then
+        printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow"}}\\n'
+        exit 0
+      elif [ "\$DECISION" = "deny" ]; then
+        printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"%s"}}\\n' "\$REASON"
+        exit 0
+      fi
     fi
   fi
   sleep 0.5
@@ -825,4 +869,77 @@ export async function restoreSessions(): Promise<void> {
   if (restored === 0 && skipped === 0) {
     console.log("No matching panes found for saved sessions.");
   }
+}
+
+// ---------------------------------------------------------------------------
+// csm question-hook (invoked by pretooluse.sh for an intercepted AskUserQuestion)
+// ---------------------------------------------------------------------------
+
+/**
+ * `csm question-hook` — invoked by `pretooluse.sh` ONLY for an intercept-eligible
+ * AskUserQuestion (tracked pane + live phone + not focused).
+ * Reads the hook stdin, registers a `pending/<session_id>.json` (kind:"question")
+ * marker so both surfaces know a question is held, then block-polls
+ * `decisions/<session_id>.json` for a matching answer (every 500ms, up to the 600s
+ * hook window). On a match it emits `updatedInput.answers` (keyed by question text) so
+ * Claude resolves the tool with no native 60s widget; on timeout it exits 0 neutral
+ * (the native widget's own timer becomes the floor). stdin is parsed with JSON.parse,
+ * not shell greps — arbitrary question/label text needs real JSON escaping.
+ */
+export async function questionHook(): Promise<void> {
+  let input: any;
+  try {
+    input = JSON.parse(await Bun.stdin.text());
+  } catch {
+    process.exit(0); // unreadable stdin → neutral (native widget)
+  }
+  const sessionId: string = input?.session_id ?? "";
+  const toolUseId: string = input?.tool_use_id ?? "";
+  const questions = input?.tool_input?.questions;
+  if (!sessionId || !toolUseId || !Array.isArray(questions)) process.exit(0);
+
+  const pendingFile = `${PENDING_DIR}/${sessionId}.json`;
+  const decisionFile = `${DECISIONS_DIR}/${sessionId}.json`;
+  try {
+    mkdirSync(PENDING_DIR, { recursive: true });
+    writeFileSync(
+      pendingFile,
+      JSON.stringify({
+        sessionId,
+        ts: Date.now(),
+        kind: "question",
+        tool_use_id: toolUseId,
+        tool: "AskUserQuestion",
+      }),
+    );
+  } catch {
+    process.exit(0); // can't register the hold → neutral
+  }
+
+  for (let i = 0; i < 1200; i++) {
+    // 1200 × 500ms = 600s (the PreToolUse hook window).
+    try {
+      const raw = JSON.parse(readFileSync(decisionFile, "utf8"));
+      if (raw.kind === "question" && raw.tool_use_id === toolUseId) {
+        rmSync(decisionFile, { force: true });
+        rmSync(pendingFile, { force: true });
+        process.stdout.write(
+          JSON.stringify({
+            hookSpecificOutput: {
+              hookEventName: "PreToolUse",
+              permissionDecision: "allow",
+              updatedInput: { questions, answers: raw.answers ?? {} },
+            },
+          }),
+        );
+        process.exit(0);
+      }
+    } catch {
+      // no decision yet (or a torn/mismatched file) — keep waiting
+    }
+    await Bun.sleep(500);
+  }
+
+  rmSync(pendingFile, { force: true });
+  process.exit(0); // timeout → neutral → native-widget floor
 }

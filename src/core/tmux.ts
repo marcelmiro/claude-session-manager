@@ -211,19 +211,28 @@ export async function sendBracketedPaste(paneId: string, text: string): Promise<
 
 /**
  * Launch `claude` in a NEW tmux window in `repoPath`, inserted after the active
- * window (`-a`), mirroring the TUI's simple-case new-session launch (index.ts). The
- * window command is `claude` directly — no shell wrapper — so there's no send-keys
- * race with shell init. `targetSession` is `session:windowId` from getMainSession().
- * Returns the new window's pane id (`-P -F '#{pane_id}'`) so the caller can wait for
- * that pane's SessionStart hook to register the fresh session id.
+ * window (`-a`), mirroring the TUI's simple-case new-session launch (index.ts).
+ * `targetSession` is `session:windowId` from getMainSession(). The session id is
+ * dictated with `--session-id` (minted by the caller) rather than learned from the
+ * SessionStart hook after boot, so the caller holds it up front.
+ *
+ * Wrapped in a login shell (`zsh -c '…; exec zsh -l'`, same convention as
+ * launchResumeWindow) rather than exec'd bare: when the bridge daemon (not a tmux
+ * client) creates the window, tmux execs the command with the session's minimal
+ * environment, and `claude --session-id` then exits 1 during its session-file init —
+ * verified live. A login shell sets up the full environment `--session-id` needs, and
+ * `exec zsh -l` leaves an inspectable shell if claude ever does exit. Returns the new
+ * window's pane id (`-P -F '#{pane_id}'`).
  */
 export async function launchClaudeWindow(
   targetSession: string,
   repoPath: string,
   name: string,
+  sessionId: string,
 ): Promise<string> {
+  const cmd = `claude --session-id ${sessionId}; exec zsh -l`;
   const out =
-    await Bun.$`tmux new-window -a -t ${targetSession} -n ${name} -c ${repoPath} -P -F ${"#{pane_id}"} claude`
+    await Bun.$`tmux new-window -a -t ${targetSession} -n ${name} -c ${repoPath} -P -F ${"#{pane_id}"} zsh -c ${cmd}`
       .quiet()
       .text();
   return out.trim();

@@ -15,7 +15,7 @@ import { Glob } from "bun";
 import { homedir } from "os";
 import { lastAssistantMessage, parseActiveBranch, parseTranscript } from "./transcript";
 import { pendingToolCall } from "./hook-events";
-import { loadPaneSessions } from "./state";
+import { loadPaneSessions, savePaneSessions } from "./state";
 import { findClaudeProcesses } from "./process";
 import {
   listPanes,
@@ -31,6 +31,7 @@ import {
   killPane,
 } from "./tmux";
 import { isPermissionPrompt } from "./status";
+import { decideQuestion, buildAnswersMap } from "./approval";
 import type { PendingQuestion, PendingToolCall } from "./jsonl-reader";
 import type { TranscriptBlock, TranscriptTurn } from "../types";
 
@@ -151,7 +152,7 @@ export async function readPaneStatusline(paneId: string): Promise<PaneStatusline
 export type SendResult = {
   ok: boolean;
   reason?: "no-pane" | "no-question" | "no-prompt" | "no-session" | "rewind-unavailable" | "rewind-mismatch" | "rewind-mode" | "bad-image" | "bad-selection" | "no-confirm" | "no-repo" | "no-transcript" | "resume-failed" | "not-found";
-  /** Fresh session id, set by createSession once the new pane's SessionStart hook lands. */
+  /** Fresh session id, set by createSession to the dictated id. */
   sessionId?: string;
 };
 
@@ -160,11 +161,13 @@ export type SendResult = {
  * `n` wizard's simple case — current branch, no worktree). Rejects when no main tmux
  * session is resolvable (e.g. the bridge is running outside tmux).
  *
- * Returns the new session's id by waiting for its SessionStart hook to write
- * `paneId → sessionId` into `pane-sessions.json` (claude boot ~1-4s). This is
- * deterministic — the caller opens exactly this session — and sidesteps the discovery
- * heuristics that, during the boot window, can mis-map the not-yet-registered pane to
- * a recently-modified existing session (the mtime fallback in enrichUnmatchedSessions).
+ * Mints the session id up front (`crypto.randomUUID()`) and dictates it via
+ * `claude --session-id <uuid>`, returning it directly — no waiting on the SessionStart
+ * hook. This is deterministic (the caller opens exactly this session) and sidesteps the
+ * discovery heuristics that, during the boot window, can mis-map the not-yet-registered
+ * pane to a recently-modified existing session (the mtime fallback in
+ * enrichUnmatchedSessions). We still wait for the statusline to render so an instant
+ * phone message doesn't drop into the boot window.
  */
 // Claude Code's one-time "Is this a project you trust?" gate for an untrusted
 // folder (`hasTrustDialogAccepted:false` in ~/.claude.json). It blocks boot and
@@ -177,19 +180,24 @@ const TRUST_PROMPT = "Is this a project you created or one you trust";
 export async function createSession(repoPath: string, name: string): Promise<SendResult> {
   const target = await getMainSession();
   if (!target) return { ok: false, reason: "no-session" };
-  const paneId = await launchClaudeWindow(target, repoPath, name);
+  const sessionId = crypto.randomUUID();
+  const paneId = await launchClaudeWindow(target, repoPath, name, sessionId);
+  // We minted the id, so the pane→session map is known now — write it ourselves so a phone
+  // send resolves the pane immediately, without waiting on the SessionStart hook's write.
+  await savePaneSessions({ [paneId]: sessionId });
   let trusted = false;
   for (let i = 0; i < 24; i++) {
-    await Bun.sleep(500); // up to ~12s for claude to boot and fire SessionStart
-    const sessionId = (await loadPaneSessions())[paneId];
-    if (sessionId) return { ok: true, sessionId };
-    // Accept the trust gate once if it's showing; then keep polling for the id.
+    await Bun.sleep(500); // up to ~12s for claude to boot and render its prompt
+    // Statusline rendered = prompt live/sendable, so an instant phone message doesn't drop
+    // into the boot window (mirrors restoreSession's gate).
+    if ((await readPaneStatusline(paneId)).statusline) return { ok: true, sessionId };
+    // Accept the trust gate once if it's showing; then keep waiting for the prompt.
     if (!trusted && (await capturePane(paneId)).includes(TRUST_PROMPT)) {
       await sendKey(paneId, "Enter");
       trusted = true;
     }
   }
-  return { ok: true }; // launched, but the id didn't register in time — list catches up via SSE
+  return { ok: true, sessionId }; // launched; statusline slow to render (residual, matches restoreSession)
 }
 
 /**
@@ -1051,21 +1059,29 @@ export function inputPending(capture: string): boolean {
 /**
  * Answer an open AskUserQuestion by option index (0-based). Gates on an open question
  * being present — NOT bare `waiting`, which also covers permission prompts (those
- * route to `decideApproval`, never here). Rejects with a reason and sends nothing
- * when the pane is gone or no question is open.
+ * route to `decideApproval`, never here). The decision-file channel is tried FIRST:
+ * when the focus-aware PreToolUse hook is holding this question, `decideQuestion`
+ * resolves it via `updatedInput.answers` (no live pane needed). Only the un-intercepted
+ * (native-widget) case — not tracked, no live phone, or focused — falls through to
+ * send-keys, which does need a pane. Rejects when no question is open or the length is off.
  */
 export async function answerSessionQuestion(
   sessionId: string,
   selections: (number | number[])[],
 ): Promise<SendResult> {
-  const paneId = await resolveSessionPane(sessionId);
-  if (!paneId) return { ok: false, reason: "no-pane" };
   const pending = pendingToolCall(sessionId);
   if (!hasOpenQuestion(pending)) return { ok: false, reason: "no-question" };
   // One selection per question — a length mismatch means the client is out of sync
   // with the live prompt; reject before sending any keystroke to a wrong tab.
-  const count = pending!.questions?.length ?? 1;
-  if (selections.length !== count) return { ok: false, reason: "bad-selection" };
+  const questions = pending!.questions ?? [pending!.question!];
+  if (selections.length !== questions.length) return { ok: false, reason: "bad-selection" };
+  // Intercepted by the hook → answer via the decision file, no pane required.
+  if (decideQuestion(sessionId, pending!.toolUseId, buildAnswersMap(questions, selections))) {
+    return { ok: true };
+  }
+  // Un-intercepted (native widget) → drive the live pane.
+  const paneId = await resolveSessionPane(sessionId);
+  if (!paneId) return { ok: false, reason: "no-pane" };
   await answerQuestion(paneId, selections);
   return { ok: true };
 }

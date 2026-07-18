@@ -21,6 +21,17 @@ export function sessionIdFromCommand(command: string): string | undefined {
   return m?.[1];
 }
 
+const UUID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/;
+
+/** The id CSM dictated with `--session-id <uuid>` (create-only, so it IS the session's own id),
+ *  or undefined. Authoritative for BOTH a CSM fork (whose hook records the parent id) and a
+ *  CSM-created session — it's on the command line the instant the pane launches, before any
+ *  hook or native file exists. External forks/sessions carry no `--session-id`, so they keep
+ *  the native-file / --resume resolution below. */
+export function dictatedSessionId(command: string): string | undefined {
+  return command.match(new RegExp(`--session-id[\\s=]+(${UUID_RE.source})`))?.[1];
+}
+
 /**
  * Finds running Claude Code CLI processes and maps them to TTYs.
  * Parses `ps -eo pid,tty,command` output to locate processes whose
@@ -66,18 +77,20 @@ export async function findClaudeProcesses(): Promise<ClaudeProcess[]> {
       // Skip entries with no associated TTY
       if (tty === "??") continue;
 
-      // Extract session ID from --resume/-r (fast, no lsof needed); a fork's
-      // --resume points at its PARENT, so sessionIdFromCommand suppresses it.
-      // For a fork, recover the REAL id from Claude's per-pid native file — the
-      // hook only ever records the parent id (see nativeSessionIdByPid). This
-      // also lets claudeTtyMap prefer the real `claude` binary over its `zsh -c`
-      // wrapper (both carry `--fork-session`, but only the binary has a native
-      // file), since it's the process that now has a resolved sessionId.
+      // Prefer an id CSM dictated with `--session-id` — authoritative and instant for
+      // both a CSM fork (whose hook records the PARENT id) and a CSM-created session,
+      // present on the command line before any hook or native file exists. Otherwise
+      // extract from --resume/-r (fast, no lsof); a fork's --resume points at its PARENT,
+      // so sessionIdFromCommand suppresses it, and the REAL id is recovered from Claude's
+      // per-pid native file (the hook only ever records the parent id — see
+      // nativeSessionIdByPid). Native recovery also lets claudeTtyMap prefer the real
+      // `claude` binary over its `zsh -c` wrapper (both carry `--fork-session`, but only
+      // the binary has a native file), since it's the process with a resolved sessionId.
       const pid = parseInt(pidStr, 10);
       const isFork = /--fork-session\b/.test(command);
-      const sessionId = isFork
-        ? ((await nativeSessionIdByPid(pid)) ?? undefined)
-        : sessionIdFromCommand(command);
+      const sessionId =
+        dictatedSessionId(command) ??
+        (isFork ? ((await nativeSessionIdByPid(pid)) ?? undefined) : sessionIdFromCommand(command));
       results.push({ pid, tty, command, sessionId, isFork });
     }
 

@@ -16,6 +16,7 @@ import { PATHS } from "./config";
 import { readEvents, EVENTS_DIR } from "./hook-events";
 import { SOURCE_DIR } from "./input-source";
 import type { PendingApproval } from "../types";
+import type { PendingQuestion } from "./jsonl-reader";
 
 export const PENDING_DIR = `${PATHS.dir}/pending`;
 export const DECISIONS_DIR = `${PATHS.dir}/decisions`;
@@ -34,6 +35,8 @@ export function listPendingApprovals(): PendingApproval[] {
     if (!f.endsWith(".json")) continue;
     try {
       const raw = JSON.parse(readFileSync(`${PENDING_DIR}/${f}`, "utf8"));
+      // A held AskUserQuestion intercept shares this dir but is not an approval.
+      if (raw.kind === "question") continue;
       const sessionId: string = raw.sessionId ?? f.replace(/\.json$/, "");
       // The shell writes a minimal record; enrich `input` from the logged
       // PreToolUse event (full tool_input is already in the event log).
@@ -93,19 +96,75 @@ export function reapDeadSessionFiles(liveSessionIds: Set<string>): void {
 
 /**
  * Resolve a pending approval. Writes `decisions/<sessionId>.json`; the blocking
- * hook polls it (every 500ms) and maps `decision` to `permissionDecision`.
+ * hook polls it (every 500ms) and maps `decision` to `permissionDecision`. The
+ * `tool_use_id` lets the hardened poll consume only its own decision — a stale
+ * question decision (or a mismatched approval) must not satisfy this block.
  */
 export function decideApproval(
   sessionId: string,
   decision: "allow" | "deny",
-  reason?: string,
+  opts?: { reason?: string; toolUseId?: string },
 ): void {
   try {
     mkdirSync(DECISIONS_DIR, { recursive: true });
-    const payload: Record<string, unknown> = { sessionId, decision, ts: Date.now() };
-    if (reason) payload.reason = reason;
+    const payload: Record<string, unknown> = {
+      sessionId,
+      kind: "approval",
+      decision,
+      ts: Date.now(),
+    };
+    if (opts?.toolUseId) payload.tool_use_id = opts.toolUseId;
+    if (opts?.reason) payload.reason = opts.reason;
     writeFileSync(`${DECISIONS_DIR}/${sessionId}.json`, JSON.stringify(payload));
   } catch {
     // Non-fatal — the hook's 600s timeout falls through to the desk TUI prompt.
   }
+}
+
+/**
+ * Resolve a held AskUserQuestion intercept. Writes `decisions/<sessionId>.json`
+ * (kind:"question") ONLY when a matching `pending/<sessionId>.json` (kind:"question"
+ * and same `tool_use_id`) is actually being held by the question-hook. Returns
+ * whether it wrote — the caller uses `false` (no hook holding) to fall back to the
+ * send-keys path (un-intercepted / native-widget case).
+ */
+export function decideQuestion(
+  sessionId: string,
+  toolUseId: string,
+  answers: Record<string, string>,
+): boolean {
+  try {
+    const raw = JSON.parse(readFileSync(`${PENDING_DIR}/${sessionId}.json`, "utf8"));
+    if (raw.kind !== "question" || raw.tool_use_id !== toolUseId) return false;
+    mkdirSync(DECISIONS_DIR, { recursive: true });
+    writeFileSync(
+      `${DECISIONS_DIR}/${sessionId}.json`,
+      JSON.stringify({ sessionId, kind: "question", tool_use_id: toolUseId, answers, ts: Date.now() }),
+    );
+    return true;
+  } catch {
+    // No matching pending question (no hook holding) → caller sends keys instead.
+    return false;
+  }
+}
+
+/**
+ * Build the wire-format `answers` map for `updatedInput`: keyed by question TEXT
+ * (the wire format requires it), value = the selected option label (single-select)
+ * or comma-joined labels (multi-select). Identical question text within one prompt
+ * collides (last-wins) — Claude doesn't emit identically-worded questions in one
+ * call. A multi-select label containing a comma is ambiguous on the wire (known
+ * limit, matches ccgram).
+ */
+export function buildAnswersMap(
+  questions: PendingQuestion[],
+  selections: (number | number[])[],
+): Record<string, string> {
+  const map: Record<string, string> = {};
+  questions.forEach((q, i) => {
+    const sel = selections[i];
+    const labelFor = (n: number) => q.options[n]?.label ?? "";
+    map[q.question] = Array.isArray(sel) ? sel.map(labelFor).join(",") : labelFor(sel ?? -1);
+  });
+  return map;
 }
