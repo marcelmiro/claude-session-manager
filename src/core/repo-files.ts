@@ -9,7 +9,8 @@
 
 import { statSync, realpathSync } from "node:fs";
 import { resolve, dirname, sep } from "node:path";
-import { resolveSessionPane, resolveTranscriptPath, latestTranscriptCwd } from "./session-api";
+import { resolveSessionPane } from "./session-api";
+import { resolveTranscriptPath, latestTranscriptCwd } from "./last-turn";
 import { listPanes } from "./tmux";
 
 // git's empty-tree object — diff target for an unborn HEAD (repo with no commits).

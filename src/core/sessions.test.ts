@@ -8,7 +8,7 @@
  */
 
 import { test, expect } from "bun:test";
-import { slashCommandIntent, resolvePaneSessionId } from "./sessions";
+import { slashCommandIntent, resolvePaneSessionId, pickRepoPath } from "./sessions";
 
 test("extracts /implement-plan with its plan path", () => {
   const msg =
@@ -94,4 +94,23 @@ test("resolvePaneSessionId: isFork=false leaves the hook-wins precedence intact 
   // The override is fork-scoped: a /clear'd pane (same process, new hook id) still
   // trusts the hook map over the stale command-line id.
   expect(resolvePaneSessionId("%651", "old", cache({ "%651": "new" }), {}, false)).toBe("new");
+});
+
+// --- pickRepoPath: restored panes that came back in $HOME ---------------------
+
+const HOME = "/Users/dev";
+
+test("pickRepoPath: a $HOME pane follows the transcript's cwd", () => {
+  expect(pickRepoPath(HOME, `${HOME}/Documents/repo`, HOME)).toBe(`${HOME}/Documents/repo`);
+});
+
+test("pickRepoPath: a $HOME pane with no usable transcript cwd stays home", () => {
+  expect(pickRepoPath(HOME, null, HOME)).toBe(HOME);
+  expect(pickRepoPath(HOME, HOME, HOME)).toBe(HOME);
+});
+
+test("pickRepoPath: a normal pane keeps its own cwd even when the transcript /cd'd away", () => {
+  expect(pickRepoPath(`${HOME}/Documents/repo`, `${HOME}/Documents/other`, HOME)).toBe(
+    `${HOME}/Documents/repo`,
+  );
 });

@@ -14,6 +14,7 @@ import { slugify } from "./names";
 import { processHookEvents, loadPaneSessions, savePaneSessions, reconcilePaneFiles } from "./state";
 import { eventSourcedStatus } from "./hook-events";
 import { nativeStatus } from "./session-state";
+import { resolveTranscriptPath, latestTranscriptCwd } from "./last-turn";
 
 const home = homedir();
 
@@ -424,6 +425,21 @@ async function enrichSession(
 }
 
 /**
+ * The directory a session's repo info should be derived from: the pane's cwd, unless that is
+ * the home dir and Claude's transcript records somewhere better. Home is the only case worth
+ * overriding — it's what a tmux-resurrect-restored pane reports before it gets its directory
+ * back, and it groups the session under "~" instead of its repo.
+ */
+export function pickRepoPath(
+  paneCwd: string,
+  transcriptCwd: string | null,
+  homeDir: string = home,
+): string {
+  if (paneCwd !== homeDir) return paneCwd;
+  return transcriptCwd && transcriptCwd !== homeDir ? transcriptCwd : paneCwd;
+}
+
+/**
  * Build a Session from an active tmux pane running Claude.
  * Derives repo info from tmux + git, with best-effort enrichment from JSONL/index.
  */
@@ -432,7 +448,17 @@ async function buildActiveSession(
   projectsDir: string,
   knownSessionId?: string,
 ): Promise<Session> {
-  const repoPath = pane.currentPath;
+  // A pane sitting in $HOME is almost always one tmux-resurrect brought back without its
+  // directory: the shell starts in $HOME, `claude --resume` roots there, and the session then
+  // files under the "~" group instead of its repo. Claude's own last-recorded cwd is the
+  // authority, so fall back to it — but only for $HOME, so the transcript read stays off the
+  // 3s refresh for every normal pane. Must settle before the Promise.all below: the branch,
+  // index lookup and base-repo resolution all key off repoPath.
+  let repoPath = pane.currentPath;
+  if (repoPath === home && knownSessionId) {
+    const transcript = await resolveTranscriptPath(knownSessionId);
+    repoPath = pickRepoPath(repoPath, transcript ? await latestTranscriptCwd(transcript) : null);
+  }
 
   // Run all enrichments in parallel — capture pane with escapes for reuse in preview
   let lastCapture = "";

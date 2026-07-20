@@ -81,6 +81,7 @@ src/
 │   ├── names.ts          # AI naming (claude -p), heuristic fallback, name cache
 │   ├── git.ts            # Git operations: repo discovery, branch listing, checkout, worktree creation, base repo/default-branch resolution
 │   ├── launch-command.ts # Pure builder for the new-session shell command (worktree/checkout + claude), shellQuote, worktreeDirName
+│   ├── resurrect.ts      # Which cwd save-sessions records and which directory restore-sessions resumes in
 │   └── notifications.ts  # Transition detection, prefix management (⚡/🔄), dispatch
 └── ui/
     ├── layout.ts          # blessed screen + 3-region layout (list 70%, preview 30%, status bar)
@@ -250,9 +251,11 @@ CSM can save and restore Claude Code sessions across tmux server crashes when pa
 
 ### How it works
 
-1. **On save** (`csm save-sessions`): Snapshots a mapping of stable tmux coordinates (`session:window.pane_index`) to Claude session UUIDs, written to `~/.config/csm/resurrect-sessions.json`. This uses data already tracked by CSM's SessionStart hook in `pane-sessions.json`.
+1. **On save** (`csm save-sessions`): Snapshots a mapping of stable tmux coordinates (`session:window.pane_index`) to Claude session UUIDs **and each session's cwd**, written to `~/.config/csm/resurrect-sessions.json`. This uses data already tracked by CSM's SessionStart hook in `pane-sessions.json`. A pane reporting `$HOME` never overwrites a real repo path already recorded for that session (`pickSavedCwd` in `core/resurrect.ts`) — a restored pane that hasn't got its directory back yet would otherwise poison the entry permanently.
 
-2. **On restore** (`csm restore-sessions`): After tmux-resurrect restores panes (as empty shells), reads the saved mapping, matches coordinates to the newly created panes, and launches `claude --resume=<sessionId>` in each via `tmux send-keys`. Skips panes that already have a foreground process.
+2. **On restore** (`csm restore-sessions`): After tmux-resurrect restores panes (as empty shells), reads the saved mapping, matches coordinates to the newly created panes, and sends `cd <dir>; claude --resume=<sessionId>` in each via `tmux send-keys`. Skips panes that already have a foreground process, and skips a coordinate whose session id was already resumed this pass (one id can sit at two coordinates; resuming it twice leaves two processes fighting over one transcript).
+
+   `<dir>` comes from `resolveRestoreTarget` (`core/resurrect.ts`), which tests `$HOME` **first** — `$HOME` is always a live directory, so a generic exists-check would shadow the case this exists to repair. Order: saved cwd is `$HOME` → Claude's last-recorded cwd from the transcript; saved cwd still on disk → itself; saved cwd gone (deleted worktree) → its base repo, via `recoverWorktreeTranscript` so the resumed session isn't tailing a frozen transcript copy; otherwise no `cd` at all. The separator is `;`, not `&&`, so a failed `cd` still leaves the session resumed.
 
 ### Setup
 
@@ -274,9 +277,9 @@ If using tmux-continuum for auto-save, the save hook runs automatically on each 
 
 ### Data flow
 
-Save: `pane-sessions.json` (paneId→sessionId) + `tmux list-panes` (paneId→coordinate) → `resurrect-sessions.json` (coordinate→sessionId)
+Save: `pane-sessions.json` (paneId→sessionId) + `tmux list-panes` (paneId→coordinate+cwd) + the previous map (for `pickSavedCwd`) → `resurrect-sessions.json` (coordinate→{sessionId, cwd})
 
-Restore: `resurrect-sessions.json` (coordinate→sessionId) + `tmux list-panes` (coordinate→new paneId) → `tmux send-keys` (launch claude --resume in each pane)
+Restore: `resurrect-sessions.json` (coordinate→{sessionId, cwd}) + `tmux list-panes` (coordinate→new paneId) → `resolveRestoreTarget` (cwd→directory to resume in) → `tmux send-keys` (`cd <dir>; claude --resume` in each pane)
 
 ### Limitations
 

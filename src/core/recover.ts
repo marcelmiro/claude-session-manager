@@ -12,7 +12,7 @@ function encodeProjectDir(absPath: string): string {
 }
 
 /** True iff `path` exists and is a directory (guarded). */
-async function isDirectory(path: string): Promise<boolean> {
+export async function isDirectory(path: string): Promise<boolean> {
   try {
     return (await stat(path)).isDirectory();
   } catch {

@@ -761,36 +761,6 @@ export async function readContextUsage(transcriptPath: string): Promise<ContextU
 }
 
 /**
- * The session's CURRENT working directory as Claude sees it — the `cwd` on the last
- * transcript entry that carries one. This tracks `/cd` (which moves Claude's cwd forward
- * but leaves the launching shell — and thus the tmux pane's cwd — where it started), so
- * repo-scoped readers follow the directory the user actually switched to. Tail-reads the
- * JSONL (last 64KB) so it stays cheap on multi-MB logs. Null if no `cwd` line is found.
- */
-export async function latestTranscriptCwd(transcriptPath: string): Promise<string | null> {
-  try {
-    const file = Bun.file(transcriptPath);
-    const bytes = file.size;
-    if (!bytes) return null;
-    const text = await file.slice(Math.max(0, bytes - 65536)).text();
-    const lines = text.split("\n");
-    for (let i = lines.length - 1; i >= 0; i--) {
-      const line = lines[i]!.trim();
-      if (!line.includes('"cwd"')) continue;
-      try {
-        const cwd = (JSON.parse(line) as { cwd?: unknown }).cwd;
-        if (typeof cwd === "string" && cwd) return cwd;
-      } catch {
-        continue; // partial line at the chunk's leading edge — skip it
-      }
-    }
-  } catch {
-    // missing/unreadable transcript — no cwd
-  }
-  return null;
-}
-
-/**
  * Among live panes mapping to `sessionId`, return the LAST matching entry in
  * `paneMap` iteration order (last-written wins — handles resume-into-a-new-pane
  * before the stale entry is evicted); null if none. A plain object walk on purpose:

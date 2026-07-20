@@ -19,6 +19,10 @@ import { eventSourcedStatus } from "./core/hook-events";
 import { nativeStatus } from "./core/session-state";
 import { loadNameCache, slugify } from "./core/names";
 import { PATHS } from "./core/config";
+import { pickSavedCwd, resolveRestoreTarget } from "./core/resurrect";
+import { pickRepoPath } from "./core/sessions";
+import { resolveTranscriptPath, latestTranscriptCwd } from "./core/last-turn";
+import { shellQuote } from "./core/launch-command";
 import { PENDING_DIR, DECISIONS_DIR } from "./core/approval";
 import { mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 
@@ -326,9 +330,19 @@ export async function list(): Promise<void> {
       const eventStatus = sessionId ? await eventSourcedStatus(sessionId) : null;
 
       const name = stripAllPrefixes(pane.windowName);
-      const repo = pane.currentPath === home
+      // A pane restored by tmux-resurrect comes back in $HOME, so its cwd would render every
+      // such session as "~". Claude's own last-recorded cwd is the authority there — same
+      // rule the TUI applies (pickRepoPath).
+      const transcript = sessionId && pane.currentPath === home
+        ? await resolveTranscriptPath(sessionId)
+        : null;
+      const repoPath = pickRepoPath(
+        pane.currentPath,
+        transcript ? await latestTranscriptCwd(transcript) : null,
+      );
+      const repo = repoPath === home
         ? "~"
-        : (pane.currentPath.split("/").pop() || pane.currentPath);
+        : (repoPath.split("/").pop() || repoPath);
 
       return {
         name,
@@ -761,12 +775,24 @@ export async function saveSessions(): Promise<void> {
     return;
   }
 
+  // Whatever the previous snapshot recorded, so a pane that came back in $HOME can't
+  // overwrite a real repo path with it (see pickSavedCwd).
+  const previousCwdBySession = new Map<string, string>();
+  try {
+    const prior = JSON.parse(await Bun.file(RESURRECT_SESSIONS_PATH).text()) as ResurrectSessionMap;
+    for (const entry of Object.values(prior.sessions ?? {})) {
+      previousCwdBySession.set(entry.sessionId, entry.cwd);
+    }
+  } catch {
+    // no prior map (first save) or unreadable — every pane cwd is taken as-is
+  }
+
   // Build coordinate→sessionId map from paneSessions (keyed by pane ID)
   const sessions: Record<string, ResurrectSessionEntry> = {};
   for (const { paneId, coord, cwd } of paneCoords) {
     const sessionId = paneSessions[paneId];
     if (sessionId) {
-      sessions[coord] = { sessionId, cwd };
+      sessions[coord] = { sessionId, cwd: pickSavedCwd(cwd, previousCwdBySession.get(sessionId)) };
     }
   }
 
@@ -833,10 +859,17 @@ export async function restoreSessions(): Promise<void> {
   // Match coordinates and launch claude in matching panes
   let restored = 0;
   let skipped = 0;
+  // A session id can sit at two coordinates (e.g. it was resumed into a second pane before
+  // the last save). Resuming it twice leaves two processes fighting over one transcript.
+  const launched = new Set<string>();
 
   for (const { paneId, coord } of paneCoords) {
     const entry = map.sessions[coord];
     if (!entry) continue;
+    if (launched.has(entry.sessionId)) {
+      skipped++;
+      continue;
+    }
 
     // Verify the pane is a shell (not already running something).
     // Check if there's a foreground process other than the shell.
@@ -851,9 +884,20 @@ export async function restoreSessions(): Promise<void> {
       continue;
     }
 
-    // Launch claude --resume in this pane
+    // Launch claude --resume in this pane, in the session's own directory. A restored pane
+    // starts wherever the shell drops it (often $HOME), and resuming there roots Claude at
+    // $HOME. `;` rather than `&&` so a `cd` that somehow fails still leaves the session
+    // resumed — degraded, not missing.
+    // Resolving the directory touches the filesystem (and may consolidate a moved transcript).
+    // A throw here must cost this one pane its cwd, not abort the loop and leave every later
+    // pane unrestored — so it degrades to the bare resume this command has always done.
+    const dir = await resolveRestoreTarget(entry.sessionId, entry.cwd).catch(() => null);
+    const cmd = dir
+      ? `cd ${shellQuote(dir)}; claude --resume=${entry.sessionId}`
+      : `claude --resume=${entry.sessionId}`;
     try {
-      await Bun.$`tmux send-keys -t ${paneId} ${`claude --resume=${entry.sessionId}`} Enter`.quiet();
+      await Bun.$`tmux send-keys -t ${paneId} ${cmd} Enter`.quiet();
+      launched.add(entry.sessionId);
       restored++;
     } catch {
       skipped++;
@@ -880,11 +924,13 @@ export async function restoreSessions(): Promise<void> {
  * AskUserQuestion (tracked pane + live phone + not focused).
  * Reads the hook stdin, registers a `pending/<session_id>.json` (kind:"question")
  * marker so both surfaces know a question is held, then block-polls
- * `decisions/<session_id>.json` for a matching answer (every 500ms, up to the 600s
- * hook window). On a match it emits `updatedInput.answers` (keyed by question text) so
- * Claude resolves the tool with no native 60s widget; on timeout it exits 0 neutral
- * (the native widget's own timer becomes the floor). stdin is parsed with JSON.parse,
- * not shell greps — arbitrary question/label text needs real JSON escaping.
+ * `decisions/<session_id>.json` for a matching decision (every 500ms, to the end of the
+ * hook window). Three outcomes: an answer emits `updatedInput.answers` (keyed by question
+ * text) so Claude resolves the tool with no native 60s widget; a `clarify` decision
+ * ("Chat about this") denies the tool so the agent yields the turn and waits for a typed
+ * message; expiry exits 0 neutral (the native widget's own timer becomes the floor).
+ * stdin is parsed with JSON.parse, not shell greps — arbitrary question/label text needs
+ * real JSON escaping.
  */
 export async function questionHook(): Promise<void> {
   let input: any;
