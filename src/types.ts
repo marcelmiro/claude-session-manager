@@ -16,6 +16,13 @@ export interface Session {
   messageCount: number;
   summary: string;
   modified: Date;
+  /**
+   * Timestamp of the last user/assistant turn in the transcript — what both the TUI and
+   * the phone display as the session's age. Absent when no transcript record carries a
+   * timestamp; callers fall back to `modified` (the file mtime), which bookkeeping
+   * writes and bulk resumes advance without any conversation happening.
+   */
+  lastTurnAt?: Date;
   firstPrompt: string;
   /** Most recent user prompt from JSONL `last-prompt` entries — reflects current convo direction after /rewind */
   lastPrompt: string;

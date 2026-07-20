@@ -12,7 +12,7 @@
  */
 
 import { Glob } from "bun";
-import { homedir } from "os";
+import { resolveTranscriptPath } from "./last-turn";
 import { lastAssistantMessage, parseActiveBranch, parseTranscript } from "./transcript";
 import { pendingToolCall } from "./hook-events";
 import { loadPaneSessions, savePaneSessions } from "./state";
@@ -395,35 +395,6 @@ export async function rewindByPane(
   await sendKey(paneId, "Enter");
   await Bun.sleep(400);
   return { ok: true };
-}
-
-/**
- * Absolute path to a live session's transcript, or null if none is found. Globs
- * `<proj>/<id>.jsonl` under `~/.claude/projects` via `homedir()` (matches
- * `sessions.ts`'s projects-dir resolution). `~` does NOT expand, and `Bun.Glob`
- * yields cwd-relative matches, so we rejoin the match with the dir.
- */
-export async function resolveTranscriptPath(sessionId: string): Promise<string | null> {
-  const dir = `${homedir()}/.claude/projects`;
-  try {
-    // A session's cwd can move between project dirs (e.g. worktree → base repo), leaving
-    // the SAME id as a JSONL in several dirs. Pick the most-recently-written so readers
-    // (transcript, mark-read, restore) follow the live conversation, not a frozen copy.
-    let best: string | null = null;
-    let bestMtime = -Infinity;
-    for await (const match of new Glob(`*/${sessionId}.jsonl`).scan({ cwd: dir })) {
-      const path = `${dir}/${match}`;
-      const mtime = Bun.file(path).lastModified;
-      if (mtime > bestMtime) {
-        bestMtime = mtime;
-        best = path;
-      }
-    }
-    return best;
-  } catch {
-    // missing projects dir or scan failure — no transcript
-  }
-  return null;
 }
 
 // ---------------------------------------------------------------------------

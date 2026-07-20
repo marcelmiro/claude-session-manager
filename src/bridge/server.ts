@@ -48,7 +48,7 @@ import { markPortkeySource } from "../core/input-source";
 import { watchEvents } from "../core/watch";
 import { EVENTS_DIR, pendingToolCall } from "../core/hook-events";
 import { capturePane, listPanes } from "../core/tmux";
-import { isPermissionPrompt } from "../core/status";
+import { isPermissionPrompt, sessionActivityAt } from "../core/status";
 import {
   loadNameCache,
   saveNameCache,
@@ -74,6 +74,8 @@ const FIXTURES = !!process.env.CSM_BRIDGE_FIXTURES;
 const STATIC: Record<string, string> = {
   "/": "index.html",
   "/app.js": "app.js",
+  // Shared with the TUI (core/status.ts imports the same file) — served unbuilt.
+  "/time-ago.js": "../../shared/time-ago.js",
   // Unified-patch parser, shared with its test suite — served unbuilt.
   "/diff-lines.js": "../../shared/diff-lines.js",
   "/manifest.json": "manifest.json",
@@ -244,6 +246,9 @@ function projectSession(s: Session, approvalIds: Set<string>, unread: boolean, r
     summary: s.summary,
     statusSource: s.statusSource,
     modified: s.modified.toISOString(),
+    // The age the phone renders: last conversational turn, falling back to the mtime in
+    // `modified` when the transcript holds no timestamped turn.
+    lastTurn: sessionActivityAt(s).toISOString(),
     // Present only for archived sessions: true when the phone can resume it (repo dir +
     // transcript both still on disk). Drives whether the Restore button renders.
     ...(restorable !== undefined ? { restorable } : {}),

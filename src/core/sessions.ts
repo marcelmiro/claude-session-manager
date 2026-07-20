@@ -14,7 +14,7 @@ import { slugify } from "./names";
 import { processHookEvents, loadPaneSessions, savePaneSessions, reconcilePaneFiles } from "./state";
 import { eventSourcedStatus } from "./hook-events";
 import { nativeStatus } from "./session-state";
-import { resolveTranscriptPath, latestTranscriptCwd } from "./last-turn";
+import { readLastTurnAt, resolveTranscriptPath, latestTranscriptCwd } from "./last-turn";
 
 const home = homedir();
 
@@ -155,7 +155,28 @@ export async function discoverSessions(opts?: { skipArchivedSummaries?: boolean;
   // Phase B: Discover archived sessions from index files
   const archivedSessions = await discoverArchivedSessions(projectsDir, activeSessions, opts?.skipArchivedSummaries);
 
-  return { sessions: [...activeSessions, ...archivedSessions], changedPaneIds };
+  const sessions = [...activeSessions, ...archivedSessions];
+  await attachLastTurn(sessions);
+  return { sessions, changedPaneIds };
+}
+
+/**
+ * Fill in `lastTurnAt` for every identified session — the age both the TUI and the
+ * phone display. `modified` is the transcript's file mtime, which bookkeeping writes
+ * and bulk resumes push forward without any conversation happening; the last
+ * conversational record's timestamp is the real thing. Reads are memoized on mtime
+ * (see `last-turn.ts`), so a settled list re-reads nothing.
+ */
+async function attachLastTurn(sessions: Session[]): Promise<void> {
+  await Promise.all(
+    sessions.map(async (session) => {
+      if (!session.id) return;
+      const path = await resolveTranscriptPath(session.id);
+      if (!path) return;
+      const at = await readLastTurnAt(path);
+      if (at !== null) session.lastTurnAt = new Date(at);
+    }),
+  );
 }
 
 /**

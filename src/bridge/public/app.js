@@ -6,6 +6,8 @@ import { useRef, useEffect, useState } from "preact/hooks";
 import { signal } from "@preact/signals";
 import htm from "htm";
 import { Marked } from "marked";
+// Same module the TUI uses (core/status.ts imports it directly), served unbuilt.
+import { formatTimeAgo } from "/time-ago.js";
 // Unified-patch parser, served unbuilt and covered by shared/diff-lines.test.ts.
 import { parseDiffLines } from "/diff-lines.js";
 
@@ -60,6 +62,10 @@ const openSubagent = signal(null); // drilled-in agent {agentId, description, ag
 const subTranscript = signal(null); // the open subagent's conversation {turns} | null
 const diffView = signal(null); // {path} → single-file diff pushed over the detail (null = closed)
 const filesView = signal(false); // full changed-files list pushed over the detail
+// Clock driving the relative-age labels. Ages used to recompute only when a refetch
+// replaced `sessions`, so on a quiet list a row sat at "2m" for an hour. Ticking a
+// signal re-renders them on their own; paused while hidden and resynced on resume.
+const tick = signal(Date.now());
 
 // File-editing tools, shared by the rewind-checkpoint calc (canCode) and the diff chips.
 // Diff chips gate additionally on an edited path — `file_path` for most, `notebook_path`
@@ -791,7 +797,9 @@ function subLine(s) {
 }
 
 function modifiedMs(s) {
-  const t = s.modified ? new Date(s.modified).getTime() : NaN;
+  // Same source as the displayed age (last conversational turn), so the order matches
+  // what the rows read rather than following file-mtime noise.
+  const t = activityAt(s) ? new Date(activityAt(s)).getTime() : NaN;
   return Number.isFinite(t) ? t : 0; // unknown recency → oldest → bottom
 }
 
@@ -840,25 +848,19 @@ function usageColor(p) {
   return p > 75 ? "var(--red)" : p > 50 ? "var(--peach)" : "var(--mint)";
 }
 
-// Concise "time since last activity" from the session's modified timestamp — the
-// list column the Mac shows as token % (which says nothing about recency).
+// When a session last did something. `lastTurn` is its newest conversational turn;
+// `modified` (the transcript's file mtime) is the fallback — bookkeeping writes and
+// bulk resumes push mtime forward with no conversation behind them, so it only stands
+// in when the turn timestamp is unavailable (fixtures, or an older server).
+function activityAt(s) {
+  return s.lastTurn || s.modified;
+}
+
+// Concise "time since last activity" — the list column the Mac shows as token %
+// (which says nothing about recency). Reading `tick` makes every age re-render on the
+// clock below, not only when a refetch replaces the session list.
 function formatAge(iso) {
-  const then = iso ? new Date(iso).getTime() : NaN;
-  if (!Number.isFinite(then)) return "";
-  const sec = Math.max(0, (Date.now() - then) / 1000);
-  if (sec < 60) return "now";
-  const min = Math.floor(sec / 60);
-  if (min < 60) return `${min}m`;
-  const hr = Math.floor(min / 60);
-  if (hr < 24) return `${hr}h`;
-  const d = Math.floor(hr / 24);
-  if (d < 7) {
-    const rh = hr % 24; // show the hours remainder so same-day sessions sort visibly
-    return rh ? `${d}d ${rh}h` : `${d}d`;
-  }
-  const w = Math.floor(d / 7);
-  if (w < 5) return `${w}w`;
-  return `${Math.floor(d / 30)}mo`;
+  return formatTimeAgo(iso, { now: tick.value, verbose: true });
 }
 
 // Row title mirrors `csm list`: the tmux-style AI name (repo is the group header, so
@@ -934,8 +936,9 @@ function List() {
         </span>
         ${s.pending
           ? html`<span class="pendingbadge ${s.pending === "question" ? "q" : "a"}"
-              >${s.pending === "question" ? "answer" : "approve"}</span>`
-          : html`<span class="age">${formatAge(s.modified)}</span>`}
+                >${s.pending === "question" ? "answer" : "approve"}</span
+              ><span class="age">${formatAge(activityAt(s))}</span>`
+          : html`<span class="age">${formatAge(activityAt(s))}</span>`}
       </button>`;
   };
   // Repo groups exclude the "needs you" sessions (shown in the pinned block above).
@@ -2062,7 +2065,7 @@ function SessionSheet() {
               <span class="name">${listTitle(s)}</span>
               <span class="sub">${sub ? `${s.repo} · ${sub}` : s.repo}</span>
             </span>
-            <span class="age">${formatAge(s.modified)}</span>
+            <span class="age">${formatAge(activityAt(s))}</span>
           </div>
           ${confirm
             ? html`
@@ -2516,13 +2519,33 @@ function CopiedToast() {
 // `pageshow` (persisted) covers iOS's bfcache-style restore. Cold relaunch is handled by boot.
 function resync() {
   if (!authed.value) return;
+  tick.value = Date.now(); // ages froze while the tab was hidden — catch them up first
   refreshSessions();
   if (selectedId.value) refreshTranscript();
   if (openSubagent.value) refreshSubagent();
   if (!es || es.readyState !== 1 /* OPEN */) connectStream();
 }
+// Advance the age clock once a minute while the page is visible — the labels' finest
+// unit is minutes, so anything faster is wasted renders. A backgrounded tab stops
+// ticking; `resync` catches it up on return.
+let tickTimer;
+function startTick() {
+  if (tickTimer) return;
+  tickTimer = setInterval(() => (tick.value = Date.now()), 60_000);
+}
+function stopTick() {
+  clearInterval(tickTimer);
+  tickTimer = null;
+}
+startTick();
+
 document.addEventListener("visibilitychange", () => {
-  if (document.visibilityState === "visible") resync();
+  if (document.visibilityState === "visible") {
+    startTick();
+    resync();
+  } else {
+    stopTick();
+  }
 });
 window.addEventListener("pageshow", (e) => {
   if (e.persisted) resync();

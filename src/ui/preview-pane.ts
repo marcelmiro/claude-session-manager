@@ -5,7 +5,7 @@ import type { Session } from "../types";
 import type { PreviewMessage, PendingToolCall, ToolInput } from "../core/jsonl-reader";
 import { readTranscriptTurns, pendingToolCall } from "../core/hook-events";
 import type { TranscriptTurn } from "../core/transcript";
-import { formatTimeAgo } from "../core/status";
+import { formatTimeAgo, sessionActivityAt } from "../core/status";
 import { markdownToBlessed } from "./markdown";
 import { C } from "./colors";
 
@@ -575,7 +575,7 @@ export async function updatePreview(
     ];
     for (const s of archivedSessions) {
       const branch = s.branch || "no branch";
-      const time = formatTimeAgo(s.modified);
+      const time = formatTimeAgo(sessionActivityAt(s));
       const summary = s.summary
         ? s.summary.replace(/\{/g, "{open}").replace(/\}/g, "{close}").replace(/\n/g, " ")
         : "";

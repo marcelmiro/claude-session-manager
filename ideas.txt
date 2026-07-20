@@ -50,6 +50,12 @@ CSM Ideas Backlog
 - Complements existing polling: hooks for speed, monitor for consistency (redundant renames are harmless)
 - `csm setup-hooks` subcommand to auto-write hook config into ~/.claude/settings.json
 
+## Per-question custom answer on the phone ("Type something.")
+- Mirror the native AskUserQuestion widget's "Type something." row: a per-question free-text field on the bridge QuestionCard whose text becomes THAT question's answer (labels still tappable for the others).
+- Mechanism (verified 2026-07-18): rides the existing answer channel — `updatedInput.answers[<question text>] = <free text>`. Arbitrary non-label strings are accepted and received by the agent verbatim; mixable with label answers across a multi-question prompt.
+- Impl sketch: let `/answer` accept a string entry in the per-question selections array (alongside number / number[]); `buildAnswersMap` passes a string straight through.
+- Deferred in favor of the global "Chat about this" (decline→clarify→chat) flow, which covers redirect/clarify/dislike-options via a real conversation. This is the narrower one-shot-custom-answer case — additive later.
+
 ## Quality of Life
 - Session duration tracking (how long has this been running?)
 - Show model being used per session (opus vs sonnet)

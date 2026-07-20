@@ -197,6 +197,11 @@
         /* 48px keeps a comfortable ≥44px (HIG) tap target while letting single-line
            rows shrink; two-line rows grow to ~56px from their own content. */
         min-height: 48px;
+        /* long-press opens the action sheet — don't let iOS start a text selection
+           (or the callout bubble) under the finger while the press is held */
+        -webkit-touch-callout: none;
+        -webkit-user-select: none;
+        user-select: none;
         background: var(--surface);
         border: none;
         border-radius: 10px;
@@ -204,6 +209,9 @@
         text-align: left;
         appearance: none;
         -webkit-appearance: none;
+        /* iOS paints its own translucent overlay a beat after :active lands — two
+           highlights for one press. Ours is the only one we want. */
+        -webkit-tap-highlight-color: transparent;
       }
       .row:active { background: var(--hover); }
       /* uniform status circle — same size for every status (color/fill differ, not size) */
@@ -639,6 +647,11 @@
         justify-content: flex-end;
         padding: 8px;
         padding-bottom: calc(8px + env(safe-area-inset-bottom));
+        /* the sheet appears under a finger that's still down from the long-press —
+           keep that finger from selecting the sheet's labels */
+        -webkit-touch-callout: none;
+        -webkit-user-select: none;
+        user-select: none;
         animation: scrim-in 0.15s ease both;
       }
       .sheet {

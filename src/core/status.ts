@@ -196,29 +196,15 @@ export function estimateContextPercent(messageCount: number): number {
   return Math.min(100, Math.round(((messageCount * 800) / 200000) * 100));
 }
 
+// Relative-time formatting is shared with the phone UI — see `shared/time-ago.js`.
+export { formatTimeAgo } from "../shared/time-ago.js";
+
 /**
- * Formats a date as relative time ago.
- * Returns: "now" (< 1 min), "Xm" (minutes), "Xh" (hours), "Xd" (days).
+ * The instant a session last did something, for display. Prefers the last
+ * conversational turn over the transcript's file mtime: bookkeeping writes and bulk
+ * resumes advance mtime with no conversation behind them, which made long-idle
+ * sessions read as minutes old.
  */
-export function formatTimeAgo(date: Date): string {
-  const now = Date.now();
-  const diffMs = now - date.getTime();
-  const diffSeconds = Math.floor(diffMs / 1000);
-
-  if (diffSeconds < 60) {
-    return "now";
-  }
-
-  const diffMinutes = Math.floor(diffSeconds / 60);
-  if (diffMinutes < 60) {
-    return `${diffMinutes}m`;
-  }
-
-  const diffHours = Math.floor(diffMinutes / 60);
-  if (diffHours < 24) {
-    return `${diffHours}h`;
-  }
-
-  const diffDays = Math.floor(diffHours / 24);
-  return `${diffDays}d`;
+export function sessionActivityAt(session: { lastTurnAt?: Date; modified: Date }): Date {
+  return session.lastTurnAt ?? session.modified;
 }
