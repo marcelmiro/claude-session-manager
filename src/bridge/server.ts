@@ -41,6 +41,7 @@ import { homedir } from "os";
 import { discoverRepos, getBaseRepoPath, compareRepos } from "../core/git";
 import { listSlashCommands } from "../core/skills";
 import { repoRootForSession, safeRepoPath, fileDiff, branchChanges } from "../core/repo-files";
+import { branchPullRequest, type PullRequestInfo } from "../core/pull-request";
 import { recoverWorktreeTranscript } from "../core/recover";
 import { loadConfig, PATHS } from "../core/config";
 import { listPendingApprovals, decideApproval } from "../core/approval";
@@ -329,6 +330,21 @@ async function cachedBranchChanges(sessionId: string): Promise<Awaited<ReturnTyp
   if (hit && now - hit.ts < CHANGES_TTL) return hit.value;
   const value = await branchChanges(sessionId);
   changesCache.set(sessionId, { ts: now, value });
+  return value;
+}
+
+// The PR lookup shells out to `gh`, which hits the network — so unlike /changes (git only,
+// 1s TTL) it gets a minute. A PR's state changes on human timescales; re-querying GitHub every
+// time the changed-files list is opened would put a visible stall on a glance surface.
+const PR_TTL = 60_000;
+const prCache = new Map<string, { ts: number; value: PullRequestInfo }>();
+
+async function cachedPullRequest(root: string): Promise<PullRequestInfo> {
+  const now = Date.now();
+  const hit = prCache.get(root);
+  if (hit && now - hit.ts < PR_TTL) return hit.value;
+  const value = await branchPullRequest(root);
+  prCache.set(root, { ts: now, value });
   return value;
 }
 
@@ -674,6 +690,15 @@ async function route(req: Request): Promise<Response> {
     let orig = origAbs ? relTo(root, origAbs) : undefined;
     if (!orig) orig = (await cachedBranchChanges(id))?.files.find((f) => f.path === relPath)?.orig;
     return json(await fileDiff(root, abs, relPath, orig));
+  }
+
+  // The GitHub PR for this session's branch — the changed-files list's exit to the real review
+  // surface. `{ state: "none" }` whenever there's nothing to link (default branch, no GitHub
+  // remote, no gh), and the UI renders nothing for it.
+  const pr = path.match(/^\/sessions\/([^/]+)\/pr$/);
+  if (method === "GET" && pr) {
+    const root = await repoRootForSession(decodeURIComponent(pr[1]!));
+    return json(root ? await cachedPullRequest(root) : { state: "none" });
   }
 
   const decision = path.match(/^\/sessions\/([^/]+)\/decision$/);

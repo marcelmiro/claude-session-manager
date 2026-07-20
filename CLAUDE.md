@@ -226,13 +226,17 @@ Helpers in `notifications.ts`: `buildBaseName()`, `extractAIName()`, `extractRep
 
 ### Portkey changed-files viewer
 
-A "Changed files" card at the end of the thread → full file list → per-file diff. Backed by `core/repo-files.ts` (`branchChanges`, `fileDiff`, `safeRepoPath`) via `GET /sessions/:id/changes` and `/sessions/:id/diff?path=`, both containment-guarded to the session's repo root.
+A changed-files strip at the end of the thread → full file list → per-file diff. Backed by `core/repo-files.ts` (`branchChanges`, `fileDiff`, `safeRepoPath`) via `GET /sessions/:id/changes` and `/sessions/:id/diff?path=`, both containment-guarded to the session's repo root.
+
+- The strip carries totals, PR state and the baseline — **no file preview**. The list is ordered latest-modified, so the first N of a 144-file branch are an arbitrary sample that reads as a summary. It's styled as thread furniture (full-bleed, unfilled, hairline-ruled), because a filled rounded box on `--surface` is exactly an assistant bubble.
+- Diffs are re-indented to 2 spaces per level for phone width (`narrowIndent` in `shared/diff-lines.js`): leading whitespace only, levels preserved, so a tab-indented repo stops spending 8 columns per level. Display transform — the patch and the file are untouched.
 
 - **Baseline** is the merge-base with the default branch — committed *and* uncommitted work, plus untracked files as all-additions. Every surface labels it `branch vs base`. Why, and why not transcript attribution: [ADR 2](docs/adr/0002-changed-files-baseline.md).
 - **Scope** is a glance, not code review — no file browsing, line numbers, or approval-time diffs, by decision: [ADR 1](docs/adr/0001-changed-files-is-a-glance-surface.md).
 - Patch rendering lives in `shared/diff-lines.js` (served unbuilt as `/diff-lines.js`, tested in `bun test`). It is hunk-aware on purpose — matching git's header patterns against every line eats real content, e.g. a deleted `-- ` line.
 - Every git pathspec goes through `literal()` — a filename can contain glob metacharacters (`app/[slug]/page.tsx`).
 - `/changes` has a 1s TTL cache; `/diff` reuses it to resolve a rename's old path, so a tool chip and a file-list row agree.
+- The file list's top row links out to the branch's GitHub PR (`core/pull-request.ts` → `GET /sessions/:id/pr`, 60s TTL since it shells out to `gh`). Depth lives in the PR, not here; a merged PR is a "this session is done" signal. Why this instead of an in-app reviewer, and the variants rejected: [ADR 5](docs/adr/0005-link-out-to-the-pull-request.md).
 
 ## Conventions
 

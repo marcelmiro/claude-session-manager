@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { realpathSync, mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { parseDiffLines } from "./diff-lines.js";
+import { parseDiffLines, indentUnit, narrowIndent } from "./diff-lines.js";
 
 const text = (lines: { t: string; s: string }[]) => lines.map((l) => `${l.t}:${l.s}`);
 
@@ -144,4 +144,55 @@ test("real `git diff` output: a replaced `--` comment line round-trips", async (
   // ...and no metadata leaked through as content.
   expect(text(lines).some((s) => s.includes("diff --git") || s.includes("index "))).toBe(false);
   rmSync(root, { recursive: true, force: true });
+});
+
+// --- indentUnit / narrowIndent ---
+
+const L = (...pairs: string[]) => pairs.map((s) => ({ t: "ctx" as const, s }));
+
+test("indentUnit reads the dominant step, not the GCD", () => {
+  // A 4-space file with a continuation line at 6: GCD is 2, but the step is 4.
+  expect(indentUnit(L("a", "    b", "        c", "      cont", "    d"))).toEqual({ unit: 4, tabs: false });
+});
+
+test("indentUnit reports tabs and doesn't guess a space width for them", () => {
+  expect(indentUnit(L("a", "\tb", "\t\tc"))).toEqual({ unit: 0, tabs: true });
+});
+
+test("indentUnit ignores blank lines and doesn't step across a hunk boundary", () => {
+  const lines = [...L("a", "  b", ""), { t: "hunk" as const, s: "@@ -9,2 +9,2 @@" }, ...L("        z")];
+  expect(indentUnit(lines)).toEqual({ unit: 2, tabs: false });
+});
+
+test("narrowIndent collapses 4-space levels to 2 and preserves depth", () => {
+  const out = narrowIndent(L("fn()", "    if x:", "        go()"));
+  expect(out.map((l) => l.s)).toEqual(["fn()", "  if x:", "    go()"]);
+});
+
+test("narrowIndent turns each tab into one 2-space level", () => {
+  expect(narrowIndent(L("a", "\tb", "\t\tc")).map((l) => l.s)).toEqual(["a", "  b", "    c"]);
+});
+
+test("narrowIndent never touches interior spacing", () => {
+  // An aligned trailing comment and an ASCII table must survive re-indentation.
+  const out = narrowIndent(L("x", "    a = 1    # one", "        | a | b |"));
+  expect(out.map((l) => l.s)).toEqual(["x", "  a = 1    # one", "    | a | b |"]);
+});
+
+test("narrowIndent carries a sub-unit remainder through as alignment, not a level", () => {
+  // 6 spaces in a 4-space file = one level + 2 columns of alignment padding. The 4-steps have
+  // to outnumber the 2-step, or the file genuinely is 2-space indented.
+  const lines = L("x", "    a", "        b", "            c", "      cont");
+  expect(narrowIndent(lines).map((l) => l.s)).toEqual(["x", "  a", "    b", "      c", "    cont"]);
+});
+
+test("narrowIndent is a no-op on a file already at or below the target width", () => {
+  const lines = L("a", "  b", "    c");
+  expect(narrowIndent(lines)).toBe(lines);
+  expect(narrowIndent(L("a", "b"))).toEqual(L("a", "b"));
+});
+
+test("narrowIndent leaves hunk headers alone", () => {
+  const lines = [{ t: "hunk" as const, s: "@@ -1,2 +1,2 @@ def f():" }, ...L("        deep")];
+  expect(narrowIndent(lines)[0]!.s).toBe("@@ -1,2 +1,2 @@ def f():");
 });

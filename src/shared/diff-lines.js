@@ -67,3 +67,70 @@ export function parseDiffLines(patch) {
   if (last && last.t === "ctx" && last.s === "") out.pop();
   return out;
 }
+
+/**
+ * Infer the file's own indent step from the diff, in spaces. Tabs report 0 — they're one level
+ * each regardless of width. Uses the most common positive *step* between consecutive lines'
+ * indents rather than a GCD: a 4-space file with continuation lines at 6 has a GCD of 2 and
+ * would be read as a 2-space file, whereas its dominant step is still 4.
+ *
+ * @param {{t: string, s: string}[]} lines
+ * @returns {{unit: number, tabs: boolean}}
+ */
+export function indentUnit(lines) {
+  const steps = new Map();
+  let tabs = false;
+  let prev = null;
+  for (const l of lines) {
+    if (l.t === "hunk") {
+      prev = null; // hunks aren't contiguous, so no step across the boundary
+      continue;
+    }
+    if (l.s.trim() === "") continue; // a blank line carries no indent information
+    const ws = /^[\t ]*/.exec(l.s)[0];
+    if (ws.includes("\t")) {
+      tabs = true;
+      prev = null;
+      continue;
+    }
+    if (prev !== null && ws.length > prev) steps.set(ws.length - prev, (steps.get(ws.length - prev) || 0) + 1);
+    prev = ws.length;
+  }
+  let unit = 0;
+  let best = 0;
+  for (const [step, n] of steps) if (n > best || (n === best && step < unit)) (unit = step), (best = n);
+  return { unit, tabs };
+}
+
+/**
+ * Rewrite each line's LEADING whitespace to `width` spaces per indent level, so deeply nested
+ * code still fits a phone screen: a 4-space file at depth 5 spends 20 columns of a ~45-column
+ * viewport before the first character.
+ *
+ * Leading whitespace only — interior spacing is never touched, so aligned trailing comments,
+ * ASCII tables and continuation alignment survive. Levels are preserved exactly, so
+ * indentation-significant languages still read correctly. This is a DISPLAY transform: the
+ * patch is unchanged and the file on disk is unchanged.
+ *
+ * A no-op when there's nothing to gain (already at or below `width`, or no indentation found).
+ *
+ * @param {{t: string, s: string}[]} lines
+ * @param {number} width spaces per level
+ * @returns {{t: string, s: string}[]}
+ */
+export function narrowIndent(lines, width = 2) {
+  const { unit, tabs } = indentUnit(lines);
+  if (!tabs && (unit === 0 || unit <= width)) return lines;
+  return lines.map((l) => {
+    if (l.t === "hunk") return l;
+    const ws = /^[\t ]*/.exec(l.s)[0];
+    if (!ws) return l;
+    const tabCount = (ws.match(/\t/g) || []).length;
+    const spaces = ws.length - tabCount;
+    // Tabs are one level each; spaces divide by the inferred unit, and any remainder is
+    // alignment padding rather than a level, so it's carried through untouched.
+    const levels = tabCount + (unit ? Math.floor(spaces / unit) : 0);
+    const rem = unit ? spaces % unit : spaces;
+    return { t: l.t, s: " ".repeat(levels * width + rem) + l.s.slice(ws.length) };
+  });
+}

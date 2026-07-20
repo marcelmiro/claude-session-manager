@@ -9,7 +9,7 @@ import { Marked } from "marked";
 // Same module the TUI uses (core/status.ts imports it directly), served unbuilt.
 import { formatTimeAgo } from "/time-ago.js";
 // Unified-patch parser, served unbuilt and covered by shared/diff-lines.test.ts.
-import { parseDiffLines } from "/diff-lines.js";
+import { parseDiffLines, narrowIndent } from "/diff-lines.js";
 
 const html = htm.bind(h);
 
@@ -2181,8 +2181,6 @@ function SubagentView() {
   `;
 }
 
-const baseName = (p) => (p || "").split("/").pop();
-
 // Git status letter → color class (A added, M modified, D deleted; else muted).
 const STATUS_CLASS = { A: "st-a", M: "st-m", D: "st-d", R: "st-r" };
 
@@ -2222,12 +2220,12 @@ function diffBar(add, del) {
   return html`<span class="diffbar">${cells}</span>`;
 }
 
-// The changed-files card at the END of the scrollable thread (not the fixed dock, so it costs
-// no composer viewport). Previews the latest-modified files (server-ordered) with LOC; a
-// "+N more" row appears past the preview cap. Tapping ANYWHERE opens the full list (FilesView).
+// The changed-files strip at the END of the scrollable thread (not the fixed dock, so it costs
+// no composer viewport). Totals and the PR state only — no file preview: the list is ordered
+// latest-modified, so the first three of a 144-file branch are an arbitrary sample that reads
+// as a summary (three test files imply "tests only"). Tapping ANYWHERE opens the full list.
 // Hidden entirely when the session changed nothing. Refetches on each new transcript revision,
 // and again whenever the bridge comes back after a drop.
-const CHANGES_PREVIEW = 3;
 function ChangesCard() {
   const sid = selectedId.value;
   const rev = transcript.value && transcript.value.rev;
@@ -2253,32 +2251,33 @@ function ChangesCard() {
     })();
     return () => (stale = true);
   }, [sid, rev, online]);
+  const pr = usePullRequest(sid);
   const files = (data && data.files) || [];
   if (files.length === 0) return null;
-  const preview = files.slice(0, CHANGES_PREVIEW);
-  const extra = files.length - preview.length;
   const totAdd = files.reduce((s, f) => s + f.add, 0);
   const totDel = files.reduce((s, f) => s + f.del, 0);
+  // The PR chip is display-only here — the strip has ONE action (open the list), and the link
+  // out to GitHub lives on the list itself. A merged PR showing at glance level is the point:
+  // it says this session's work already landed.
+  const prState = pr && PR_TONE[pr.state] ? pr : null;
   // A <div role=button>, NOT a <button>: WebKit (iOS Safari) refuses to render block/flex
-  // children inside a <button>, collapsing the card to an empty padded box. A div renders
-  // its block children everywhere and still takes the click.
+  // children inside a <button>, collapsing it to an empty padded box. A div renders its block
+  // children everywhere and still takes the click.
   return html`
     <div class="changes-card" role="button" tabindex="0" onClick=${() => (filesView.value = true)}>
-      <div class="cc-head">
-        <span class="cc-titles">
-          <span class="cc-title">Changed files</span>
-          ${baseline(data) && html`<span class="cc-sub">${baseline(data)}</span>`}
-        </span>
-        <span class="cc-sum">
-          <span class="cadd">+${totAdd}</span>
-          <span class="cdel">−${totDel}</span>
-          ${diffBar(totAdd, totDel)}
-        </span>
-      </div>
-      ${preview.map((f) => html`<div class="cc-row" key=${f.path}>${fileLine(f)}</div>`)}
-      <div class="cc-more">
-        <span>${extra > 0 ? `+${extra} more` : "View all"}</span>
+      <div class="cc-main">
+        <span class="cc-count">${files.length} file${files.length === 1 ? "" : "s"}</span>
+        <span class="cadd">+${totAdd}</span>
+        <span class="cdel">−${totDel}</span>
+        ${diffBar(totAdd, totDel)}
         <span class="cc-chev">→</span>
+      </div>
+      <div class="cc-meta">
+        ${prState &&
+        html`<span class=${"pr-chip " + PR_TONE[prState.state]}>${prState.state} #${prState.number}</span>${prLoc(
+          prState,
+        )}`}
+        ${baseline(data) && html`<span class="cc-base">${baseline(data)}</span>`}
       </div>
     </div>
   `;
@@ -2288,6 +2287,18 @@ function ChangesCard() {
 // by the shared /diff-lines.js and colored here. The header states the baseline it was
 // measured against. A big diff collapses to the first 380 lines behind a "Load full diff" tap.
 const DIFF_COLLAPSE = 380;
+// Strips `@@ -1,4 +1,6 @@` off a hunk header, keeping only git's trailing context (the
+// enclosing function). Line numbers are noise on a phone; the function name is the one bit of
+// "where am I" worth the row.
+const HUNK_RANGE = /^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@ ?/;
+// A wholly-new or wholly-deleted file has no context lines and only one kind of change, so the
+// gutter marks, row tints and hunk header are constants — three channels spent restating the
+// `A`/`D` badge already in the header, at the cost of contrast and 14px of width. Such a file
+// renders as a plain listing instead.
+const isUniform = (lines) => {
+  const kinds = new Set(lines.map((l) => l.t));
+  return !kinds.has("ctx") && !(kinds.has("add") && kinds.has("del"));
+};
 function DiffView() {
   const v = diffView.value;
   const [data, setData] = useState(null);
@@ -2318,33 +2329,49 @@ function DiffView() {
   }, [path, orig, sid]);
   if (!v) return null;
   const bad = data && (data.error || data.offline);
-  const parsed = data && !bad && data.patch ? parseDiffLines(data.patch) : [];
+  // Re-indent to 2 spaces per level: a 4-space file at depth 5 spends 20 of ~45 phone columns
+  // before the first character. Leading whitespace only, levels preserved — see narrowIndent.
+  const parsed = data && !bad && data.patch ? narrowIndent(parseDiffLines(data.patch)) : [];
   // A non-empty patch that strips to zero display lines is a metadata-only change (file
   // mode, pure rename) — render a notice, not a blank body.
   const metaOnly = data && !bad && data.patch && parsed.length === 0;
   const ok = parsed.length > 0;
   const lines = parsed;
-  const shown = full ? lines : lines.slice(0, DIFF_COLLAPSE);
+  const plain = ok && isUniform(lines);
+  // A plain listing has no hunk headers to show — a new file's single `@@` row would be a
+  // lone piece of diff chrome above otherwise ordinary code.
+  const body = plain ? lines.filter((l) => l.t !== "hunk") : lines;
+  const shown = full ? body : body.slice(0, DIFF_COLLAPSE);
   const sub = data && !bad
     ? `${baseline(data) || "—"} · +${data.add} −${data.del}`
     : path;
+  // The basename alone is ambiguous in any repo with repeated leaf names (`app/[slug]/page.tsx`
+  // vs `app/s/page.tsx`), so the header carries the directory too — dimmed and truncating, the
+  // same treatment the file list uses.
+  const slash = path.lastIndexOf("/");
+  const dir = slash >= 0 ? path.slice(0, slash + 1) : "";
+  const base = slash >= 0 ? path.slice(slash + 1) : path;
   return html`
     <div class="screen files-view diff-view" ref=${rootRef} onTouchStart=${onTouchStart} onTouchEnd=${onTouchEnd}>
       <div class="subagent-head">
         <button class="iconbtn" onClick=${() => (diffView.value = null)} aria-label="Back to session">‹</button>
         <span class="grow"
-          ><span class="name"
+          ><span class="fl-path dv-name"
             >${data && data.status
-              ? html`<span class=${"fl-badge " + (STATUS_CLASS[data.status] || "st-o")}>${data.status}</span> `
-              : ""}${baseName(path)}</span
-          ><span class="sub">${sub}</span></span
+              ? html`<span class=${"fl-badge " + (STATUS_CLASS[data.status] || "st-o")}>${data.status}</span>`
+              : ""}<span class="fl-dir">${dir}</span><span class="fl-base">${base}</span></span
+          ><span class="sub">${sub}</span
+          >${data && data.orig && html`<span class="sub dv-rename">renamed from ${data.orig}</span>`}</span
         >
+        ${ok &&
+        html`<button
+          class=${"hdrtoggle" + (wrap ? " on" : "")}
+          aria-pressed=${wrap ? "true" : "false"}
+          onClick=${() => setWrap(!wrap)}
+        >
+          wrap
+        </button>`}
       </div>
-      ${ok &&
-      html`<div class="wraptoggle">
-        wrap long lines
-        <button onClick=${() => setWrap(!wrap)}>${wrap ? "on" : "off"}</button>
-      </div>`}
       <div class="scroll" style="padding:0">
         ${!data && html`<div class="sub" style="padding:12px">loading…</div>`}
         ${data && data.offline && html`<div class="guard">Couldn't reach the bridge — diff not loaded.</div>`}
@@ -2354,20 +2381,77 @@ function DiffView() {
         ${data && data.binary && html`<div class="guard">Binary file — not shown.</div>`}
         ${data && data.tooLarge && html`<div class="guard">Diff too large to preview.</div>`}
         ${ok &&
-        html`<div class=${"diffbody" + (wrap ? " wrap" : "")}>
-          ${shown.map(
-            (l, i) => html`<div class=${"dl " + l.t} key=${i}>
-              <span class="g">${l.t === "add" ? "+" : l.t === "del" ? "−" : ""}</span>
-              <span class="c">${l.s}</span>
-            </div>`,
+        html`<div class=${"diffbody" + (wrap ? " wrap" : "") + (plain ? " plain" : "")}>
+          ${shown.map((l, i) =>
+            plain
+              ? html`<div class="dl plain" key=${i}><span class="c">${l.s}</span></div>`
+              : l.t === "hunk"
+                ? html`<div class="dl hunk" key=${i}><span class="c">${l.s.replace(HUNK_RANGE, "")}</span></div>`
+                : html`<div class=${"dl " + l.t} key=${i}>
+                    <span class="g">${l.t === "add" ? "+" : l.t === "del" ? "−" : ""}</span>
+                    <span class="c">${l.s}</span>
+                  </div>`,
           )}
           ${!full &&
-          lines.length > DIFF_COLLAPSE &&
-          html`<button class="loadfull" onClick=${() => setFull(true)}>Load full diff (${lines.length} lines)</button>`}
+          body.length > DIFF_COLLAPSE &&
+          html`<button class="loadfull" onClick=${() => setFull(true)}>Load full diff (${body.length} lines)</button>`}
         </div>`}
       </div>
     </div>
   `;
+}
+
+// The session branch's GitHub PR, at the top of the changed-files list — the exit from this
+// glance surface to the real review surface (docs/adr/0001). Renders nothing when there's
+// nothing to link (default branch, no GitHub remote, no gh), so it never becomes a dead row on
+// the repos worked directly on main.
+const PR_TONE = { open: "pr-open", draft: "pr-draft", merged: "pr-merged", closed: "pr-closed" };
+// The PR's own LOC delta (GitHub's merge-base diff). Distinct from the changed-files totals,
+// which include uncommitted and untracked work the PR hasn't seen.
+const prLoc = (d) =>
+  html`<span class="pr-loc"><span class="cadd">+${d.add}</span> <span class="cdel">−${d.del}</span></span>`;
+function usePullRequest(sid) {
+  const [d, setD] = useState(null);
+  useEffect(() => {
+    setD(null);
+    let stale = false;
+    (async () => {
+      try {
+        const r = await fetch(`/sessions/${encodeURIComponent(sid)}/pr`);
+        if (r.ok && !stale) setD(await r.json());
+      } catch {
+        // Unreachable bridge — the surrounding surfaces already report it; stay silent here.
+      }
+    })();
+    return () => (stale = true);
+  }, [sid]);
+  return d && d.state !== "none" ? d : null;
+}
+
+function PrRow({ sid }) {
+  const d = usePullRequest(sid);
+  if (!d) return null;
+  // Not pushed: no link to give, but say so — otherwise the absence reads as "no PR exists"
+  // when the truth is "this work has never left your Mac".
+  if (d.state === "local-only")
+    return html`<div class="pr-row pr-inert">
+      <span class="pr-chip pr-closed">local</span>
+      <span class="pr-text">${d.branch} isn't pushed yet</span>
+    </div>`;
+  if (d.state === "no-pr")
+    return html`<a class="pr-row" href=${d.compareUrl} target="_blank" rel="noreferrer">
+      <span class="pr-chip pr-draft">no pr</span>
+      <span class="pr-text">Open a pull request for ${d.branch}</span>
+      <span class="pr-out">↗</span>
+    </a>`;
+  // One line: the title truncates, everything else is fixed-width. `reviewDecision` is
+  // deliberately not shown — it would either wrap the row or eat the title.
+  return html`<a class="pr-row" href=${d.url} target="_blank" rel="noreferrer">
+    <span class=${"pr-chip " + PR_TONE[d.state]}>${d.state} #${d.number}</span>
+    <span class="pr-text">${d.title}</span>
+    ${prLoc(d)}
+    <span class="pr-out">↗</span>
+  </a>`;
 }
 
 // Full changed-files list pushed over the detail (the card's "view all" target). Same
@@ -2412,6 +2496,7 @@ function FilesView() {
         >
       </div>
       <div class="scroll">
+        <${PrRow} sid=${sid} />
         ${!data && html`<div class="sub" style="padding:8px">loading…</div>`}
         ${data && data.offline && html`<div class="guard">Couldn't reach the bridge — list not loaded.</div>`}
         ${data && data.error && html`<div class="guard">No live repo for this session.</div>`}

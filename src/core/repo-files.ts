@@ -23,6 +23,7 @@ export interface FileDiff {
   branch: string;
   base: string; // default-branch name diffed against ("" when falling back to HEAD/empty)
   status?: string; // single-letter status vs base: A(dded) / M(odified) / D(eleted). Absent when empty.
+  orig?: string; // for a rename (status R), the OLD path — the view says "renamed from …"
   add: number;
   del: number;
   patch?: string;
@@ -191,9 +192,9 @@ export async function fileDiff(
         await Bun.$`git -C ${root} diff -M --numstat ${ref} -- ${origSpec} ${relSpec}`.nothrow().quiet()
       ).stdout.toString();
       const { add, del, binary } = parseNumstat(numstat);
-      if (binary) return { branch, base: label, status: "R", add, del, binary: true };
-      if (patch.length > SIZE_CAP) return { branch, base: label, status: "R", add, del, tooLarge: true };
-      return { branch, base: label, status: "R", add, del, patch };
+      if (binary) return { branch, base: label, status: "R", orig, add, del, binary: true };
+      if (patch.length > SIZE_CAP) return { branch, base: label, status: "R", orig, add, del, tooLarge: true };
+      return { branch, base: label, status: "R", orig, add, del, patch };
     }
   }
 

@@ -914,51 +914,68 @@
          must stack above it — both share .files-view (z-index 16); this lifts the diff. */
       .diff-view { z-index: 17; }
       .guard { padding: 14px 16px; color: var(--muted); font-size: 13px; }
-      .wraptoggle {
-        flex: none;
-        display: flex;
-        align-items: center;
-        gap: 8px;
-        padding: 6px 12px;
-        color: var(--muted);
-        font-size: 11px;
-        background: #161616;
-        border-bottom: 1px solid var(--border);
-      }
-      .wraptoggle button { background: none; border: 1px solid var(--dim); color: var(--muted); border-radius: 8px; padding: 2px 8px; font-size: 11px; }
+      /* Wrap lives in the header, not its own bar: a full-width row of chrome above every diff
+         is permanent vertical cost for a control touched once a session. */
+      .hdrtoggle { flex: none; background: none; border: 1px solid var(--dim); color: var(--muted); border-radius: 8px; padding: 3px 9px; font-size: 11px; }
+      .hdrtoggle.on { border-color: var(--peach); color: var(--peach); }
+      .dv-name .fl-badge { margin-right: 6px; }
+      .dv-rename { color: var(--dim); font-size: 11px; }
       .diffbody { overflow-x: auto; }
       .diffbody.wrap { overflow-x: visible; }
       /* min-height, because a blank context line has two EMPTY flex children and so generates
          no line box at all — line-height never applies and the line collapses to 0px, jamming
          unrelated blocks of code together. Add/del rows escape this only because the gutter
          holds a +/−. Does not cap taller rows in .diffbody.wrap. */
-      .dl { display: flex; min-height: 1.5em; font-family: var(--mono); font-size: 11.5px; line-height: 1.5; white-space: pre; }
-      .diffbody.wrap .dl { white-space: pre-wrap; overflow-wrap: anywhere; }
-      .dl .g { flex: none; width: 22px; text-align: center; color: var(--dim); user-select: none; }
+      /* width/min-width, because a row is a block-level flex container: its box would stay at
+         the viewport width while `.c` overflows, so an add/del row's tint stopped dead at the
+         old right edge as soon as you scrolled right. max-content makes the tint span the line. */
+      .dl { display: flex; width: max-content; min-width: 100%; min-height: 1.5em; font-family: var(--mono); font-size: 11.5px; line-height: 1.5; white-space: pre; }
+      .diffbody.wrap .dl { white-space: pre-wrap; overflow-wrap: anywhere; width: auto; }
+      .dl .g { flex: none; width: 14px; text-align: center; color: var(--dim); user-select: none; }
       .dl .c { flex: 1; padding-right: 10px; }
-      .dl.add { background: var(--addbg); } .dl.add .g { color: var(--addgut); } .dl.add .c { color: #cffff1; }
-      .dl.del { background: var(--delbg); } .dl.del .g { color: var(--delgut); } .dl.del .c { color: #ffd6d6; }
-      .dl.hunk { background: #161616; } .dl.hunk .c { color: var(--muted); }
+      /* Changed lines get full contrast and context recedes. Status is carried by the tint and
+         the gutter mark; recoloring the glyphs too spent a third channel on the same one bit
+         and left the code you came to read dimmer than plain text. */
+      .dl .c { color: var(--muted); }
+      .dl.add .c, .dl.del .c, .dl.plain .c { color: var(--fg); }
+      .dl.add { background: var(--addbg); } .dl.add .g { color: var(--addgut); }
+      .dl.del { background: var(--delbg); } .dl.del .g { color: var(--delgut); }
+      .dl.hunk { background: #161616; padding-left: 14px; }
+      /* A wholly-new or wholly-deleted file: no tint, no gutter — the header badge says A/D. */
+      .diffbody.plain .dl { padding-left: 10px; }
       .loadfull { display: block; width: 100%; background: #161616; border: none; border-top: 1px solid var(--border); color: var(--peach); padding: 12px; font-size: 12px; }
 
-      /* Changed-files card at the end of the thread + the full list it opens. */
-      .changes-card { flex: none; width: 100%; align-self: stretch; margin: 12px 0 4px; border: 1px solid var(--border); border-radius: 12px; overflow: hidden; background: var(--surface); color: var(--fg); cursor: pointer; -webkit-tap-highlight-color: transparent; }
+      /* Changed-files card at the end of the thread. Bordered on all four sides and full
+         width, but UNFILLED — a filled rounded box on --surface is exactly an assistant
+         bubble, so the summary read as another turn in the conversation. The outline plus the
+         full width is what separates it from a bubble (which is filled and fit-content). */
+      .changes-card { flex: none; box-sizing: border-box; width: 100%; align-self: stretch; margin: 12px 0 4px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 12px; color: var(--fg); cursor: pointer; -webkit-tap-highlight-color: transparent; }
       .changes-card:active { background: var(--hover); }
-      .cc-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 10px 13px; border-bottom: 1px solid var(--border); }
-      .cc-titles { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
-      .cc-title { font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); }
-      /* The baseline the totals are measured against — branch vs base, not "what this session did". */
-      .cc-sub { font-family: var(--mono); font-size: 10.5px; color: var(--dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-      .cc-sum { display: flex; align-items: center; gap: 8px; font-family: var(--mono); font-size: 11px; }
-      .cc-count { font-family: var(--mono); font-size: 11px; color: var(--peach); background: var(--peach-tint); border-radius: 999px; padding: 1px 8px; }
+      .cc-main { display: flex; align-items: center; gap: 9px; font-family: var(--mono); font-size: 11.5px; }
+      .cc-count { color: var(--fg); }
+      .cc-chev { margin-left: auto; color: var(--peach); font-size: 15px; }
+      /* Second line: PR state + the PR's own LOC, then the baseline the changed-files totals
+         are measured against — "branch vs base", not "what this session did". */
+      .cc-meta { display: flex; align-items: center; gap: 7px; margin-top: 6px; min-width: 0; }
+      .cc-base { font-family: var(--mono); font-size: 10.5px; color: var(--dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
       .diffbar { display: inline-flex; gap: 2px; align-items: center; }
       .db { width: 7px; height: 7px; border-radius: 2px; }
       .db-a { background: var(--addgut); }
       .db-d { background: var(--delgut); }
       .db-o { background: var(--dim); }
-      .cc-row { display: flex; align-items: center; gap: 10px; padding: 9px 13px; }
-      .cc-more { display: flex; align-items: center; justify-content: space-between; padding: 10px 13px; border-top: 1px solid var(--border); color: var(--peach); font-size: 12px; }
-      .cc-chev { color: var(--peach); font-size: 15px; }
+      /* PR exit row at the top of the changed-files list — the link out to GitHub. */
+      .pr-row { display: flex; align-items: center; gap: 9px; padding: 11px 12px; border-bottom: 1px solid var(--border); background: var(--surface); color: var(--fg); text-decoration: none; }
+      .pr-inert { opacity: 0.6; }
+      /* One line: only the text cell flexes, so the chip, LOC and arrow always fit. */
+      .pr-text { flex: 1; min-width: 0; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .pr-loc { flex: none; font-family: var(--mono); font-size: 10.5px; white-space: nowrap; }
+      .pr-out { flex: none; color: var(--peach); font-size: 15px; }
+      .pr-chip { flex: none; font-family: var(--mono); font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em; border-radius: 999px; padding: 2px 7px; }
+      .pr-open { color: var(--addgut); background: rgba(153, 255, 228, 0.12); }
+      .pr-merged { color: #c8a2ff; background: rgba(200, 162, 255, 0.14); }
+      .pr-closed { color: var(--delgut); background: rgba(255, 128, 128, 0.12); }
+      .pr-draft { color: var(--muted); background: rgba(160, 160, 160, 0.12); }
+
       /* File row: status badge + dimmed dir (truncates) + always-visible filename, LOC right. */
       .fl-badge { flex: none; width: 14px; text-align: center; font-family: var(--mono); font-size: 11px; font-weight: 600; }
       .fl-badge.st-a { color: var(--addgut); }
