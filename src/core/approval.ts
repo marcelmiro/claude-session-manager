@@ -15,11 +15,72 @@ import { readFileSync, writeFileSync, readdirSync, mkdirSync, rmSync } from "nod
 import { PATHS } from "./config";
 import { readEvents, EVENTS_DIR } from "./hook-events";
 import { SOURCE_DIR } from "./input-source";
-import type { PendingApproval } from "../types";
+import type { PendingApproval, PendingHold } from "../types";
 import type { PendingQuestion } from "./jsonl-reader";
 
 export const PENDING_DIR = `${PATHS.dir}/pending`;
 export const DECISIONS_DIR = `${PATHS.dir}/decisions`;
+
+/**
+ * How long a blocking hook holds a tool call while polling for a decision. The single
+ * source of truth for that window: both poll loops in `cli.ts` (the generated
+ * `pretooluse.sh` and `questionHook`) run to this deadline.
+ */
+export const HOLD_WINDOW_MS = 600_000;
+
+/**
+ * Extra time CSM registers on top of `HOLD_WINDOW_MS` for Claude Code's own PreToolUse
+ * timeout — the SIGKILL the poll loops are racing.
+ *
+ * Claude measures its timeout from hook SPAWN, while a loop can only start its clock once
+ * the process is up and stdin is parsed. Registering the two as the same number therefore
+ * guarantees the kill lands FIRST, and a killed hook never reaches the `rm -f` that
+ * un-registers its marker — which is how orphaned markers are produced in the first place.
+ * The grace makes the loop the one that expires first, so it cleans up after itself.
+ */
+export const HOOK_KILL_GRACE_MS = 15_000;
+
+/** Upper bound on a hold: the full poll window, plus slack for a slow write. */
+const MAX_HOLD_MS = HOLD_WINDOW_MS + 10_000;
+
+/**
+ * Is the hold recorded in a `pending/*.json` marker still being polled? The hook stamps
+ * its own pid; when that process is gone the marker was orphaned (hook killed or crashed
+ * mid-block) and nothing will ever read a decision written for it — so callers must fall
+ * back to driving the pane instead of writing into the void. The `ts` bound additionally
+ * rules out an unrelated process that inherited a recycled pid. Markers with no pid come
+ * from a hook installed before the pid stamp and are trusted, so an un-upgraded hook
+ * behaves exactly as it did before.
+ */
+function holdIsLive(raw: PendingHold): boolean {
+  if (typeof raw.pid !== "number") return true;
+  if (typeof raw.ts === "number" && Date.now() - raw.ts > MAX_HOLD_MS) return false;
+  try {
+    process.kill(raw.pid, 0); // signal 0 = liveness probe, delivers nothing
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Read `pending/<sessionId>.json` if a live hook is holding it. A live marker is left
+ * alone (three callers read it independently); only an orphaned one is reaped on the way
+ * out, so the phantom hold stops being reported on every later poll. Returns null when
+ * absent, corrupt, or dead.
+ */
+function readOrReapHold(sessionId: string): PendingHold | null {
+  const file = `${PENDING_DIR}/${sessionId}.json`;
+  let raw: PendingHold;
+  try {
+    raw = JSON.parse(readFileSync(file, "utf8"));
+  } catch {
+    return null; // absent or half-written
+  }
+  if (holdIsLive(raw)) return raw;
+  rmSync(file, { force: true });
+  return null;
+}
 
 /** All sessions blocked on a detached approval (globs `pending/*.json`). */
 export function listPendingApprovals(): PendingApproval[] {
@@ -34,10 +95,15 @@ export function listPendingApprovals(): PendingApproval[] {
   for (const f of files) {
     if (!f.endsWith(".json")) continue;
     try {
-      const raw = JSON.parse(readFileSync(`${PENDING_DIR}/${f}`, "utf8"));
+      // The filename resolves the path (it's needed before the record can be read); the
+      // record's own `sessionId` still wins for what we report.
+      const fileId = f.replace(/\.json$/, "");
+      // Skip (and reap) a marker whose hook is gone — the caller must drive the pane.
+      const raw = readOrReapHold(fileId);
+      if (!raw) continue;
       // A held AskUserQuestion intercept shares this dir but is not an approval.
       if (raw.kind === "question") continue;
-      const sessionId: string = raw.sessionId ?? f.replace(/\.json$/, "");
+      const sessionId: string = raw.sessionId ?? fileId;
       // The shell writes a minimal record; enrich `input` from the logged
       // PreToolUse event (full tool_input is already in the event log).
       let input = raw.input;
@@ -122,30 +188,55 @@ export function decideApproval(
 }
 
 /**
- * Resolve a held AskUserQuestion intercept. Writes `decisions/<sessionId>.json`
- * (kind:"question") ONLY when a matching `pending/<sessionId>.json` (kind:"question"
- * and same `tool_use_id`) is actually being held by the question-hook. Returns
- * whether it wrote — the caller uses `false` (no hook holding) to fall back to the
- * send-keys path (un-intercepted / native-widget case).
+ * Write `decisions/<sessionId>.json` (kind:"question") ONLY when a matching
+ * `pending/<sessionId>.json` (kind:"question" and same `tool_use_id`) is being held by a
+ * question-hook that is still running. `outcome` carries what the hook should do with it:
+ * `answers` to resolve the tool, or `clarify` to deny it. Returns whether it wrote.
  */
-export function decideQuestion(
+function writeQuestionDecision(
   sessionId: string,
   toolUseId: string,
-  answers: Record<string, string>,
+  outcome: { answers: Record<string, string> } | { clarify: true },
 ): boolean {
   try {
-    const raw = JSON.parse(readFileSync(`${PENDING_DIR}/${sessionId}.json`, "utf8"));
-    if (raw.kind !== "question" || raw.tool_use_id !== toolUseId) return false;
+    const raw = readOrReapHold(sessionId);
+    if (raw?.kind !== "question" || raw.tool_use_id !== toolUseId) return false;
     mkdirSync(DECISIONS_DIR, { recursive: true });
     writeFileSync(
       `${DECISIONS_DIR}/${sessionId}.json`,
-      JSON.stringify({ sessionId, kind: "question", tool_use_id: toolUseId, answers, ts: Date.now() }),
+      JSON.stringify({ sessionId, kind: "question", tool_use_id: toolUseId, ...outcome, ts: Date.now() }),
     );
     return true;
   } catch {
     // No matching pending question (no hook holding) → caller sends keys instead.
     return false;
   }
+}
+
+/**
+ * Resolve a held AskUserQuestion intercept. Returns whether a live hook was holding it —
+ * the caller uses `false` to fall back to the send-keys path (un-intercepted /
+ * native-widget case, and an abandoned hold, where the question has fallen through to the
+ * on-screen widget).
+ */
+export function decideQuestion(
+  sessionId: string,
+  toolUseId: string,
+  answers: Record<string, string>,
+): boolean {
+  return writeQuestionDecision(sessionId, toolUseId, { answers });
+}
+
+/**
+ * Decline a held AskUserQuestion so the agent yields the turn and lets the user chat
+ * (the phone's "Chat about this"). Writes `decisions/<sessionId>.json` with `clarify:true`
+ * instead of answers — the question-hook turns this into a `permissionDecision:"deny"`.
+ * Returns `false` (no live hold) for the un-intercepted native-widget case and for an
+ * abandoned hold, neither of which has a decline-via-file path — declining is the one
+ * action with no keystroke equivalent, so the caller surfaces it as a rejection.
+ */
+export function declineQuestion(sessionId: string, toolUseId: string): boolean {
+  return writeQuestionDecision(sessionId, toolUseId, { clarify: true });
 }
 
 /**

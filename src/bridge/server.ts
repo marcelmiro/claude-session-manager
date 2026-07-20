@@ -21,6 +21,7 @@ import {
   getSubagentTranscript,
   sendMessage,
   answerSessionQuestion,
+  clarifySessionQuestion,
   createSession,
   canRestore,
   restoreSession,
@@ -750,6 +751,16 @@ async function route(req: Request): Promise<Response> {
     if (!valid) return json({ ok: false, reason: "bad-selection" }, 400);
     const id = decodeURIComponent(answer[1]!);
     const r = await answerSessionQuestion(id, sels as (number | number[])[]);
+    if (r.ok) markPortkeySource(id); // no text ⇒ anchors the current turn's prompt_id
+    return sendResult(r);
+  }
+
+  // "Chat about this": decline the held question so the agent yields and waits for the
+  // user's next message (the composer takes over on the phone).
+  const clarify = path.match(/^\/sessions\/([^/]+)\/clarify$/);
+  if (method === "POST" && clarify) {
+    const id = decodeURIComponent(clarify[1]!);
+    const r = clarifySessionQuestion(id);
     if (r.ok) markPortkeySource(id); // no text ⇒ anchors the current turn's prompt_id
     return sendResult(r);
   }

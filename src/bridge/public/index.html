@@ -721,6 +721,10 @@
       /* Multi-question wizard nav: Back + Next/Submit share a row. */
       .qnav { display: flex; gap: 8px; }
       .qnav .opt-submit { flex: 1; }
+      /* "Chat about this": secondary action below the card — declines the prompt and hands
+         the dock to the composer so you can redirect/clarify in free text. */
+      .qwrap { display: flex; flex-direction: column; min-height: 0; }
+      .chat-about { flex: none; margin-top: 8px; padding: 12px; border: 1px solid var(--dim); border-radius: 10px; background: var(--surface); color: var(--muted); font-size: 14px; font-weight: 600; }
 
       /* approval card: distinct primary (Allow) vs secondary (Deny); destructive
          commands get a red command box + a warning tag */

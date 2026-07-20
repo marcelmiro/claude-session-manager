@@ -127,6 +127,11 @@ const rewindFloor = signal(null);
 // One-shot composer autofill: {text, sessionId}. Set on a successful rewind to drop the
 // rewound message back into the box (TUI parity); the Composer consumes and clears it.
 const composerPrefill = signal(null);
+// Optimistic "Chat about this": holds the sessionId whose open question we just declined,
+// so the dock flips to the composer instantly (before the hook's deny resolves and the
+// transcript poll drops openQuestions). Cleared on reconcile (poll shows no question), on
+// failure, or by a safety timeout. null = off.
+const clarifying = signal(null);
 
 let es = null;
 
@@ -176,6 +181,9 @@ async function refreshTranscript() {
     // (the resend's append bumps `rev` even for a byte-identical resend) — the real active
     // branch is now the truncated one, so stop overriding it.
     if (rewindFloor.value && data.rev !== rewindFloor.value.rev) rewindFloor.value = null;
+    // Retire the optimistic "Chat about this" flip once the declined question is actually
+    // gone from the transcript (the deny resolved → PostToolUse cleared openQuestions).
+    if (clarifying.value === id && !(data.openQuestions || data.openQuestion)) clarifying.value = null;
     // Drop optimistic bubbles that have now materialized as real user turns.
     if (pendingSends.value.length) {
       const seen = userTurnTexts(transcript.value);
@@ -1111,9 +1119,44 @@ function Turn({ turn, upCount, canCode }) {
 function QuestionCard({ questions }) {
   const post = (selections) =>
     action(`/sessions/${encodeURIComponent(selectedId.value)}/answer`, { selections });
-  return questions.length > 1
-    ? html`<${MultiQuestionCard} questions=${questions} post=${post} />`
-    : html`<${SingleQuestionCard} q=${questions[0]} post=${post} />`;
+  // "Chat about this": decline the whole prompt (regardless of wizard step) so the agent
+  // yields and waits for a typed message. Optimistically flip to the composer + focus it;
+  // a bare fetch (not action(), whose refreshTranscript would flicker the card back before
+  // the deny resolves) drives the server, reverting only on failure.
+  const chat = () => {
+    const id = selectedId.value;
+    clarifying.value = id;
+    composerPrefill.value = { text: "", sessionId: id }; // focus composer → raise keyboard
+    const revert = (reason) => {
+      flashError(`✗ ${reason}`);
+      if (clarifying.value === id) clarifying.value = null;
+    };
+    fetch(`/sessions/${encodeURIComponent(id)}/clarify`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+    })
+      .then((r) => r.json().catch(() => ({})))
+      .then((d) => {
+        // not-held = the hook holding the prompt is gone, so it's now the on-screen
+        // picker, which has no "chat instead" key — say so rather than echo the code.
+        if (d && d.ok === false)
+          revert(d.reason === "not-held" ? "prompt moved to the desk — pick an option" : d.reason || "clarify failed");
+      })
+      .catch(() => revert("bridge unreachable"));
+    // Safety: never leave the card hidden if the question somehow stays open.
+    setTimeout(() => {
+      if (clarifying.value === id) clarifying.value = null;
+    }, 5000);
+  };
+  return html`
+    <div class="qwrap">
+      ${questions.length > 1
+        ? html`<${MultiQuestionCard} questions=${questions} post=${post} />`
+        : html`<${SingleQuestionCard} q=${questions[0]} post=${post} />`}
+      <button class="chat-about" onClick=${chat}>💬 Chat about this</button>
+    </div>
+  `;
 }
 
 // Single question — multiSelect: accumulate a set + explicit Submit. single-select:
@@ -1728,7 +1771,10 @@ function Detail() {
       if (b.type === "text" && b.text) landed.add(stripImagePrefix(b.text).trim());
     }
   }
-  const questions = t && (t.openQuestions || (t.openQuestion ? [t.openQuestion] : null));
+  const rawQuestions = t && (t.openQuestions || (t.openQuestion ? [t.openQuestion] : null));
+  // "Chat about this" optimistically hides the question card so the composer takes the dock
+  // immediately, before the hook's deny lands and the poll drops openQuestions.
+  const questions = clarifying.value === selectedId.value ? null : rawQuestions;
   const approval = t && t.approval;
   // While blocked on a question/approval, the structured answer UI takes the dock —
   // otherwise it's the free-text composer (this is the "replace the message box with

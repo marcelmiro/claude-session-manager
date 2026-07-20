@@ -150,6 +150,8 @@ Neovim which-key style popup at bottom-left. Press a key to select an action:
 - **Tool approval** (Edit/Bash/etc.): `y` yes, `a` yes don't ask again, `n` no
 - **AskUserQuestion**: Shows numbered options from JSONL, `t` to type custom answer
 
+**Chat about this** (phone only): declines a held AskUserQuestion instead of picking an option — the hook denies the tool so the agent yields the turn and waits for a typed message. Only works while the question is hook-held; once the hold is gone the question belongs to the on-screen picker, which has no decline key, so the phone gets a 409 (`not-held`) and must pick an option instead.
+
 **Send message**: Opens inline text input. Enter sends text + newline to the pane. Useful for approving tool calls or sending instructions without switching.
 
 ### Session statuses

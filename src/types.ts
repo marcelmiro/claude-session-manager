@@ -268,6 +268,25 @@ export interface TranscriptTurn {
   compactSummary?: boolean;
 }
 
+/**
+ * The on-disk `pending/<sessionId>.json` marker, as written by a blocking PreToolUse hook
+ * (`pretooluse.sh` for an approval, `csm question-hook` for a held AskUserQuestion) and
+ * parsed by every reader that has to decide which answer channel to use.
+ *
+ * `pid` is the holding hook's own process id — readers probe it to tell a live hold from
+ * one orphaned by a killed hook. It is optional because a marker written by a hook
+ * installed before the pid stamp carries no liveness info and must stay trusted.
+ */
+export interface PendingHold {
+  sessionId?: string;
+  ts?: number;
+  pid?: number;
+  kind?: "approval" | "question";
+  tool?: string;
+  tool_use_id?: string;
+  input?: unknown;
+}
+
 /** A tool awaiting approval, surfaced from the blocking PreToolUse hook (Inc6). */
 export interface PendingApproval {
   sessionId: string;

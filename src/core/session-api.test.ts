@@ -16,7 +16,7 @@
 
 import "../../test/helpers/home";
 import { test, expect, beforeEach } from "bun:test";
-import { mkdirSync, rmSync, writeFileSync, readFileSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync, readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import {
   pickPane,
@@ -30,6 +30,7 @@ import {
   getTranscript,
   sendMessage,
   answerSessionQuestion,
+  clarifySessionQuestion,
   interruptSession,
   readContextUsage,
   pickerCursorText,
@@ -47,6 +48,7 @@ import {
 import { parseTranscript } from "./transcript";
 import { EVENTS_DIR } from "./hook-events";
 import { PENDING_DIR, DECISIONS_DIR } from "./approval";
+import { deadPid } from "../../test/helpers/dead-pid";
 import { PATHS } from "./config";
 import { fixture } from "../../test/helpers/fixture";
 import type { PendingToolCall } from "./jsonl-reader";
@@ -473,6 +475,60 @@ test("answerSessionQuestion: hook holding → decideQuestion resolves via the fi
   expect(dec.kind).toBe("question");
   expect(dec.tool_use_id).toBe("tuq_1");
   expect(dec.answers).toEqual({ Pick: "B" });
+});
+
+test("answerSessionQuestion: abandoned hold (hook process gone) → send-keys fallback, no decision written", async () => {
+  const id = "q-abandoned";
+  seedQuestionEvent(id, "tuq_1");
+  // The hook registered a hold, then died without cleaning up (killed mid-block), so the
+  // question fell through to the on-screen widget. Writing a decision here would be read
+  // by nobody: the answer must take the pane path (no mapping here → no-pane).
+  mkdirSync(PENDING_DIR, { recursive: true });
+  writeFileSync(
+    join(PENDING_DIR, `${id}.json`),
+    JSON.stringify({ sessionId: id, kind: "question", tool_use_id: "tuq_1", ts: Date.now(), pid: await deadPid() }),
+  );
+  expect(await answerSessionQuestion(id, [1])).toEqual({ ok: false, reason: "no-pane" });
+  expect(existsSync(join(DECISIONS_DIR, `${id}.json`))).toBe(false);
+});
+
+test("clarifySessionQuestion: abandoned hold → not-held (no keystroke equivalent to decline)", async () => {
+  const id = "q-clarify-abandoned";
+  seedQuestionEvent(id, "tuq_1");
+  mkdirSync(PENDING_DIR, { recursive: true });
+  writeFileSync(
+    join(PENDING_DIR, `${id}.json`),
+    JSON.stringify({ sessionId: id, kind: "question", tool_use_id: "tuq_1", ts: Date.now(), pid: await deadPid() }),
+  );
+  expect(clarifySessionQuestion(id)).toEqual({ ok: false, reason: "not-held" });
+  expect(existsSync(join(DECISIONS_DIR, `${id}.json`))).toBe(false);
+});
+
+test("clarifySessionQuestion: no open question → no-question", () => {
+  expect(clarifySessionQuestion("ghost-session")).toEqual({ ok: false, reason: "no-question" });
+});
+
+test("clarifySessionQuestion: open question but no hook holding → not-held (native widget)", () => {
+  const id = "q-clarify-native";
+  seedQuestionEvent(id, "tuq_1");
+  // No pending file → declineQuestion returns false → not-held.
+  expect(clarifySessionQuestion(id)).toEqual({ ok: false, reason: "not-held" });
+});
+
+test("clarifySessionQuestion: hook holding → writes a clarify decision, no pane needed", () => {
+  const id = "q-clarify";
+  seedQuestionEvent(id, "tuq_1");
+  mkdirSync(PENDING_DIR, { recursive: true });
+  writeFileSync(
+    join(PENDING_DIR, `${id}.json`),
+    JSON.stringify({ sessionId: id, kind: "question", tool_use_id: "tuq_1" }),
+  );
+  expect(clarifySessionQuestion(id)).toEqual({ ok: true });
+  const dec = JSON.parse(readFileSync(join(DECISIONS_DIR, `${id}.json`), "utf8"));
+  expect(dec.kind).toBe("question");
+  expect(dec.tool_use_id).toBe("tuq_1");
+  expect(dec.clarify).toBe(true);
+  expect(dec.answers).toBeUndefined();
 });
 
 test("interruptSession: no pane mapping → no-pane, sends nothing", async () => {

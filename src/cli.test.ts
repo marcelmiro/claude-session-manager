@@ -1,7 +1,7 @@
 /**
  * `setup()` idempotency (Inc setup). Two runs under a temp $HOME must leave exactly
  * one CSM registration per event, preserve pre-existing user hooks + other settings
- * keys, and write the hook scripts stamped CSM_HOOK_VERSION=10.
+ * keys, and write the hook scripts stamped CSM_HOOK_VERSION=12.
  *
  * `home` helper first — cli → hook-events → config freezes paths from $HOME; setup
  * itself re-reads homedir() at call time, so it targets the same temp HOME.
@@ -12,6 +12,7 @@ import { TEST_HOME } from "../test/helpers/home";
 import { test, expect, beforeEach } from "bun:test";
 import { mkdirSync, rmSync, writeFileSync, readFileSync, existsSync } from "node:fs";
 import { setup } from "./cli";
+import { HOLD_WINDOW_MS } from "./core/approval";
 
 const claudeDir = `${TEST_HOME}/.claude`;
 const settingsPath = `${claudeDir}/settings.json`;
@@ -73,17 +74,41 @@ test("running setup() twice leaves exactly one CSM entry per event and preserves
   expect(userHook).toBe(true);
   expect(settings.hooks.SessionStart.length).toBe(2); // user + CSM
 
-  // PreToolUse carries the 600s blocking timeout.
+  // PreToolUse carries the blocking timeout: the 600s poll window plus the kill grace.
   const pre = csmEntries(settings, "PreToolUse")[0];
-  expect(pre.hooks[0].timeout).toBe(600);
+  expect(pre.hooks[0].timeout).toBe(615);
 });
 
-test("setup() writes the three hook scripts stamped CSM_HOOK_VERSION=10", async () => {
+test("the registered kill timeout outlasts the window the hook poll loops run to", async () => {
+  // Claude counts its timeout from hook spawn; the loops can only start once the process
+  // is up. If the kill isn't strictly later, it lands first and the hook dies before the
+  // cleanup that un-registers its marker — the orphan the pid gate then has to catch.
+  await setup();
+  const settings = JSON.parse(readFileSync(settingsPath, "utf8"));
+  const registered = csmEntries(settings, "PreToolUse")[0].hooks[0].timeout * 1000;
+  expect(registered).toBeGreaterThan(HOLD_WINDOW_MS);
+});
+
+test("setup() repairs a stale timeout on an already-registered hook", async () => {
+  // The registration is matched on command path, so without an explicit reconcile an
+  // install from an older version would keep its old kill deadline forever.
+  await setup();
+  const settings = JSON.parse(readFileSync(settingsPath, "utf8"));
+  csmEntries(settings, "PreToolUse")[0].hooks[0].timeout = 600; // as an older version left it
+  writeFileSync(settingsPath, JSON.stringify(settings, null, 2));
+
+  await setup();
+  const after = JSON.parse(readFileSync(settingsPath, "utf8"));
+  expect(csmEntries(after, "PreToolUse")[0].hooks[0].timeout).toBe(615);
+  expect(csmEntries(after, "PreToolUse")).toHaveLength(1); // repaired, not duplicated
+});
+
+test("setup() writes the three hook scripts stamped CSM_HOOK_VERSION=12", async () => {
   await setup();
   for (const name of ["session-start", "event", "pretooluse"]) {
     const path = `${hooksDir}/${name}.sh`;
     expect(existsSync(path)).toBe(true);
-    expect(readFileSync(path, "utf8")).toContain("# CSM_HOOK_VERSION=10");
+    expect(readFileSync(path, "utf8")).toContain("# CSM_HOOK_VERSION=12");
   }
 });
 

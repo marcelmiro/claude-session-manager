@@ -12,6 +12,7 @@ import { mkdirSync, rmSync, writeFileSync, readFileSync, existsSync } from "node
 import {
   decideApproval,
   decideQuestion,
+  declineQuestion,
   buildAnswersMap,
   listPendingApprovals,
   reapDeadSessionFiles,
@@ -19,6 +20,7 @@ import {
   DECISIONS_DIR,
 } from "./approval";
 import { EVENTS_DIR, eventLogPath } from "./hook-events";
+import { deadPid } from "../../test/helpers/dead-pid";
 import type { HookEvent } from "../types";
 import type { PendingQuestion } from "./jsonl-reader";
 
@@ -88,6 +90,100 @@ test("decideQuestion returns false (no channel) when no hook is holding — driv
     JSON.stringify({ sessionId: id, kind: "question", tool_use_id: "tu_other" }),
   );
   expect(decideQuestion(id, "tu_q", { Pick: "B" })).toBe(false);
+  expect(existsSync(`${DECISIONS_DIR}/${id}.json`)).toBe(false);
+});
+
+test("declineQuestion writes a clarify decision (no answers) and returns true", () => {
+  const id = "q-decline";
+  writeFileSync(
+    `${PENDING_DIR}/${id}.json`,
+    JSON.stringify({ sessionId: id, kind: "question", tool_use_id: "tu_q" }),
+  );
+  expect(declineQuestion(id, "tu_q")).toBe(true);
+  const dec = JSON.parse(readFileSync(`${DECISIONS_DIR}/${id}.json`, "utf8"));
+  expect(dec.kind).toBe("question");
+  expect(dec.tool_use_id).toBe("tu_q");
+  expect(dec.clarify).toBe(true);
+  expect(dec.answers).toBeUndefined();
+});
+
+test("a hold whose hook process is gone is dead: no decision, marker reaped, decline rejected", async () => {
+  const pid = await deadPid();
+  for (const [id, act] of [
+    ["q-dead-answer", () => decideQuestion("q-dead-answer", "tu_q", { Pick: "B" })],
+    ["q-dead-decline", () => declineQuestion("q-dead-decline", "tu_q")],
+  ] as const) {
+    writeFileSync(
+      `${PENDING_DIR}/${id}.json`,
+      JSON.stringify({ sessionId: id, kind: "question", tool_use_id: "tu_q", ts: Date.now(), pid }),
+    );
+    expect(act()).toBe(false);
+    expect(existsSync(`${DECISIONS_DIR}/${id}.json`)).toBe(false);
+    // Reaped, so the phantom hold isn't re-reported on the next poll.
+    expect(existsSync(`${PENDING_DIR}/${id}.json`)).toBe(false);
+  }
+});
+
+test("a hold from a live hook still answers via the file channel", () => {
+  const id = "q-live";
+  writeFileSync(
+    `${PENDING_DIR}/${id}.json`,
+    JSON.stringify({ sessionId: id, kind: "question", tool_use_id: "tu_q", ts: Date.now(), pid: process.pid }),
+  );
+  expect(decideQuestion(id, "tu_q", { Pick: "B" })).toBe(true);
+});
+
+test("a live hold near the end of its poll window is still honoured, not reaped", () => {
+  // The hook polls to a deadline, so it's still holding at the last moment of the window —
+  // a reader must not judge it dead just because the marker is old.
+  const id = "q-late";
+  writeFileSync(
+    `${PENDING_DIR}/${id}.json`,
+    JSON.stringify({
+      sessionId: id,
+      kind: "question",
+      tool_use_id: "tu_q",
+      ts: Date.now() - 599_000, // inside the 600s window, barely
+      pid: process.pid,
+    }),
+  );
+  expect(decideQuestion(id, "tu_q", { Pick: "B" })).toBe(true);
+  expect(existsSync(`${PENDING_DIR}/${id}.json`)).toBe(true);
+});
+
+test("a live pid older than the hook's poll window is dead (recycled pid)", () => {
+  const id = "q-recycled";
+  writeFileSync(
+    `${PENDING_DIR}/${id}.json`,
+    JSON.stringify({
+      sessionId: id,
+      kind: "question",
+      tool_use_id: "tu_q",
+      ts: Date.now() - 700_000, // past the 600s hook window
+      pid: process.pid, // alive, but cannot be the original holder
+    }),
+  );
+  expect(decideQuestion(id, "tu_q", { Pick: "B" })).toBe(false);
+});
+
+test("listPendingApprovals skips and reaps an approval whose hook process is gone", async () => {
+  const id = "sess-abandoned";
+  writeFileSync(
+    `${PENDING_DIR}/${id}.json`,
+    JSON.stringify({ sessionId: id, ts: Date.now(), pid: await deadPid(), tool: "Bash", tool_use_id: "tu_9" }),
+  );
+  expect(listPendingApprovals()).toEqual([]);
+  expect(existsSync(`${PENDING_DIR}/${id}.json`)).toBe(false);
+});
+
+test("declineQuestion returns false when no matching hold (absent or mismatched tool_use_id)", () => {
+  expect(declineQuestion("q-absent", "tu_q")).toBe(false);
+  const id = "q-decline-mismatch";
+  writeFileSync(
+    `${PENDING_DIR}/${id}.json`,
+    JSON.stringify({ sessionId: id, kind: "question", tool_use_id: "tu_other" }),
+  );
+  expect(declineQuestion(id, "tu_q")).toBe(false);
   expect(existsSync(`${DECISIONS_DIR}/${id}.json`)).toBe(false);
 });
 

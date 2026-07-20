@@ -23,7 +23,7 @@ import { pickSavedCwd, resolveRestoreTarget } from "./core/resurrect";
 import { pickRepoPath } from "./core/sessions";
 import { resolveTranscriptPath, latestTranscriptCwd } from "./core/last-turn";
 import { shellQuote } from "./core/launch-command";
-import { PENDING_DIR, DECISIONS_DIR } from "./core/approval";
+import { PENDING_DIR, DECISIONS_DIR, HOLD_WINDOW_MS, HOOK_KILL_GRACE_MS } from "./core/approval";
 import { mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 
 const home = homedir();
@@ -465,7 +465,7 @@ function isSubsequence(sub: string, str: string): boolean {
 // csm setup
 // ---------------------------------------------------------------------------
 
-const HOOK_VERSION = 10;
+const HOOK_VERSION = 12;
 
 // SessionStart pane→session mapper. Writes one file per pane (panes/<paneId> → sessionId)
 // atomically (temp+rename) — the hook OWNS the map, so there's no shared-file write race and
@@ -592,10 +592,15 @@ TS=$(( $(date +%s) * 1000 ))
 PDIR=~/.config/csm/pending
 DFILE=~/.config/csm/decisions/"\$SESSION_ID".json
 mkdir -p "\$PDIR"
-printf '{"sessionId":"%s","ts":%s,"tool":"%s","tool_use_id":"%s"}\\n' "\$SESSION_ID" "\$TS" "\$TOOL" "\$TUID" > "\$PDIR/\$SESSION_ID".json
+# \$\$ stamps the poller's pid: readers treat a marker whose process is gone as abandoned
+# (killed hook) and drive the on-screen prompt instead of writing a decision nobody reads.
+printf '{"sessionId":"%s","ts":%s,"pid":%s,"tool":"%s","tool_use_id":"%s"}\\n' "\$SESSION_ID" "\$TS" "\$\$" "\$TOOL" "\$TUID" > "\$PDIR/\$SESSION_ID".json
 
-i=0
-while [ "\$i" -lt 1200 ]; do          # 1200 × 0.5s = 600s (the hook timeout)
+# Poll to a DEADLINE, not an iteration count: each pass forks several greps, so a counted
+# loop runs well past the window and gets killed by the hook timeout before it can reach
+# the cleanup below — which is what strands a marker and makes readers see a phantom hold.
+END=\$(( \$(date +%s) + ${HOLD_WINDOW_MS / 1000} ))
+while [ "\$(date +%s)" -lt "\$END" ]; do
   if [ -f "\$DFILE" ]; then
     KIND=$(grep -oE '"kind"[[:space:]]*:[[:space:]]*"[^"]*"' "\$DFILE" | head -1 | cut -d'"' -f4)
     DTUID=$(grep -oE '"tool_use_id"[[:space:]]*:[[:space:]]*"[^"]*"' "\$DFILE" | head -1 | cut -d'"' -f4)
@@ -615,7 +620,6 @@ while [ "\$i" -lt 1200 ]; do          # 1200 × 0.5s = 600s (the hook timeout)
     fi
   fi
   sleep 0.5
-  i=$(( i + 1 ))
 done
 
 # Timeout → neutral fallthrough to the desk TUI prompt (nothing stranded).
@@ -638,7 +642,15 @@ const HOOK_REGISTRATIONS: { event: string; script: string; timeout?: number }[] 
   { event: "Notification", script: "event.sh" },
   { event: "Stop", script: "event.sh" },
   { event: "SubagentStop", script: "event.sh" },
-  { event: "PreToolUse", script: "pretooluse.sh", timeout: 600 },
+  // Claude Code's own timeout — the SIGKILL both hook poll loops race. Deliberately the
+  // poll window PLUS a grace: Claude counts from spawn and a loop can't start its clock
+  // until the process is up, so registering the bare window would make the kill land first
+  // and strand the marker the loop's cleanup would have removed.
+  {
+    event: "PreToolUse",
+    script: "pretooluse.sh",
+    timeout: (HOLD_WINDOW_MS + HOOK_KILL_GRACE_MS) / 1000,
+  },
 ];
 
 /** Read the CSM_HOOK_VERSION from an installed hook script. Returns 0 if missing or unreadable. */
@@ -702,15 +714,19 @@ export async function setup(): Promise<void> {
   for (const { event, script, timeout } of HOOK_REGISTRATIONS) {
     const path = scriptPath(script);
     if (!Array.isArray(settings.hooks[event])) settings.hooks[event] = [];
-    const present = settings.hooks[event].some(
-      (entry: any) =>
-        Array.isArray(entry.hooks) &&
-        entry.hooks.some((h: any) => typeof h.command === "string" && h.command.includes(path)),
-    );
-    if (!present) {
+    const existing = settings.hooks[event]
+      .flatMap((entry: any) => (Array.isArray(entry.hooks) ? entry.hooks : []))
+      .find((h: any) => typeof h.command === "string" && h.command.includes(path));
+    if (!existing) {
       const hook: Record<string, unknown> = { type: "command", command: path };
       if (timeout !== undefined) hook.timeout = timeout;
       settings.hooks[event].push({ hooks: [hook] }); // omit matcher → all events/tools
+      settingsChanged = true;
+    } else if (timeout !== undefined && existing.timeout !== timeout) {
+      // Reconcile, don't just add: the registration is matched on command path, so an
+      // install from an older version keeps its stale timeout forever otherwise — and that
+      // timeout is the kill deadline the hook's own poll window has to stay inside.
+      existing.timeout = timeout;
       settingsChanged = true;
     }
   }
@@ -953,6 +969,10 @@ export async function questionHook(): Promise<void> {
       JSON.stringify({
         sessionId,
         ts: Date.now(),
+        // Liveness stamp: once this process is gone the hold is abandoned and the
+        // question has fallen through to the native widget, so answers must be sent as
+        // keystrokes rather than written to `decisions/` where nobody is polling.
+        pid: process.pid,
         kind: "question",
         tool_use_id: toolUseId,
         tool: "AskUserQuestion",
@@ -962,13 +982,36 @@ export async function questionHook(): Promise<void> {
     process.exit(0); // can't register the hold → neutral
   }
 
-  for (let i = 0; i < 1200; i++) {
-    // 1200 × 500ms = 600s (the PreToolUse hook window).
+  // Poll to a DEADLINE, not an iteration count: per-pass IO makes a counted loop overrun
+  // the window, so it'd still be polling when the hook timeout kills it — and the cleanup
+  // below, which un-registers the hold, would never run.
+  const deadline = Date.now() + HOLD_WINDOW_MS;
+  while (Date.now() < deadline) {
     try {
       const raw = JSON.parse(readFileSync(decisionFile, "utf8"));
       if (raw.kind === "question" && raw.tool_use_id === toolUseId) {
         rmSync(decisionFile, { force: true });
         rmSync(pendingFile, { force: true });
+        if (raw.clarify === true) {
+          // "Chat about this": deny the tool so the agent yields the turn and waits for
+          // the user's message, instead of picking an option (mirrors the native widget).
+          const asked = questions.map((q: any) => `- "${q.question}"`).join("\n");
+          const reason =
+            "The user wants to discuss these questions before answering, rather than pick one of the " +
+            "offered options. Do NOT re-ask or restate the question yet. Wait for the user's next " +
+            "message and take it into account before proceeding.\n\nQuestions asked:\n" +
+            asked;
+          process.stdout.write(
+            JSON.stringify({
+              hookSpecificOutput: {
+                hookEventName: "PreToolUse",
+                permissionDecision: "deny",
+                permissionDecisionReason: reason,
+              },
+            }),
+          );
+          process.exit(0);
+        }
         process.stdout.write(
           JSON.stringify({
             hookSpecificOutput: {

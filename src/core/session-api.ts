@@ -31,7 +31,7 @@ import {
   killPane,
 } from "./tmux";
 import { isPermissionPrompt } from "./status";
-import { decideQuestion, buildAnswersMap } from "./approval";
+import { decideQuestion, declineQuestion, buildAnswersMap } from "./approval";
 import type { PendingQuestion, PendingToolCall } from "./jsonl-reader";
 import type { TranscriptBlock, TranscriptTurn } from "../types";
 
@@ -151,7 +151,7 @@ export async function readPaneStatusline(paneId: string): Promise<PaneStatusline
 /** Outcome of a send; `reason` is set only on rejection (nothing was sent). */
 export type SendResult = {
   ok: boolean;
-  reason?: "no-pane" | "no-question" | "no-prompt" | "no-session" | "rewind-unavailable" | "rewind-mismatch" | "rewind-mode" | "bad-image" | "bad-selection" | "no-confirm" | "no-repo" | "no-transcript" | "resume-failed" | "not-found";
+  reason?: "no-pane" | "no-question" | "not-held" | "no-prompt" | "no-session" | "rewind-unavailable" | "rewind-mismatch" | "rewind-mode" | "bad-image" | "bad-selection" | "no-confirm" | "no-repo" | "no-transcript" | "resume-failed" | "not-found";
   /** Fresh session id, set by createSession to the dictated id. */
   sessionId?: string;
 };
@@ -1090,6 +1090,19 @@ export async function answerSessionQuestion(
   if (!paneId) return { ok: false, reason: "no-pane" };
   await answerQuestion(paneId, selections);
   return { ok: true };
+}
+
+/**
+ * Decline a held AskUserQuestion (the phone's "Chat about this"): the hook denies the
+ * tool so the agent yields the turn and waits for the user's next message. Only works
+ * when the question is hook-held; a native-widget question (not intercepted) returns
+ * `not-held`, since there's no decline-via-file path for it.
+ */
+export function clarifySessionQuestion(sessionId: string): SendResult {
+  const pending = pendingToolCall(sessionId);
+  if (!hasOpenQuestion(pending)) return { ok: false, reason: "no-question" };
+  if (declineQuestion(sessionId, pending!.toolUseId)) return { ok: true };
+  return { ok: false, reason: "not-held" };
 }
 
 /**
