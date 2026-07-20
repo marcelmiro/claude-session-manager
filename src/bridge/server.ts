@@ -73,6 +73,8 @@ const FIXTURES = !!process.env.CSM_BRIDGE_FIXTURES;
 const STATIC: Record<string, string> = {
   "/": "index.html",
   "/app.js": "app.js",
+  // Unified-patch parser, shared with its test suite — served unbuilt.
+  "/diff-lines.js": "../../shared/diff-lines.js",
   "/manifest.json": "manifest.json",
   "/icon-512.png": "icon-512.png",
   "/apple-touch-icon.png": "apple-touch-icon.png",
@@ -306,6 +308,23 @@ async function reposPayload(): Promise<Array<{ name: string; path: string; branc
 }
 
 let sessionsCache: { ts: number; value: unknown } | null = null;
+
+// The changed-files card and the full list are separate components rendering the same URL,
+// and the list is an overlay — opening it doesn't unmount the card, so every transcript
+// revision ran the whole git sweep twice. 1s TTL, matching /sessions: short enough that
+// opening the list still reflects an out-of-band edit (you editing on the Mac, a formatter
+// running), long enough to collapse the duplicate. `/diff` shares it to resolve renames.
+const CHANGES_TTL = 1000;
+const changesCache = new Map<string, { ts: number; value: Awaited<ReturnType<typeof branchChanges>> }>();
+
+async function cachedBranchChanges(sessionId: string): Promise<Awaited<ReturnType<typeof branchChanges>>> {
+  const now = Date.now();
+  const hit = changesCache.get(sessionId);
+  if (hit && now - hit.ts < CHANGES_TTL) return hit.value;
+  const value = await branchChanges(sessionId);
+  changesCache.set(sessionId, { ts: now, value });
+  return value;
+}
 
 // GET /sessions/:id/skills — slash-commands scoped to the session's repo. Cached per
 // resolved repo dir (30s TTL); the "" key holds the builtin+user fallback used when a
@@ -621,26 +640,34 @@ async function route(req: Request): Promise<Response> {
   // card + full list. Only changed files, never the whole repo.
   const changes = path.match(/^\/sessions\/([^/]+)\/changes$/);
   if (method === "GET" && changes) {
-    const data = await branchChanges(decodeURIComponent(changes[1]!));
+    const data = await cachedBranchChanges(decodeURIComponent(changes[1]!));
     if (!data) return json({ ok: false, reason: "no-repo" }, 404);
     return json(data);
   }
 
-  // Single-file working-tree diff vs HEAD (+ untracked). `path` = repo-relative, sent by the
-  // Edit/Write chip; git calls use `-- <rel>` so a leading-dash path can't be read as a flag.
+  // Single-file diff, branch vs its base (committed + uncommitted, + untracked). `path` =
+  // repo-relative, sent by the Edit/Write chip or a changed-files row; git calls use
+  // `-- <rel>` so a leading-dash path can't be read as a flag.
   const diff = path.match(/^\/sessions\/([^/]+)\/diff$/);
   if (method === "GET" && diff) {
     const rel = url.searchParams.get("path");
     if (!rel) return json({ ok: false, reason: "no-path" }, 400);
-    const root = await repoRootForSession(decodeURIComponent(diff[1]!));
+    const id = decodeURIComponent(diff[1]!);
+    const root = await repoRootForSession(id);
     if (!root) return json({ ok: false, reason: "no-repo" }, 404);
     const abs = safeRepoPath(root, decodeURIComponent(rel));
     if (!abs) return json({ ok: false, reason: "not-found" }, 404);
-    // `orig` (old path of a rename) is optional; validate it through the same containment
-    // guard and pass its repo-relative form so the diff shows the true rename, not a fresh add.
+    const relPath = relTo(root, abs);
+    // `orig` (the old path of a rename) makes the diff show the true rename rather than a
+    // whole-file add. Resolve it from the change list rather than trusting the caller to
+    // supply it: a tool chip only knows the path it edited, so a chip and a changed-files
+    // row would otherwise disagree about whether the same file is new. The list is cached,
+    // so this costs nothing on the common path. An explicit `orig` param still wins.
     const origParam = url.searchParams.get("orig");
     const origAbs = origParam ? safeRepoPath(root, decodeURIComponent(origParam)) : null;
-    return json(await fileDiff(root, abs, relTo(root, abs), origAbs ? relTo(root, origAbs) : undefined));
+    let orig = origAbs ? relTo(root, origAbs) : undefined;
+    if (!orig) orig = (await cachedBranchChanges(id))?.files.find((f) => f.path === relPath)?.orig;
+    return json(await fileDiff(root, abs, relPath, orig));
   }
 
   const decision = path.match(/^\/sessions\/([^/]+)\/decision$/);

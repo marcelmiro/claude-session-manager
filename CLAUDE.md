@@ -220,9 +220,17 @@ Helpers in `notifications.ts`: `buildBaseName()`, `extractAIName()`, `extractRep
 
 ### Portkey model/effort switcher
 
-The phone can change a session's model or reasoning effort. Typing `/model` or `/effort` in the composer opens a native selection sheet (current value marked); tapping an option `POST`s to `/sessions/:id/config`, which sends the arg-form slash command (`/model opus`, `/effort ultracode`) via the existing send path and toasts Claude's verbatim confirmation. Scope is Claude's: model + normal effort set the **global default** ("for new sessions"); `ultracode` is **session-only**. Route validates against `MODEL_ARGS`/`EFFORT_ARGS` (`session-api.ts`) — nothing reaches the pane on a bad value. Mechanics guarded by `test/smoke/model-effort.sh` (opt-in, drives real sessions — not in `bun test`).
+`/model` or `/effort` in the phone composer opens a selection sheet; tapping an option `POST`s to `/sessions/:id/config`, which sends the arg-form slash command via the existing send path and toasts Claude's confirmation. Validated against `MODEL_ARGS`/`EFFORT_ARGS` (`session-api.ts`). Scoping, the statusline prerequisite and the smoke test: [ADR 4](docs/adr/0004-model-effort-switcher-scope.md).
 
-**Prerequisite (one-time, user dotfile):** current *effort* is read by scraping the pane statusline, so `~/.claude/statusline.sh` must render `.effort.level` as its trailing `• <level>` segment (it replaced the old `• thinking` boolean). Current *model* needs no change — it's already in the statusline. Without the statusline edit the model switcher still works; the effort menu just can't pre-mark the current level.
+### Portkey changed-files viewer
+
+A "Changed files" card at the end of the thread → full file list → per-file diff. Backed by `core/repo-files.ts` (`branchChanges`, `fileDiff`, `safeRepoPath`) via `GET /sessions/:id/changes` and `/sessions/:id/diff?path=`, both containment-guarded to the session's repo root.
+
+- **Baseline** is the merge-base with the default branch — committed *and* uncommitted work, plus untracked files as all-additions. Every surface labels it `branch vs base`. Why, and why not transcript attribution: [ADR 2](docs/adr/0002-changed-files-baseline.md).
+- **Scope** is a glance, not code review — no file browsing, line numbers, or approval-time diffs, by decision: [ADR 1](docs/adr/0001-changed-files-is-a-glance-surface.md).
+- Patch rendering lives in `shared/diff-lines.js` (served unbuilt as `/diff-lines.js`, tested in `bun test`). It is hunk-aware on purpose — matching git's header patterns against every line eats real content, e.g. a deleted `-- ` line.
+- Every git pathspec goes through `literal()` — a filename can contain glob metacharacters (`app/[slug]/page.tsx`).
+- `/changes` has a 1s TTL cache; `/diff` reuses it to resolve a rename's old path, so a tool chip and a file-list row agree.
 
 ## Conventions
 
@@ -243,7 +251,7 @@ Status: waiting/ready=peach, running=mint, idle=dim. Context %: <50=mint, 50-79=
 
 ## Safety
 
-TUI refuses to run without a TTY (`process.stdout.isTTY` check) to prevent orphaned background processes (e.g. from `bun --watch` after terminal closes) from overwriting `state.json` with stale attention flags.
+TUI refuses to run without a TTY (`process.stdout.isTTY` check). Rationale: [ADR 3](docs/adr/0003-tui-requires-a-tty.md).
 
 ## Session persistence (optional tmux-resurrect integration)
 
@@ -289,6 +297,7 @@ Restore: `resurrect-sessions.json` (coordinate→{sessionId, cwd}) + `tmux list-
 
 ## Key references
 
+- `docs/adr/` — decision records: why something is the way it is, and what was rejected
 - `ideas.txt` — feature backlog (worktrees, search, Cursor integration, etc.)
 - Session data: `~/.claude/projects/*/sessions-index.json`
 - Session logs: `~/.claude/projects/*/{sessionId}.jsonl`

@@ -41,7 +41,7 @@ test("non-existent target INSIDE root is allowed (deleted/renamed file)", () => 
   expect(safeRepoPath(guardRoot, "src/gone.ts")).toBe(`${guardRoot}/src/gone.ts`);
 });
 
-// --- fileDiff / repoTree / readRepoFile on a throwaway repo ---
+// --- fileDiff / changedFiles / baseRef on a throwaway repo ---
 
 async function tempRepo(): Promise<string> {
   const root = realpathSync(mkdtempSync(`${tmpdir()}/rf-repo-`));
@@ -240,5 +240,106 @@ test("changedFiles: on the default branch with no divergence → only uncommitte
   const { ref } = await baseRef(root); // merge-base(HEAD, main) == HEAD
   const paths = (await changedFiles(root, ref)).map((f) => f.path);
   expect(paths).toEqual(["a.txt"]);
+  rmSync(root, { recursive: true, force: true });
+});
+
+// --- pathspec magic: a filename can contain glob metacharacters ---
+
+/** Repo with a bracketed path (Next.js dynamic segment) and a sibling the glob would match. */
+async function bracketRepo(): Promise<string> {
+  const root = await tempRepo();
+  mkdirSync(`${root}/app/[slug]`, { recursive: true });
+  mkdirSync(`${root}/app/s`, { recursive: true });
+  writeFileSync(`${root}/app/[slug]/page.tsx`, "export const dynamic = 1\n");
+  writeFileSync(`${root}/app/s/page.tsx`, "export const sibling = 1\n");
+  await Bun.$`git -C ${root} add -A`.quiet();
+  await Bun.$`git -C ${root} commit -qm init`.quiet();
+  return root;
+}
+
+test("bracketed path: unchanged file is empty even when the glob's sibling changed", async () => {
+  const root = await bracketRepo();
+  writeFileSync(`${root}/app/s/page.tsx`, "export const sibling = 2\n"); // only the SIBLING changes
+  const d = await fileDiff(root, `${root}/app/[slug]/page.tsx`, "app/[slug]/page.tsx");
+  // As a glob, `app/[slug]/page.tsx` matches `app/s/page.tsx` — which would render the
+  // sibling's patch under the bracketed file's name.
+  expect(d.empty).toBe(true);
+  expect(d.patch).toBeUndefined();
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("bracketed path: shows its OWN patch, not the sibling's, when both changed", async () => {
+  const root = await bracketRepo();
+  writeFileSync(`${root}/app/[slug]/page.tsx`, "export const dynamic = 2\n");
+  writeFileSync(`${root}/app/s/page.tsx`, "export const sibling = 2\n");
+  const d = await fileDiff(root, `${root}/app/[slug]/page.tsx`, "app/[slug]/page.tsx");
+  expect(d.patch).toContain("dynamic = 2");
+  expect(d.patch).not.toContain("sibling"); // no second file's hunks appended
+  expect(d.add).toBe(1);
+  expect(d.del).toBe(1);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("bracketed path: untracked new file still resolves to all-additions", async () => {
+  const root = await tempRepo();
+  writeFileSync(`${root}/seed.txt`, "x\n");
+  await Bun.$`git -C ${root} add -A`.quiet();
+  await Bun.$`git -C ${root} commit -qm init`.quiet();
+  mkdirSync(`${root}/app/[id]`, { recursive: true });
+  writeFileSync(`${root}/app/[id]/route.ts`, "a\nb\n");
+  const d = await fileDiff(root, `${root}/app/[id]/route.ts`, "app/[id]/route.ts");
+  expect(d.status).toBe("A");
+  expect(d.add).toBe(2);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("changedFiles path round-trips into a reachable diff for a bracketed name", async () => {
+  const root = await bracketRepo();
+  writeFileSync(`${root}/app/[slug]/page.tsx`, "export const dynamic = 3\n");
+  const { ref } = await baseRef(root);
+  const files = await changedFiles(root, ref);
+  const row = files.find((f) => f.path.includes("[slug]"));
+  expect(row).toBeDefined();
+  const d = await fileDiff(root, `${root}/${row!.path}`, row!.path);
+  expect(d.empty).toBeUndefined();
+  expect(d.patch).toContain("dynamic = 3");
+  rmSync(root, { recursive: true, force: true });
+});
+
+// --- baseRef: a dangling origin/HEAD must not collapse the PR view ---
+
+test("dangling origin/HEAD symref falls through to a local default branch", async () => {
+  const root = await tempRepo();
+  writeFileSync(`${root}/a.txt`, "x\n");
+  await Bun.$`git -C ${root} add -A`.quiet();
+  await Bun.$`git -C ${root} commit -qm base`.quiet();
+  await Bun.$`git -C ${root} branch -M main`.quiet();
+  // Left behind by a master → main rename: the symref resolves, its target does not exist.
+  await Bun.$`git -C ${root} symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/master`.quiet();
+  await Bun.$`git -C ${root} checkout -q -b feature`.quiet();
+  writeFileSync(`${root}/committed.txt`, "added\n");
+  await Bun.$`git -C ${root} add -A`.quiet();
+  await Bun.$`git -C ${root} commit -qm feat`.quiet();
+  const { label, ref } = await baseRef(root);
+  expect(label).toBe("main"); // not "HEAD" — the branch's committed work stays visible
+  const paths = (await changedFiles(root, ref)).map((f) => f.path);
+  expect(paths).toContain("committed.txt");
+  rmSync(root, { recursive: true, force: true });
+});
+
+// --- untracked nested repos are not files ---
+
+test("untracked nested git repo does not become a changed-file row", async () => {
+  const root = await tempRepo();
+  writeFileSync(`${root}/a.txt`, "x\n");
+  await Bun.$`git -C ${root} add -A`.quiet();
+  await Bun.$`git -C ${root} commit -qm init`.quiet();
+  mkdirSync(`${root}/vendored`);
+  await Bun.$`git -C ${root}/vendored init -q`.quiet();
+  writeFileSync(`${root}/vendored/inner.txt`, "y\n");
+  const { ref } = await baseRef(root);
+  const paths = (await changedFiles(root, ref)).map((f) => f.path);
+  expect(paths.some((p) => p.endsWith("/"))).toBe(false); // no nameless, un-openable row
+  expect(paths).not.toContain("vendored/");
   rmSync(root, { recursive: true, force: true });
 });

@@ -618,14 +618,20 @@ export async function getSubagentTranscript(
 // that field, capped — not the full `input` (Write contents, Edit strings, long Bash
 // commands), which is never rendered and is ~half the payload.
 const TOOL_ARG_CAP = 200;
-const TOOL_ARG_FIELDS = ["command", "file_path", "pattern"] as const;
+const TOOL_ARG_FIELDS = ["command", "file_path", "notebook_path", "pattern"] as const;
+// A path is the chip's tap TARGET, not just its label — the client sends it straight back to
+// `/diff`. A truncated one resolves to nothing and the diff view reports "no changes", which
+// reads exactly like a reverted edit. Absolute worktree paths in a monorepo do reach the cap.
+// Paths are tens of bytes; the cap exists to stop Write contents and long Bash command lines.
+const UNCAPPED_FIELDS: ReadonlySet<string> = new Set(["file_path", "notebook_path"]);
 function slimToolUse(b: Extract<TranscriptBlock, { type: "tool_use" }>): TranscriptBlock {
   const raw = (b.input ?? {}) as Record<string, unknown>;
   const input: Record<string, string> = {};
   for (const k of TOOL_ARG_FIELDS) {
     const v = raw[k];
     if (typeof v === "string") {
-      input[k] = v.length > TOOL_ARG_CAP ? v.slice(0, TOOL_ARG_CAP) + "…" : v;
+      input[k] =
+        UNCAPPED_FIELDS.has(k) || v.length <= TOOL_ARG_CAP ? v : v.slice(0, TOOL_ARG_CAP) + "…";
       break; // the chip reads the first present field; one is enough
     }
   }

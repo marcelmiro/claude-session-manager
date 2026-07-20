@@ -92,6 +92,14 @@ export function safeRepoPath(root: string, rel: string): string | null {
   return real;
 }
 
+/**
+ * Wrap a path as a LITERAL git pathspec. Git pathspecs are wildmatch globs by default, so a
+ * real filename containing `[`, `*` or `?` (e.g. Next.js's `app/[slug]/page.tsx`) matches
+ * some OTHER file — or nothing — and the diff renders the wrong file's patch under the
+ * requested name. `:(literal)` turns off all magic for that pathspec.
+ */
+const literal = (p: string) => `:(literal)${p}`;
+
 /** Current branch (empty on detached HEAD). */
 async function currentBranch(root: string): Promise<string> {
   const r = await Bun.$`git -C ${root} branch --show-current`.nothrow().quiet();
@@ -123,8 +131,19 @@ export async function baseRef(root: string): Promise<{ ref: string; label: strin
     .nothrow()
     .quiet();
   if (sym.exitCode === 0) {
-    def = sym.stdout.toString().trim().replace(/^refs\/remotes\//, ""); // e.g. "origin/main"
-  } else {
+    const named = sym.stdout.toString().trim().replace(/^refs\/remotes\//, ""); // e.g. "origin/main"
+    // The symref survives a default-branch rename (master → main) pointing at a ref that no
+    // longer exists. Trusting it blind makes `merge-base` fail and silently collapses the PR
+    // view to uncommitted-only — every commit the agent made vanishes from the phone. Verify
+    // before use, and fall through to the candidates when it's dangling.
+    if (
+      named &&
+      (await Bun.$`git -C ${root} rev-parse --verify --quiet ${named}`.nothrow().quiet()).exitCode === 0
+    ) {
+      def = named;
+    }
+  }
+  if (!def) {
     for (const cand of ["origin/main", "origin/master", "origin/develop", "origin/trunk", "main", "master", "develop", "trunk"]) {
       if (
         (await Bun.$`git -C ${root} rev-parse --verify --quiet ${cand}`.nothrow().quiet())
@@ -148,7 +167,8 @@ export async function baseRef(root: string): Promise<{ ref: string; label: strin
  * no-base (falls back to empty-tree / HEAD via `baseRef`), untracked new files (fall back to
  * `--no-index` vs `/dev/null` so they render as all-additions), binary files, and an oversized
  * patch. `--no-renames` keeps paths literal so numstat parses cleanly. `abs` is the
- * pre-validated absolute path (from `safeRepoPath`); `rel` is repo-relative.
+ * pre-validated absolute path (from `safeRepoPath`); `rel` is repo-relative. Every pathspec
+ * goes through `literal()` — a real filename can contain glob metacharacters.
  */
 export async function fileDiff(
   root: string,
@@ -162,12 +182,13 @@ export async function fileDiff(
   // Rename: diff BOTH endpoints (`-M`) so the true content churn shows, not the whole new file
   // as a fresh add. `changedFiles` supplies `orig` (the old path) for its status-R rows.
   if (orig && orig !== rel) {
+    const [origSpec, relSpec] = [literal(orig), literal(rel)];
     const patch = (
-      await Bun.$`git -C ${root} diff -M ${ref} -- ${orig} ${rel}`.nothrow().quiet()
+      await Bun.$`git -C ${root} diff -M ${ref} -- ${origSpec} ${relSpec}`.nothrow().quiet()
     ).stdout.toString();
     if (patch.trim()) {
       const numstat = (
-        await Bun.$`git -C ${root} diff -M --numstat ${ref} -- ${orig} ${rel}`.nothrow().quiet()
+        await Bun.$`git -C ${root} diff -M --numstat ${ref} -- ${origSpec} ${relSpec}`.nothrow().quiet()
       ).stdout.toString();
       const { add, del, binary } = parseNumstat(numstat);
       if (binary) return { branch, base: label, status: "R", add, del, binary: true };
@@ -181,15 +202,18 @@ export async function fileDiff(
   // — only the latter gets the `--no-index` vs /dev/null fallback (renders as all-additions).
   // Exit 1 = has-diff, not an error (hence `.nothrow()`).
   const resolve = async (pathspec: string, absPath: string) => {
+    // `literal()` here rather than at the call sites: the NFD/NFC retry below feeds this a
+    // re-normalized path, and the pathspec magic has to wrap whichever form is actually used.
+    const spec = literal(pathspec);
     let patch = (
-      await Bun.$`git -C ${root} diff --no-renames ${ref} -- ${pathspec}`.nothrow().quiet()
+      await Bun.$`git -C ${root} diff --no-renames ${ref} -- ${spec}`.nothrow().quiet()
     ).stdout.toString();
     let numstat = (
-      await Bun.$`git -C ${root} diff --no-renames --numstat ${ref} -- ${pathspec}`.nothrow().quiet()
+      await Bun.$`git -C ${root} diff --no-renames --numstat ${ref} -- ${spec}`.nothrow().quiet()
     ).stdout.toString();
     const untracked =
       !patch.trim() &&
-      (await Bun.$`git -C ${root} ls-files --others --exclude-standard -- ${pathspec}`.nothrow().quiet())
+      (await Bun.$`git -C ${root} ls-files --others --exclude-standard -- ${spec}`.nothrow().quiet())
         .stdout.toString()
         .trim() !== "";
     if (untracked) {
@@ -303,6 +327,10 @@ export async function changedFiles(root: string, ref: string): Promise<ChangedFi
   await Promise.all(
     untracked.map(async (path) => {
       if (map.has(path)) return;
+      // A nested git repo (vendored clone, a package with its own .git) is reported as a
+      // single DIRECTORY token, `sub/`. It has no basename to render and no diff to open,
+      // so it would show as a nameless row that opens to nothing.
+      if (path.endsWith("/")) return;
       const ns = (
         await Bun.$`git -C ${root} diff --no-index --numstat --no-renames -- /dev/null ${`${root}/${path}`}`
           .nothrow()

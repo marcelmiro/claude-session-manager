@@ -911,7 +911,11 @@
       .wraptoggle button { background: none; border: 1px solid var(--dim); color: var(--muted); border-radius: 8px; padding: 2px 8px; font-size: 11px; }
       .diffbody { overflow-x: auto; }
       .diffbody.wrap { overflow-x: visible; }
-      .dl { display: flex; font-family: var(--mono); font-size: 11.5px; line-height: 1.5; white-space: pre; }
+      /* min-height, because a blank context line has two EMPTY flex children and so generates
+         no line box at all — line-height never applies and the line collapses to 0px, jamming
+         unrelated blocks of code together. Add/del rows escape this only because the gutter
+         holds a +/−. Does not cap taller rows in .diffbody.wrap. */
+      .dl { display: flex; min-height: 1.5em; font-family: var(--mono); font-size: 11.5px; line-height: 1.5; white-space: pre; }
       .diffbody.wrap .dl { white-space: pre-wrap; overflow-wrap: anywhere; }
       .dl .g { flex: none; width: 22px; text-align: center; color: var(--dim); user-select: none; }
       .dl .c { flex: 1; padding-right: 10px; }
@@ -924,7 +928,10 @@
       .changes-card { flex: none; width: 100%; align-self: stretch; margin: 12px 0 4px; border: 1px solid var(--border); border-radius: 12px; overflow: hidden; background: var(--surface); color: var(--fg); cursor: pointer; -webkit-tap-highlight-color: transparent; }
       .changes-card:active { background: var(--hover); }
       .cc-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 10px 13px; border-bottom: 1px solid var(--border); }
+      .cc-titles { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
       .cc-title { font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); }
+      /* The baseline the totals are measured against — branch vs base, not "what this session did". */
+      .cc-sub { font-family: var(--mono); font-size: 10.5px; color: var(--dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
       .cc-sum { display: flex; align-items: center; gap: 8px; font-family: var(--mono); font-size: 11px; }
       .cc-count { font-family: var(--mono); font-size: 11px; color: var(--peach); background: var(--peach-tint); border-radius: 999px; padding: 1px 8px; }
       .diffbar { display: inline-flex; gap: 2px; align-items: center; }

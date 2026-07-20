@@ -6,6 +6,8 @@ import { useRef, useEffect, useState } from "preact/hooks";
 import { signal } from "@preact/signals";
 import htm from "htm";
 import { Marked } from "marked";
+// Unified-patch parser, served unbuilt and covered by shared/diff-lines.test.ts.
+import { parseDiffLines } from "/diff-lines.js";
 
 const html = htm.bind(h);
 
@@ -60,10 +62,11 @@ const diffView = signal(null); // {path} → single-file diff pushed over the de
 const filesView = signal(false); // full changed-files list pushed over the detail
 
 // File-editing tools, shared by the rewind-checkpoint calc (canCode) and the diff chips.
-// Diff chips gate additionally on `input.file_path`, which NotebookEdit never carries
-// (its notebook_path isn't in the server's TOOL_ARG_FIELDS) — so NotebookEdit stays a
-// checkpoint boundary for rewind but is never tappable-to-diff.
+// Diff chips gate additionally on an edited path — `file_path` for most, `notebook_path`
+// for NotebookEdit.
 const EDIT_TOOLS = new Set(["Edit", "Write", "MultiEdit", "NotebookEdit"]);
+/** The path a tool_use chip edited, whichever field carries it. */
+const editedPath = (input) => input.file_path || input.notebook_path || "";
 // A whole-line bracketed user turn (e.g. "[Request interrupted by user for tool use]") is a
 // system notice Claude appends on interrupt — not a typed message. It's shown as a dim event
 // line, and Claude's /rewind picker never lists it as a checkpoint. Mirrors preview-pane.ts.
@@ -1084,13 +1087,15 @@ function Turn({ turn, upCount, canCode }) {
       );
     } else if (b.type === "tool_use") {
       const input = b.input || {};
-      const arg = input.command || input.file_path || input.pattern || "";
-      // Edit/Write/MultiEdit chips with a file_path are tappable → open that file's diff.
-      const tappable = EDIT_TOOLS.has(b.name) && !!input.file_path;
+      const path = editedPath(input);
+      const arg = input.command || path || input.pattern || "";
+      // A file-editing chip with a path is tappable → opens that file's diff. The route
+      // resolves a rename's old path itself, so the chip only has to name the file.
+      const tappable = EDIT_TOOLS.has(b.name) && !!path;
       els.push(
         html`<div
           class=${"tool" + (tappable ? " tap" : "")}
-          onClick=${tappable ? () => (diffView.value = { path: input.file_path }) : undefined}
+          onClick=${tappable ? () => (diffView.value = { path }) : undefined}
         >
           ▸ ${b.name || "tool"}${arg && html` <span class="arg">${arg}</span>`}${tappable &&
           html`<span class="tapchev">›</span>`}
@@ -2132,6 +2137,13 @@ const baseName = (p) => (p || "").split("/").pop();
 // Git status letter → color class (A added, M modified, D deleted; else muted).
 const STATUS_CLASS = { A: "st-a", M: "st-m", D: "st-d", R: "st-r" };
 
+// "branch vs base" — the baseline every changed-files surface is measured against. The list
+// is everything this BRANCH changed vs its base (committed and uncommitted, your own earlier
+// edits and any parallel session's included), not an attribution of what this session did.
+// Saying so is what stops "+248 −301" reading as "the agent wrote all that".
+const baseline = (d) =>
+  d && d.branch ? `${d.branch}${d.base && d.base !== d.branch ? ` vs ${d.base}` : ""}` : "";
+
 // One file's status badge + path (dir dimmed, filename bright) + LOC delta — shared by the
 // changed-files card preview and the full list so both read identically.
 function fileLine(f) {
@@ -2164,26 +2176,34 @@ function diffBar(add, del) {
 // The changed-files card at the END of the scrollable thread (not the fixed dock, so it costs
 // no composer viewport). Previews the latest-modified files (server-ordered) with LOC; a
 // "+N more" row appears past the preview cap. Tapping ANYWHERE opens the full list (FilesView).
-// Hidden entirely when the session changed nothing. Refetches on each new transcript revision.
+// Hidden entirely when the session changed nothing. Refetches on each new transcript revision,
+// and again whenever the bridge comes back after a drop.
 const CHANGES_PREVIEW = 3;
 function ChangesCard() {
   const sid = selectedId.value;
   const rev = transcript.value && transcript.value.rev;
+  const online = connected.value;
   const [data, setData] = useState(null);
+  // A session switch must not leave the previous session's files on screen. Declared before
+  // the fetch effect so it runs first when `sid` changes.
+  useEffect(() => setData(null), [sid]);
   useEffect(() => {
     if (!sid) return;
     let stale = false;
     (async () => {
       try {
         const r = await fetch(`/sessions/${encodeURIComponent(sid)}/changes`);
-        const d = r.ok ? await r.json() : { files: [] };
+        if (!r.ok) return;
+        const d = await r.json();
         if (!stale) setData(d);
       } catch {
-        if (!stale) setData({ files: [] });
+        // Unreachable bridge (the normal state on a train). Keep the last known list rather
+        // than replacing it with an empty one — an empty list HIDES the card, which reads as
+        // "the agent changed nothing". The global offline banner already says why it's stale.
       }
     })();
     return () => (stale = true);
-  }, [sid, rev]);
+  }, [sid, rev, online]);
   const files = (data && data.files) || [];
   if (files.length === 0) return null;
   const preview = files.slice(0, CHANGES_PREVIEW);
@@ -2196,7 +2216,10 @@ function ChangesCard() {
   return html`
     <div class="changes-card" role="button" tabindex="0" onClick=${() => (filesView.value = true)}>
       <div class="cc-head">
-        <span class="cc-title">Changed files</span>
+        <span class="cc-titles">
+          <span class="cc-title">Changed files</span>
+          ${baseline(data) && html`<span class="cc-sub">${baseline(data)}</span>`}
+        </span>
         <span class="cc-sum">
           <span class="cadd">+${totAdd}</span>
           <span class="cdel">−${totDel}</span>
@@ -2212,27 +2235,9 @@ function ChangesCard() {
   `;
 }
 
-// Parse a raw unified patch into display lines, dropping git's file/hunk-metadata headers
-// (diff/index/---/+++, mode/rename/binary markers, and "\ No newline…"). Coloring is by
-// leading char; content strips that char so gutters align. A trailing empty context line
-// from the final newline is dropped.
-function parseDiffLines(patch) {
-  const out = [];
-  for (const raw of patch.split("\n")) {
-    if (/^(diff |index |--- |\+\+\+ |old mode|new mode|similarity|dissimilarity|rename |copy |new file|deleted file|Binary files)/.test(raw)) continue;
-    if (raw.startsWith("@@")) out.push({ t: "hunk", s: raw });
-    else if (raw.startsWith("\\")) continue;
-    else if (raw.startsWith("+")) out.push({ t: "add", s: raw.slice(1) });
-    else if (raw.startsWith("-")) out.push({ t: "del", s: raw.slice(1) });
-    else out.push({ t: "ctx", s: raw.startsWith(" ") ? raw.slice(1) : raw });
-  }
-  if (out.length && out[out.length - 1].t === "ctx" && out[out.length - 1].s === "") out.pop();
-  return out;
-}
-
-// Full-screen diff for one file (raw `git diff HEAD` patch, colored here). Header labels the
-// baseline honestly as "uncommitted on <branch>" (working tree, not "what this session did").
-// A big diff collapses to the first 380 lines behind a "Load full diff" tap.
+// Full-screen diff for one file — the branch-vs-base patch (committed + uncommitted), parsed
+// by the shared /diff-lines.js and colored here. The header states the baseline it was
+// measured against. A big diff collapses to the first 380 lines behind a "Load full diff" tap.
 const DIFF_COLLAPSE = 380;
 function DiffView() {
   const v = diffView.value;
@@ -2252,24 +2257,27 @@ function DiffView() {
       try {
         const q = `path=${encodeURIComponent(path)}${orig ? `&orig=${encodeURIComponent(orig)}` : ""}`;
         const r = await fetch(`/sessions/${encodeURIComponent(sid)}/diff?${q}`);
+        // A failed REQUEST is not a git answer: keep the two apart so an unreachable bridge
+        // never renders as "this file has no changes".
         const d = r.ok ? await r.json() : { error: true };
         if (!stale) setData(d);
       } catch {
-        if (!stale) setData({ error: true });
+        if (!stale) setData({ offline: true });
       }
     })();
     return () => (stale = true);
   }, [path, orig, sid]);
   if (!v) return null;
-  const parsed = data && !data.error && data.patch ? parseDiffLines(data.patch) : [];
+  const bad = data && (data.error || data.offline);
+  const parsed = data && !bad && data.patch ? parseDiffLines(data.patch) : [];
   // A non-empty patch that strips to zero display lines is a metadata-only change (file
   // mode, pure rename) — render a notice, not a blank body.
-  const metaOnly = data && !data.error && data.patch && parsed.length === 0;
+  const metaOnly = data && !bad && data.patch && parsed.length === 0;
   const ok = parsed.length > 0;
   const lines = parsed;
   const shown = full ? lines : lines.slice(0, DIFF_COLLAPSE);
-  const sub = data && !data.error
-    ? `${data.branch || "—"}${data.base && data.base !== data.branch ? ` vs ${data.base}` : ""} · +${data.add} −${data.del}`
+  const sub = data && !bad
+    ? `${baseline(data) || "—"} · +${data.add} −${data.del}`
     : path;
   return html`
     <div class="screen files-view diff-view" ref=${rootRef} onTouchStart=${onTouchStart} onTouchEnd=${onTouchEnd}>
@@ -2290,8 +2298,9 @@ function DiffView() {
       </div>`}
       <div class="scroll" style="padding:0">
         ${!data && html`<div class="sub" style="padding:12px">loading…</div>`}
-        ${data && data.error && html`<div class="guard">No changes vs HEAD — the file may have moved.</div>`}
-        ${data && data.empty && html`<div class="guard">No changes vs HEAD.</div>`}
+        ${data && data.offline && html`<div class="guard">Couldn't reach the bridge — diff not loaded.</div>`}
+        ${data && data.error && html`<div class="guard">Couldn't load this file — it may have moved.</div>`}
+        ${data && data.empty && html`<div class="guard">No changes vs ${data.base || "the base branch"}.</div>`}
         ${metaOnly && html`<div class="guard">Metadata-only change (file mode or rename) — no content diff.</div>`}
         ${data && data.binary && html`<div class="guard">Binary file — not shown.</div>`}
         ${data && data.tooLarge && html`<div class="guard">Diff too large to preview.</div>`}
@@ -2318,8 +2327,12 @@ function FilesView() {
   const open = filesView.value;
   const rev = transcript.value && transcript.value.rev;
   const [data, setData] = useState(null);
+  const online = connected.value;
   const { rootRef, onTouchStart, onTouchEnd } = useSwipeBack(() => (filesView.value = false), [open]);
   const sid = selectedId.value;
+  // Never carry one session's file list into another. Declared before the fetch effect so it
+  // runs first when `sid` changes.
+  useEffect(() => setData(null), [sid]);
   useEffect(() => {
     if (!open) return;
     let stale = false;
@@ -2329,12 +2342,15 @@ function FilesView() {
         const d = r.ok ? await r.json() : { error: true };
         if (!stale) setData(d);
       } catch {
-        if (!stale) setData({ error: true });
+        // Unreachable bridge: hold the last known list (see ChangesCard) and say so only
+        // when there's nothing to hold.
+        if (!stale) setData((prev) => (prev && prev.files ? prev : { offline: true }));
       }
     })();
     return () => (stale = true);
-  }, [open, sid, rev]);
+  }, [open, sid, rev, online]);
   if (!open) return null;
+  const bad = data && (data.error || data.offline);
   const files = (data && data.files) || [];
   return html`
     <div class="screen files-view" ref=${rootRef} onTouchStart=${onTouchStart} onTouchEnd=${onTouchEnd}>
@@ -2342,18 +2358,15 @@ function FilesView() {
         <button class="iconbtn" onClick=${() => (filesView.value = false)} aria-label="Back to session">‹</button>
         <span class="grow"
           ><span class="name">Changed files</span>${data &&
-          !data.error &&
-          html`<span class="sub"
-            >${files.length}${data.branch ? ` · ${data.branch}` : ""}${data.base && data.base !== data.branch
-              ? ` vs ${data.base}`
-              : ""}</span
-          >`}</span
+          !bad &&
+          html`<span class="sub">${files.length}${baseline(data) ? ` · ${baseline(data)}` : ""}</span>`}</span
         >
       </div>
       <div class="scroll">
         ${!data && html`<div class="sub" style="padding:8px">loading…</div>`}
+        ${data && data.offline && html`<div class="guard">Couldn't reach the bridge — list not loaded.</div>`}
         ${data && data.error && html`<div class="guard">No live repo for this session.</div>`}
-        ${data && !data.error && files.length === 0 && html`<div class="guard">No file changes yet.</div>`}
+        ${data && !bad && files.length === 0 && html`<div class="guard">No file changes yet.</div>`}
         ${files.map(
           (f) => html`<div
             class="changerow"
