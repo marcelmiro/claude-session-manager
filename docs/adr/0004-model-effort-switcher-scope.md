@@ -28,8 +28,15 @@ reaches the pane on a bad value.
   user reads is Claude's own.
 - The sheet has to label `ultracode` as session-only, because the user cannot infer it.
 - Reading the *current* effort depends on the user's `~/.claude/statusline.sh` rendering
-  `.effort.level` as its trailing `• <level>` segment (it replaced the older `• thinking`
-  boolean); current *model* is already in the statusline. Without that dotfile edit the
-  switcher still works — the effort sheet just can't pre-mark the active level.
+  `.effort.level` as *some* `•`-delimited segment (it replaced the older `• thinking`
+  boolean); current *model* is already in the statusline. Position doesn't matter:
+  `parseStatusline` (`core/session-api.ts`) splits on `•` and token-scans every segment for an
+  `EFFORT_ARGS` member, last match winning, and for a model name — so a reordered statusline
+  still resolves. Without that dotfile edit the switcher still works; the effort sheet just
+  can't pre-mark the active level.
+- The scrape is irreducible, not laziness: the native `~/.claude/sessions/<pid>.json` carries
+  only `kind`, `sessionId`, `status`, `pid`, `updatedAt`. There is no structured per-session
+  source for effort anywhere. Weighed against the alternatives in
+  [ADR 6](0006-wrapping-claude-code.md).
 - Mechanics are guarded by `test/smoke/model-effort.sh`, opt-in because it drives real
   sessions; it is not part of `bun test`.
