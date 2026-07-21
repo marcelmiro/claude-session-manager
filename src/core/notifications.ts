@@ -1,5 +1,7 @@
+import { statSync } from "node:fs";
 import type { NotificationConfig, Session, TransitionEvent } from "../types";
 import type { SessionStatus } from "./status";
+import { PATHS } from "./config";
 import { getAbovePrompt } from "./status";
 import { renameWindow, getWindowName } from "./tmux";
 import { sourceForSession } from "./input-source";
@@ -214,9 +216,16 @@ export async function dispatchNotifications(
       }
     }
 
-    // Tier 4: phone push via ntfy — only when portkey drove the most recent input.
+    // Tier 4: phone push via ntfy — only when portkey drove the most recent input
+    // AND no portkey client is currently connected (an open phone already shows the
+    // change live via SSE; a push would just duplicate it).
     // Skip unresolved sessions (no id ⇒ can't attribute).
-    if (config.ntfyTopic && session.id && sourceForSession(session.id) === "portkey") {
+    if (
+      config.ntfyTopic &&
+      session.id &&
+      sourceForSession(session.id) === "portkey" &&
+      !portkeyConnected()
+    ) {
       await sendPushNotification(event, session, config);
     }
   }
@@ -253,6 +262,21 @@ export function pushAction(sessionId: string): string {
   }
   if (name === "AskUserQuestion") return "answer a question";
   return "needs permission";
+}
+
+/**
+ * True when a portkey client is connected right now. The bridge touches
+ * `~/.config/csm/bridge-consumer` on SSE connect and every 15s heartbeat while a
+ * client is live, and unlinks it when the last client disconnects (iOS tears the
+ * SSE socket down when portkey is backgrounded). ≤40s tolerates one missed
+ * heartbeat — the same threshold the question-intercept hook uses.
+ */
+export function portkeyConnected(): boolean {
+  try {
+    return Date.now() - statSync(`${PATHS.dir}/bridge-consumer`).mtimeMs < 40_000;
+  } catch {
+    return false; // marker missing — no phone connected
+  }
 }
 
 /** Cached bridge origin + when it was resolved (10-min TTL). */

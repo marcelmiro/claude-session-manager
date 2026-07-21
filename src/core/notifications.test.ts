@@ -9,13 +9,15 @@
 
 import "../../test/helpers/home";
 import { test, expect, beforeEach, afterEach } from "bun:test";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import {
   pushLabel,
   pushAction,
   bridgeOrigin,
+  portkeyConnected,
   sendPushNotification,
 } from "./notifications";
+import { PATHS } from "./config";
 import { EVENTS_DIR, eventLogPath } from "./hook-events";
 import type { HookEvent, NotificationConfig, Session, TransitionEvent } from "../types";
 
@@ -85,6 +87,24 @@ test("pushAction maps the pending tool NAME to a non-sensitive category", () => 
   writePreToolUse("read-s", "Read");
   expect(pushAction("read-s")).toBe("needs permission");
   expect(pushAction("no-log")).toBe("needs permission"); // no pending tool
+});
+
+// --- portkeyConnected (bridge-consumer marker freshness) ----------------------
+
+const MARKER = `${PATHS.dir}/bridge-consumer`;
+
+test("portkeyConnected: fresh marker → true, stale (>40s) → false, missing → false", () => {
+  rmSync(MARKER, { force: true });
+  expect(portkeyConnected()).toBe(false); // missing
+
+  writeFileSync(MARKER, "");
+  expect(portkeyConnected()).toBe(true); // fresh
+
+  const stale = (Date.now() - 41_000) / 1000;
+  utimesSync(MARKER, stale, stale);
+  expect(portkeyConnected()).toBe(false); // stale
+
+  rmSync(MARKER, { force: true });
 });
 
 // --- bridgeOrigin ------------------------------------------------------------
