@@ -142,10 +142,18 @@ test("listSubagents: reads fields + per-agent status, sorted by (spawnDepth, des
     description: "alpha task",
   }); // no spawnDepth → defaults to depth 1 for the sort
   const list = await listSubagents(tx);
-  // (depth ?? 1) ties → description alpha < zeta
+  // (depth ?? 1) ties → description alpha < zeta. A done agent's jsonl is immutable, so
+  // its mtime is its completion instant — surfaced as finishedAt; running agents omit it.
   expect(list).toEqual([
     { agentId: "aaa", agentType: "general-purpose", description: "alpha task", status: "running" },
-    { agentId: "bbb", agentType: "Explore", description: "zeta task", status: "done", spawnDepth: 1 },
+    {
+      agentId: "bbb",
+      agentType: "Explore",
+      description: "zeta task",
+      status: "done",
+      spawnDepth: 1,
+      finishedAt: expect.any(String),
+    },
   ]);
 });
 

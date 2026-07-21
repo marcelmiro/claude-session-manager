@@ -170,7 +170,7 @@ export function buildSessionStates(
  */
 export async function processHookEvents(
   paneSessionMap: Record<string, string>,
-): Promise<{ changed: boolean; changedPaneIds: Set<string> }> {
+): Promise<{ changed: boolean; changedPaneIds: Set<string>; paneMap: Record<string, string> }> {
   const changedPaneIds = new Set<string>();
   let changed = false;
 
@@ -184,5 +184,7 @@ export async function processHookEvents(
     }
   }
 
-  return { changed, changedPaneIds };
+  // Hand the freshly-loaded map back so callers on the discovery hot path don't
+  // immediately re-read the same per-pane files.
+  return { changed, changedPaneIds, paneMap: fresh };
 }

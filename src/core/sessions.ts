@@ -11,7 +11,7 @@ import { detectStatus, estimateContextPercent, type StatusResult } from "./statu
 import { getBaseRepoPath } from "./git";
 import { stripAllPrefixes, extractAIName } from "./notifications";
 import { slugify } from "./names";
-import { processHookEvents, loadPaneSessions, savePaneSessions, reconcilePaneFiles } from "./state";
+import { processHookEvents, savePaneSessions, reconcilePaneFiles } from "./state";
 import { eventSourcedStatus } from "./hook-events";
 import { nativeStatus } from "./session-state";
 import { readLastTurnAt, resolveTranscriptPath, latestTranscriptCwd } from "./last-turn";
@@ -72,28 +72,42 @@ export function resolvePaneSessionId(
  * Phase A: Active sessions from tmux panes (source of truth)
  * Phase B: Idle sessions from index files (secondary, filtered)
  */
-export async function discoverSessions(opts?: { skipArchivedSummaries?: boolean; nameMap?: Record<string, string> }): Promise<{ sessions: Session[]; changedPaneIds: Set<string> }> {
+/**
+ * Phase B (archived sweep) result cache, opt-in via `archivedTtlMs`. The sweep globs
+ * every project dir and re-reads index files, dominating a discovery cycle, yet archived
+ * sessions change on human timescales. Reused only while BOTH hold: the entry is younger
+ * than the caller's TTL, and the ACTIVE session-id set is unchanged — a just-killed pane
+ * must re-enter the archived list immediately (not vanish from both lists until the TTL
+ * expires), and a just-restored session must not appear twice.
+ */
+let archivedCache: { ts: number; activeKey: string; sessions: Session[] } | null = null;
+
+export async function discoverSessions(opts?: { skipArchivedSummaries?: boolean; nameMap?: Record<string, string>; archivedTtlMs?: number }): Promise<{ sessions: Session[]; changedPaneIds: Set<string> }> {
   const home = homedir();
   const projectsDir = `${home}/.claude/projects`;
 
   // Process hook events before discovery to pick up fresh pane→sessionId mappings
   const paneSessionMap = Object.fromEntries(paneSessionCache);
-  const { changed: hookChanged, changedPaneIds: hookChangedPanes } = await processHookEvents(paneSessionMap);
+  const {
+    changed: hookChanged,
+    changedPaneIds: hookChangedPanes,
+    // The persisted map (the same source `csm list` trusts) is a fallback for panes the
+    // in-memory cache has pruned: a freshly-launched session's hook event can be read on
+    // a cycle before its pane has a running claude process, and without this fallback
+    // that session would never resolve an id. processHookEvents just loaded it — reuse
+    // it instead of re-reading the per-pane files.
+    paneMap: persistedPaneMap,
+  } = await processHookEvents(paneSessionMap);
   if (hookChanged) {
     for (const [k, v] of Object.entries(paneSessionMap)) {
       paneSessionCache.set(k, v);
     }
   }
 
-  // Phase A: Gather tmux panes, Claude processes, and the persisted pane→session map
-  // in parallel. The persisted map (the same source `csm list` trusts) is a fallback
-  // for the consume-once hook-events log: a freshly-launched session's hook event can
-  // be read on a cycle before its pane has a running claude process — which prunes the
-  // cache entry — and without this fallback that session would never resolve an id.
-  const [panes, claudeProcesses, persistedPaneMap] = await Promise.all([
+  // Phase A: Gather tmux panes and Claude processes in parallel.
+  const [panes, claudeProcesses] = await Promise.all([
     listPanes(),
     findClaudeProcesses(),
-    loadPaneSessions(),
   ]);
 
   // Build a TTY→process map. ps reports "ttys001", tmux reports "/dev/ttys001".
@@ -152,8 +166,27 @@ export async function discoverSessions(opts?: { skipArchivedSummaries?: boolean;
   await savePaneSessions(exportPaneSessionCache());
   await reconcilePaneFiles(new Set(panes.map((p) => p.paneId)));
 
-  // Phase B: Discover archived sessions from index files
-  const archivedSessions = await discoverArchivedSessions(projectsDir, activeSessions, opts?.skipArchivedSummaries);
+  // Phase B: Discover archived sessions from index files. With `archivedTtlMs` (bridge
+  // opt-in — never for skipArchivedSummaries results, whose entries lack summaries),
+  // reuse the cached sweep while it's fresh AND the active id set is unchanged.
+  const cacheable = opts?.archivedTtlMs !== undefined && !opts?.skipArchivedSummaries;
+  const activeKey = activeSessions
+    .map((s) => s.id)
+    .filter(Boolean)
+    .sort()
+    .join(",");
+  let archivedSessions: Session[];
+  if (
+    cacheable &&
+    archivedCache &&
+    Date.now() - archivedCache.ts < opts!.archivedTtlMs! &&
+    archivedCache.activeKey === activeKey
+  ) {
+    archivedSessions = archivedCache.sessions;
+  } else {
+    archivedSessions = await discoverArchivedSessions(projectsDir, activeSessions, opts?.skipArchivedSummaries);
+    if (cacheable) archivedCache = { ts: Date.now(), activeKey, sessions: archivedSessions };
+  }
 
   const sessions = [...activeSessions, ...archivedSessions];
   await attachLastTurn(sessions);
@@ -793,14 +826,24 @@ async function discoverArchivedSessions(
 /**
  * Get the current git branch for a project path.
  * Returns empty string if not a git repo or command fails.
+ * Cached briefly per path — one subprocess per repo per discovery cycle, not per
+ * caller; a checkout on the Mac shows up within the TTL.
  */
+const GIT_BRANCH_TTL = 5000;
+const gitBranchCache = new Map<string, { ts: number; branch: string }>();
+
 async function getGitBranch(projectPath: string): Promise<string> {
+  const hit = gitBranchCache.get(projectPath);
+  if (hit && Date.now() - hit.ts < GIT_BRANCH_TTL) return hit.branch;
+  let branch = "";
   try {
-    const output = await Bun.$`git -C ${projectPath} branch --show-current`.quiet().text();
-    return output.trim();
+    branch = (await Bun.$`git -C ${projectPath} branch --show-current`.quiet().text()).trim();
   } catch {
-    return "";
+    // not a git repo / git failed — cache the miss too (same TTL) so a non-repo
+    // pane doesn't re-spawn git every cycle
   }
+  gitBranchCache.set(projectPath, { ts: Date.now(), branch });
+  return branch;
 }
 
 /**

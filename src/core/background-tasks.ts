@@ -36,10 +36,13 @@ export interface BackgroundTask {
   label: string;
   status: BackgroundTaskStatus;
   launchedAt?: string;
+  /** The task's output file (from the Bash launch confirmation) — the liveness probe target. */
+  outputPath?: string;
 }
 
 const LABEL_CAP = 160;
 const BASH_LAUNCH_RE = /Command running in background with ID: (\S+?)\./;
+const OUTPUT_PATH_RE = /Output is being written to: (\S+)/;
 const AGENT_LAUNCH_RE = /Async agent launched successfully[\s\S]*?agentId: (\w+)/;
 const NOTIF_TASK_ID_RE = /<task-id>(\S+?)<\/task-id>/;
 const NOTIF_TOOL_USE_RE = /<tool-use-id>(\S+?)<\/tool-use-id>/;
@@ -98,9 +101,11 @@ export function parseBackgroundTasks(jsonl: string): BackgroundTask[] {
             name === "Workflow" ||
             (name === "Agent" && input["run_in_background"] !== false);
           if (!isCandidate) continue;
+          // Description first: it's the model's own human label ("Background wait for
+          // Codex review"), far more readable on a phone than the shell loop it runs.
           candidates.set(String(block["id"]), {
             name,
-            label: String(input["command"] ?? input["description"] ?? name).slice(0, LABEL_CAP),
+            label: String(input["description"] ?? input["command"] ?? name).slice(0, LABEL_CAP),
           });
         } else if (block["type"] === "tool_result") {
           const toolUseId = String(block["tool_use_id"] ?? "");
@@ -123,6 +128,9 @@ export function parseBackgroundTasks(jsonl: string): BackgroundTask[] {
             task.taskId = taskId;
             byTaskId.set(taskId, task);
           }
+          // Strip the sentence's trailing period — the path itself ends in ".output".
+          const outputPath = text.match(OUTPUT_PATH_RE)?.[1]?.replace(/\.$/, "");
+          if (outputPath) task.outputPath = outputPath;
           if (ts) task.launchedAt = ts;
           byToolUse.set(toolUseId, task);
         }
@@ -146,10 +154,86 @@ export function parseBackgroundTasks(jsonl: string): BackgroundTask[] {
 }
 
 /**
- * The scripts a session is waiting on right now — what the phone renders.
- * Agents/workflows are excluded: running subagents are already surfaced from the
- * `subagents/` directory, and a workflow's child agents appear there too.
+ * The scripts a session is waiting on per the TRANSCRIPT — launched, no notification
+ * yet. Agents/workflows are excluded: running subagents are already surfaced from the
+ * `subagents/` directory, and a workflow's child agents appear there too. Callers that
+ * render should use `liveScripts` — the transcript can lie (an orphaned task's
+ * notification never arrives); the runner-liveness probe is what makes it honest.
  */
 export function pendingScripts(tasks: BackgroundTask[]): BackgroundTask[] {
   return tasks.filter((t) => t.kind === "script" && t.status === "pending");
+}
+
+// Liveness verdicts by taskId. Death is terminal — a runner never revives, so a dead
+// verdict is cached forever and costs no further probes. An alive verdict re-probes
+// after a short TTL to notice the runner exiting.
+const runnerVerdicts = new Map<string, { ts: number; alive: boolean }>();
+const ALIVE_TTL_MS = 15_000;
+
+/**
+ * Whether anything still runs a task: the runner holds an open fd on its output file
+ * for its whole life, so `lsof` on that path is a definitive orphan test. A session
+ * resumed under a new Claude process orphans its tasks — the transcript then says
+ * "pending" forever (seen in real data: a 3-day-old wait on a live pane), and this
+ * probe is what catches it. A missing output file (tmp pruned, reboot) reads dead too.
+ */
+async function runnerAlive(outputPath: string): Promise<boolean> {
+  try {
+    const proc = Bun.spawn(["lsof", "-t", outputPath], { stdout: "ignore", stderr: "ignore" });
+    return (await proc.exited) === 0;
+  } catch {
+    return false; // lsof unavailable/failed — treat as dead rather than badge forever
+  }
+}
+
+/**
+ * `pendingScripts` filtered to tasks whose runner is actually alive — what every
+ * rendering surface uses. A task without an outputPath can't be probed and stays
+ * visible. Note the flip side of trusting the probe: an intentionally-infinite
+ * background daemon shows for as long as it truly runs — a true statement.
+ */
+export async function liveScripts(
+  tasks: BackgroundTask[],
+  probe: (outputPath: string) => Promise<boolean> = runnerAlive,
+): Promise<BackgroundTask[]> {
+  const out: BackgroundTask[] = [];
+  for (const t of pendingScripts(tasks)) {
+    if (!t.outputPath) {
+      out.push(t);
+      continue;
+    }
+    const key = t.taskId ?? t.toolUseId;
+    const hit = runnerVerdicts.get(key);
+    let alive: boolean;
+    if (hit && (!hit.alive || Date.now() - hit.ts < ALIVE_TTL_MS)) alive = hit.alive;
+    else {
+      alive = await probe(t.outputPath);
+      runnerVerdicts.set(key, { ts: Date.now(), alive });
+    }
+    if (alive) out.push(t);
+  }
+  return out;
+}
+
+// Per-transcript cache keyed by (size, mtime) — launch and notification are both
+// transcript records, so an unchanged file means an unchanged answer. Shared by the
+// detail view and the sessions-list badge, so a change costs one scan total. Caches the
+// RAW tasks, not the filtered view: the liveness probe must run per read — a runner
+// can die while the file (and thus this cache entry) sits still.
+const pathCache = new Map<string, { size: number; mtimeMs: number; tasks: BackgroundTask[] }>();
+
+/** Cached live pending scripts for a transcript file (runner-probed). [] on unreadable. */
+export async function pendingScriptsAt(path: string): Promise<BackgroundTask[]> {
+  try {
+    const file = Bun.file(path);
+    const stat = await file.stat();
+    if (!stat) return [];
+    const hit = pathCache.get(path);
+    if (hit && hit.size === stat.size && hit.mtimeMs === stat.mtimeMs) return liveScripts(hit.tasks);
+    const tasks = parseBackgroundTasks(await file.text());
+    pathCache.set(path, { size: stat.size, mtimeMs: stat.mtimeMs, tasks });
+    return liveScripts(tasks);
+  } catch {
+    return [];
+  }
 }

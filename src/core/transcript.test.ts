@@ -227,6 +227,80 @@ test("parseActiveBranch drops subagent sidechain turns", () => {
   expect(texts(parseActiveBranch(raw))).toEqual(["main prompt", "main reply", "follow up"]);
 });
 
+// --- queued_command prompt attachments (messages consumed from the queue mid-turn) ---
+
+// Mirrors the real record shape: a message sent mid-turn and consumed inside a tool loop
+// never becomes a `user` record — only this attachment, on the active branch.
+function queuedRec(opts: {
+  uuid: string;
+  parentUuid: string | null;
+  prompt: string;
+  commandMode?: string;
+  origin?: boolean;
+}): string {
+  return JSON.stringify({
+    type: "attachment",
+    uuid: opts.uuid,
+    parentUuid: opts.parentUuid,
+    isSidechain: false,
+    attachment: {
+      type: "queued_command",
+      prompt: opts.prompt,
+      commandMode: opts.commandMode ?? "prompt",
+      ...(opts.origin === false ? {} : { origin: { kind: "human" } }),
+      timestamp: "2026-07-20T21:37:49.924Z",
+    },
+  });
+}
+
+test("a queued_command prompt attachment becomes a user turn flagged queued", () => {
+  const turns = parseTranscript(queuedRec({ uuid: "q", parentUuid: null, prompt: "queued msg" }));
+  expect(turns).toEqual([
+    { role: "user", content: [{ type: "text", text: "queued msg" }], queued: true },
+  ]);
+});
+
+test("prompt-mode without origin still maps; task-notification mode stays dropped", () => {
+  // 2 of 69 prompt-mode records in real history lack `origin` — commandMode is the gate.
+  expect(
+    parseTranscript(queuedRec({ uuid: "q", parentUuid: null, prompt: "no origin", origin: false })),
+  ).toHaveLength(1);
+  expect(
+    parseTranscript(
+      queuedRec({
+        uuid: "q",
+        parentUuid: null,
+        prompt: "<task-notification>\n<task-id>b1</task-id>",
+        commandMode: "task-notification",
+      }),
+    ),
+  ).toHaveLength(0);
+});
+
+test("parseActiveBranch walks through a queued attachment, mid-chain and as leaf", () => {
+  // Mid-chain: the next assistant record parents onto the attachment's uuid.
+  const midChain = [
+    rec({ uuid: "a", parentUuid: null, role: "user", text: "first" }),
+    rec({ uuid: "b", parentUuid: "a", role: "assistant", text: "working" }),
+    queuedRec({ uuid: "q", parentUuid: "b", prompt: "queued msg" }),
+    rec({ uuid: "c", parentUuid: "q", role: "assistant", text: "done" }),
+  ].join("\n");
+  expect(texts(parseActiveBranch(midChain))).toEqual(["first", "working", "queued msg", "done"]);
+
+  // As leaf: between the queue's `remove` and the next assistant append, the attachment
+  // is the deepest node — it must be leaf-eligible or the message vanishes for one poll.
+  const asLeaf = [
+    rec({ uuid: "a", parentUuid: null, role: "user", text: "first" }),
+    rec({ uuid: "b", parentUuid: "a", role: "assistant", text: "working" }),
+    queuedRec({ uuid: "q", parentUuid: "b", prompt: "queued msg" }),
+  ].join("\n");
+  expect(texts(parseActiveBranch(asLeaf))).toEqual(["first", "working", "queued msg"]);
+
+  // A task-notification attachment is NOT leaf-eligible — the branch stays put.
+  const notifLeaf = `${asLeaf}\n${queuedRec({ uuid: "n", parentUuid: "q", prompt: "<task-notification>x", commandMode: "task-notification" })}`;
+  expect(texts(parseActiveBranch(notifLeaf))).toEqual(["first", "working", "queued msg"]);
+});
+
 test("parseActiveBranch stops at a broken parent link, keeping the intact suffix", () => {
   // "a" references a parent that was never written (e.g. dropped/rotated head): the walk
   // stops rather than crashing, yielding the deepest recoverable suffix.

@@ -4,8 +4,10 @@
  * Reads a Claude Code JSONL transcript into ordered `TranscriptTurn`s. Generalizes
  * the tail-read in `jsonl-reader.ts`. Per A5, conversational records have a
  * top-level `type` of `user` | `assistant`; everything else (mode, permission-mode,
- * last-prompt, ai-title, system, file-history-snapshot, attachment, …) is meta and
- * dropped. A record nests an Anthropic `message` whose `content` is either a string
+ * last-prompt, ai-title, system, file-history-snapshot, …) is meta and dropped —
+ * EXCEPT a `queued_command` prompt attachment, which is a real human message consumed
+ * mid-turn (see `isQueuedPromptAttachment`) and maps to a `queued` user turn.
+ * A record nests an Anthropic `message` whose `content` is either a string
  * (→ one text block) or an array of blocks.
  *
  * SCOPE (A3): pending interactions are NOT here — a tool awaiting approval has no
@@ -56,6 +58,30 @@ interface RawRecord {
   isMeta?: boolean;
   isCompactSummary?: boolean;
   message?: { role?: string; content?: unknown };
+  attachment?: { type?: string; prompt?: unknown; commandMode?: string };
+}
+
+/**
+ * A message sent while the session is mid-turn sits in Claude Code's input queue. When
+ * it is consumed MID-turn (inside a tool loop — the common case) it never becomes a
+ * `user` record: the queue logs a `remove` op and the message lands on the active branch
+ * as a `queued_command` attachment (the next assistant record parents onto its uuid).
+ * Gate on `commandMode === "prompt"` — that is the human-typed kind; `task-notification`
+ * attachments are background-task plumbing and must stay dropped. (`origin.kind` is NOT
+ * the gate: some prompt-mode records in real history lack `origin` entirely.)
+ *
+ * Exported as THE gate for this record kind — `last-turn.ts`'s prompt-boundary scan
+ * reuses it so the thread and the "since your last prompt" boundary can't drift apart.
+ */
+export function isQueuedPromptAttachment(record: {
+  type?: string;
+  attachment?: { type?: string; commandMode?: string };
+}): boolean {
+  return (
+    record.type === "attachment" &&
+    record.attachment?.type === "queued_command" &&
+    record.attachment.commandMode === "prompt"
+  );
 }
 
 /**
@@ -68,6 +94,11 @@ interface RawRecord {
  * as user bubbles.
  */
 function recordToTurn(record: RawRecord): TranscriptTurn | null {
+  if (isQueuedPromptAttachment(record)) {
+    const text = typeof record.attachment?.prompt === "string" ? record.attachment.prompt : "";
+    if (!text || LOCAL_COMMAND_META.test(text) || TASK_NOTIFICATION.test(text)) return null;
+    return { role: "user", content: [{ type: "text", text }], queued: true };
+  }
   if (record.type !== "user" && record.type !== "assistant") return null;
   if (record.isMeta) return null;
   const content = record.message?.content;
@@ -141,7 +172,14 @@ export function parseActiveBranch(raw: string): TranscriptTurn[] {
     if (typeof record.uuid === "string") byId.set(record.uuid, record);
     const conversational = record.type === "user" || record.type === "assistant";
     if (conversational) sawConversational = true;
-    if (conversational && !record.isSidechain && typeof record.uuid === "string") {
+    // A queued-prompt attachment is leaf-eligible too: between its `remove` op and the
+    // next assistant append it IS the deepest node of the active branch — without this
+    // the just-consumed message would vanish from the transcript for one poll cycle.
+    if (
+      (conversational || isQueuedPromptAttachment(record)) &&
+      !record.isSidechain &&
+      typeof record.uuid === "string"
+    ) {
       leaf = record.uuid; // newest wins — the active tip is written last
     }
   }

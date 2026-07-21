@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { parseBackgroundTasks, pendingScripts } from "./background-tasks";
+import { parseBackgroundTasks, pendingScripts, liveScripts } from "./background-tasks";
 
 const line = (o: unknown) => JSON.stringify(o);
 
@@ -10,7 +10,7 @@ function bashLaunch(id: string, taskId: string | null, cmd = "sleep 99", ts = "2
     message: { content: [{ type: "tool_use", id, name: "Bash", input: { command: cmd, run_in_background: true } }] },
   });
   const resultText = taskId
-    ? `Command running in background with ID: ${taskId}. Output is being written to: /tmp/x.output.`
+    ? `Command running in background with ID: ${taskId}. Output is being written to: /tmp/${taskId}.output.`
     : "Permission for this action was denied by the auto mode classifier.";
   const result = line({
     type: "user",
@@ -33,9 +33,36 @@ describe("parseBackgroundTasks", () => {
         label: "sleep 99",
         status: "pending",
         taskId: "babc123",
+        outputPath: "/tmp/babc123.output",
         launchedAt: "2026-07-21T00:00:00Z",
       },
     ]);
+  });
+
+  test("label prefers the tool call's description over the raw command", () => {
+    const jsonl = [
+      line({
+        type: "assistant",
+        timestamp: "2026-07-21T00:00:00Z",
+        message: {
+          content: [
+            {
+              type: "tool_use",
+              id: "toolu_1",
+              name: "Bash",
+              input: { command: "for _ in $(seq 1 180); do gh api …; sleep 30; done", description: "Background wait for Codex review", run_in_background: true },
+            },
+          ],
+        },
+      }),
+      line({
+        type: "user",
+        message: {
+          content: [{ type: "tool_result", tool_use_id: "toolu_1", content: "Command running in background with ID: bwait1." }],
+        },
+      }),
+    ].join("\n");
+    expect(parseBackgroundTasks(jsonl)[0]!.label).toBe("Background wait for Codex review");
   });
 
   test("user-message notification completes the task", () => {
@@ -144,7 +171,53 @@ describe("parseBackgroundTasks", () => {
   });
 });
 
+describe("liveScripts", () => {
+  test("a pending task whose runner is dead (orphaned by a resume) is dropped", async () => {
+    const jsonl = [
+      ...bashLaunch("toolu_1", "bdead1", "gh pr checks --watch"),
+      ...bashLaunch("toolu_2", "blive2", "gh pr checks --watch"),
+    ].join("\n");
+    const probe = async (outputPath: string) => outputPath.includes("blive2");
+    const live = await liveScripts(parseBackgroundTasks(jsonl), probe);
+    expect(live.map((t) => t.taskId)).toEqual(["blive2"]);
+  });
+
+  test("a dead verdict is terminal — the probe is never re-run for that task", async () => {
+    const jsonl = bashLaunch("toolu_1", "bdead9").join("\n");
+    let calls = 0;
+    const probe = async () => ((calls += 1), false);
+    const tasks = parseBackgroundTasks(jsonl);
+    await liveScripts(tasks, probe);
+    await liveScripts(tasks, probe);
+    expect(calls).toBe(1);
+  });
+
+  test("a pending task without an output path can't be probed and stays visible", async () => {
+    // Hand-built task: launch confirmation without the output-path sentence.
+    const jsonl = [
+      line({
+        type: "assistant",
+        message: {
+          content: [
+            { type: "tool_use", id: "toolu_1", name: "Bash", input: { command: "x", run_in_background: true } },
+          ],
+        },
+      }),
+      line({
+        type: "user",
+        message: {
+          content: [{ type: "tool_result", tool_use_id: "toolu_1", content: "Command running in background with ID: bnopath." }],
+        },
+      }),
+    ].join("\n");
+    const probe = async () => false;
+    const live = await liveScripts(parseBackgroundTasks(jsonl), probe);
+    expect(live.map((t) => t.taskId)).toEqual(["bnopath"]);
+  });
+});
+
 describe("pendingScripts", () => {
+
   test("keeps pending scripts only — agents and completed scripts excluded", () => {
     const jsonl = [
       ...bashLaunch("toolu_1", "bdone1"),

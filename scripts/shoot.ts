@@ -174,6 +174,10 @@ async function main() {
   await cdp.send("Runtime.evaluate", { expression: "document.querySelector('.row')?.click()" });
   await shoot(cdp, "detail.png", 900);
 
+  // 3e. Open the background-work sheet (🤖/⏳ pill) → script row + agent grouping.
+  await cdp.send("Runtime.evaluate", { expression: "document.querySelector('.agentspill')?.click()" });
+  await shoot(cdp, "agents.png");
+
   log(`done → ${OUT}`);
 }
 

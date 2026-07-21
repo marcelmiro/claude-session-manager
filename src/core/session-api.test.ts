@@ -23,10 +23,13 @@ import {
   paneFromCommandLine,
   hasOpenQuestion,
   buildSessionTranscript,
+  pendingToolFields,
+  transcriptRevAt,
   slimTurns,
   composeMessageSteps,
   buildSendPlan,
   inputPending,
+  parseQueuedPending,
   getTranscript,
   sendMessage,
   answerSessionQuestion,
@@ -185,6 +188,33 @@ test("getTranscript: unknown session → empty turns, no throw", async () => {
   expect(t.lastAssistant).toBeUndefined();
 });
 
+// --- pendingToolFields (shared by the full response and the ?rev= fast path) ----
+
+test("pendingToolFields: null → empty object (no keys to overwrite a client merge)", () => {
+  expect(pendingToolFields(null)).toEqual({});
+});
+
+test("pendingToolFields: question pending → pendingTool + openQuestion(s)", () => {
+  const q = { question: "q", header: "h", options: [{ label: "A" }], multiSelect: false, toolUseId: "t" };
+  const ask: PendingToolCall = { name: "AskUserQuestion", toolUseId: "t", question: q, questions: [q] };
+  const f = pendingToolFields(ask);
+  expect(f.pendingTool).toBe(ask);
+  expect(f.openQuestion).toBe(q);
+  expect(f.openQuestions).toEqual([q]);
+});
+
+test("pendingToolFields: non-question pending → pendingTool only", () => {
+  const pending: PendingToolCall = { name: "Bash", toolUseId: "t", command: "ls" };
+  const f = pendingToolFields(pending);
+  expect(f.pendingTool).toBe(pending);
+  expect(f.openQuestion).toBeUndefined();
+  expect(f.openQuestions).toBeUndefined();
+});
+
+test("transcriptRevAt: unknown session → null", async () => {
+  expect(await transcriptRevAt("never-existed-uuid-xyz")).toBeNull();
+});
+
 // --- slimTurns (payload trimming for the bridge) -------------------------------
 
 test("slimTurns: drops thinking + tool_result, keeps text + tool_use", () => {
@@ -238,6 +268,17 @@ test("slimTurns: keeps the byte-free image marker alongside text", () => {
     { role: "user", content: [{ type: "text", text: "[Image #1] look" }, { type: "image" }] },
   ]);
   expect(t!.content).toEqual([{ type: "text", text: "[Image #1] look" }, { type: "image" }]);
+});
+
+test("slimTurns: per-turn flags (queued, compactSummary) survive the rebuild", () => {
+  const out = slimTurns([
+    { role: "user", content: [{ type: "text", text: "queued msg" }], queued: true },
+    { role: "user", content: [{ type: "text", text: "summary" }], compactSummary: true },
+    { role: "user", content: [{ type: "text", text: "plain" }] },
+  ]);
+  expect(out[0]!.queued).toBe(true);
+  expect(out[1]!.compactSummary).toBe(true);
+  expect(out[2]).toEqual({ role: "user", content: [{ type: "text", text: "plain" }] });
 });
 
 // --- composeMessageSteps (keystroke sequence for a message) ---------------------
@@ -343,6 +384,59 @@ test("inputPending: false once the input cleared (last ❯ line empty)", () => {
   // An earlier ❯ echo of the submitted message must NOT count — only the LAST ❯ line does.
   const cap = ["❯ [Image #1] what color", "  ⎿ [Image #1]", "⏺ Purple.", "❯ ", "────"].join("\n");
   expect(inputPending(cap)).toBe(false);
+});
+
+test("inputPending: false on the queued-messages placeholder (hint text, not a draft)", () => {
+  // Real pane capture while a message sits in the input queue: the queued message echoes
+  // as its own ❯ line above the separator, and the (empty) input renders placeholder hint
+  // text. Misreading it as a draft made sends wrap in stash/restore, and the restore C-y
+  // yanked stale kill-ring content into the prompt.
+  const cap = [
+    "  ❯ MID-TURN-MSG please also say the word guava",
+    "────",
+    "❯ Press up to edit queued messages",
+    "────",
+    "  32.5k/200k (16%) •  • Haiku 4.5",
+  ].join("\n");
+  expect(inputPending(cap)).toBe(false);
+});
+
+// --- parseQueuedPending (replay of queue-operation records) --------------------
+
+const qop = (operation: string, content: string | null) =>
+  JSON.stringify({ type: "queue-operation", operation, content, timestamp: "t" });
+
+test("parseQueuedPending: enqueue/dequeue is FIFO, remove deletes by content", () => {
+  expect(parseQueuedPending([qop("enqueue", "a"), qop("enqueue", "b")].join("\n"))).toEqual([
+    "a",
+    "b",
+  ]);
+  // dequeue carries content:null — it shifts the head.
+  expect(
+    parseQueuedPending([qop("enqueue", "a"), qop("enqueue", "b"), qop("dequeue", null)].join("\n")),
+  ).toEqual(["b"]);
+  // remove (mid-turn consumption) deletes the matching entry, wherever it sits.
+  expect(
+    parseQueuedPending([qop("enqueue", "a"), qop("enqueue", "b"), qop("remove", "a")].join("\n")),
+  ).toEqual(["b"]);
+});
+
+test("parseQueuedPending: popAll drains everything; task-notifications never surface", () => {
+  expect(
+    parseQueuedPending([qop("enqueue", "a"), qop("enqueue", "b"), qop("popAll", "a"), qop("popAll", "b")].join("\n")),
+  ).toEqual([]);
+  // A queued task-notification must be REPLAYED (a dequeue shifts whatever is at the
+  // head) but filtered from the survivors — it's harness plumbing, not a user message.
+  expect(
+    parseQueuedPending(
+      [qop("enqueue", "<task-notification>\n<task-id>b1</task-id>"), qop("enqueue", "real msg"), qop("dequeue", null)].join("\n"),
+    ),
+  ).toEqual(["real msg"]);
+});
+
+test("parseQueuedPending: tolerates torn lines and unknown ops", () => {
+  const raw = [qop("enqueue", "kept"), '{"type":"queue-operation","operation":"enq', qop("compact", "x")].join("\n");
+  expect(parseQueuedPending(raw)).toEqual(["kept"]);
 });
 
 // --- readContextUsage (token usage for the status-bar readout) -----------------
@@ -473,6 +567,35 @@ test("answerSessionQuestion: hook holding → decideQuestion resolves via the fi
   // A question decision was written carrying the selected label (keyed by question text).
   const dec = JSON.parse(readFileSync(join(DECISIONS_DIR, `${id}.json`), "utf8"));
   expect(dec.kind).toBe("question");
+  expect(dec.tool_use_id).toBe("tuq_1");
+  expect(dec.answers).toEqual({ Pick: "B" });
+});
+
+test("answerSessionQuestion: toolUseId mismatch → stale-question, current question untouched", async () => {
+  const id = "q-stale";
+  seedQuestionEvent(id, "tuq_current");
+  // Hook holding the CURRENT question — a stale phone card (rendered for an earlier,
+  // already-resolved question) must not consume it with selections the user made
+  // against different options.
+  mkdirSync(PENDING_DIR, { recursive: true });
+  writeFileSync(
+    join(PENDING_DIR, `${id}.json`),
+    JSON.stringify({ sessionId: id, kind: "question", tool_use_id: "tuq_current" }),
+  );
+  expect(await answerSessionQuestion(id, [0], "tuq_stale")).toEqual({ ok: false, reason: "stale-question" });
+  expect(existsSync(join(DECISIONS_DIR, `${id}.json`))).toBe(false);
+});
+
+test("answerSessionQuestion: matching toolUseId → answers via the file channel as before", async () => {
+  const id = "q-pinned";
+  seedQuestionEvent(id, "tuq_1");
+  mkdirSync(PENDING_DIR, { recursive: true });
+  writeFileSync(
+    join(PENDING_DIR, `${id}.json`),
+    JSON.stringify({ sessionId: id, kind: "question", tool_use_id: "tuq_1" }),
+  );
+  expect(await answerSessionQuestion(id, [1], "tuq_1")).toEqual({ ok: true });
+  const dec = JSON.parse(readFileSync(join(DECISIONS_DIR, `${id}.json`), "utf8"));
   expect(dec.tool_use_id).toBe("tuq_1");
   expect(dec.answers).toEqual({ Pick: "B" });
 });

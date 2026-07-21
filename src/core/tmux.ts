@@ -328,6 +328,40 @@ async function isAnswerReviewOpen(paneId: string): Promise<boolean> {
   return /Ready to submit your answers\?|❯\s*1\.\s*Submit answers/.test(bottom);
 }
 
+// The AskUserQuestion widget's own tells, safe against look-alikes: the option-list
+// footer says "Enter to select" (the rewind picker says "Enter to continue", permission
+// prompts have no such footer), and the multi-question wizard adds a ←/→ checkbox nav
+// bar. Deliberately NOT the ☐ glyph alone — task-list lines reuse it, so a running
+// session's todo list would read as an open picker.
+const QUESTION_PICKER_PATTERNS = [
+  /Enter to select/, // option-list footer (single- and multi-question widgets)
+  /←.*[☐✔].*→/, // multi-question tab nav bar
+];
+
+/**
+ * Whether an AskUserQuestion widget is visibly on the captured pane bottom.
+ * Trailing blank rows are trimmed first: a capture spans the full pane height, and on
+ * a short session the widget sits at the top of mostly-empty rows — the sample must be
+ * the bottom of the CONTENT, not the bottom of the pane. Pure classifier, exported for
+ * tests.
+ */
+export function questionPickerVisible(capturedOutput: string): boolean {
+  const bottom = capturedOutput.trimEnd().split("\n").slice(-20).join("\n");
+  return QUESTION_PICKER_PATTERNS.some((p) => p.test(bottom));
+}
+
+/**
+ * Whether the AskUserQuestion widget is actually on-screen right now. Gates the
+ * send-keys answer fallback: keystrokes fired at a pane that isn't showing the picker
+ * (spinner, plain composer) are silently swallowed, so answering must fail honestly
+ * instead of reporting ok. Samples after a short settle so a widget mid-repaint isn't
+ * misread as absent (same discipline as `isAnswerReviewOpen`).
+ */
+export async function isQuestionPickerOpen(paneId: string): Promise<boolean> {
+  await Bun.sleep(400);
+  return questionPickerVisible(await capturePane(paneId));
+}
+
 /**
  * Dispatch to the right keystroke model by question count (the two are different
  * widgets — see `questionAnswerKeys` vs `multiQuestionKeys`). A single-question

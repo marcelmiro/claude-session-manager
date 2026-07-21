@@ -16,6 +16,7 @@
 
 import { Glob } from "bun";
 import { homedir } from "os";
+import { isQueuedPromptAttachment } from "./transcript";
 
 /** Bytes of the file tail scanned for the newest conversational record. */
 const TAIL_SIZE = 64 * 1024;
@@ -34,12 +35,25 @@ const cache = new Map<string, { mtimeMs: number; at: number | null }>();
  * reader (transcript, mark-read, restore, age) follows the live conversation rather
  * than a frozen copy — an age read from a stale copy and messages read from the live
  * one would disagree by hours.
+ *
+ * Memoized briefly (default projects dir only — callers passing an explicit dir get a
+ * fresh scan; positive hits only, so a brand-new session's JSONL is found the moment it
+ * exists): one discovery cycle resolves every session, and each glob walks every project
+ * dir. The TTL also bounds how long a newest-copy flip (cwd moved worktree↔base) can go
+ * unnoticed.
  */
+const RESOLVE_TTL = 3000;
+const resolveCache = new Map<string, { ts: number; path: string }>();
+
 export async function resolveTranscriptPath(
   sessionId: string,
   projectsDir?: string,
 ): Promise<string | null> {
   const dir = projectsDir ?? `${homedir()}/.claude/projects`;
+  if (!projectsDir) {
+    const hit = resolveCache.get(sessionId);
+    if (hit && Date.now() - hit.ts < RESOLVE_TTL) return hit.path;
+  }
   try {
     let best: string | null = null;
     let bestMtime = -Infinity;
@@ -51,6 +65,7 @@ export async function resolveTranscriptPath(
         best = path;
       }
     }
+    if (best && !projectsDir) resolveCache.set(sessionId, { ts: Date.now(), path: best });
     return best;
   } catch {
     // missing projects dir or scan failure — no transcript
@@ -96,6 +111,109 @@ export async function readLastTurnAt(transcriptPath: string): Promise<number | n
     return at;
   } catch {
     return null; // unreadable transcript — caller falls back to mtime
+  }
+}
+
+// Non-prompt user records: harness plumbing that Claude logs with role user. Mirrors the
+// phone's isPromptTurn (rewind checkpoints) — tool_results are excluded structurally below.
+const NON_PROMPT_PREFIXES = [
+  "<task-notification>",
+  "<command-",
+  "<local-command",
+  "<system-reminder>",
+  "Caveat:",
+  "[Request interrupted",
+];
+
+/**
+ * Whether a parsed JSONL record is a REAL typed prompt — a `user` record whose content
+ * is text/image from the human, not a tool_result, task-notification, slash-command
+ * echo, or interrupt marker. A `queued_command` prompt attachment counts too: a message
+ * consumed from the input queue mid-turn never becomes a `user` record, but the human
+ * did just prompt. Exported for tests; the timestamp is read by the caller.
+ */
+export function isPromptRecord(rec: {
+  type?: string;
+  isMeta?: boolean;
+  isSidechain?: boolean;
+  message?: { content?: unknown };
+  attachment?: { type?: string; commandMode?: string; prompt?: unknown };
+}): boolean {
+  if (rec.isMeta === true || rec.isSidechain === true) return false;
+  if (rec.type === "attachment") {
+    // Same gate the transcript parser uses (commandMode, not origin.kind), so the
+    // thread's queued turns and this prompt boundary stay in lockstep.
+    if (!isQueuedPromptAttachment(rec)) return false;
+    const t = typeof rec.attachment?.prompt === "string" ? rec.attachment.prompt.trimStart() : "";
+    return t.length > 0 && !NON_PROMPT_PREFIXES.some((p) => t.startsWith(p));
+  }
+  if (rec.type !== "user") return false;
+  const content = rec.message?.content;
+  if (typeof content === "string") {
+    const t = content.trimStart();
+    return t.length > 0 && !NON_PROMPT_PREFIXES.some((p) => t.startsWith(p));
+  }
+  if (!Array.isArray(content)) return false;
+  const blocks = content as Array<{ type?: string; text?: unknown }>;
+  if (blocks.some((b) => b.type === "tool_result")) return false;
+  return blocks.some(
+    (b) =>
+      b.type === "image" ||
+      (b.type === "text" &&
+        typeof b.text === "string" &&
+        b.text.trim().length > 0 &&
+        !NON_PROMPT_PREFIXES.some((p) => (b.text as string).trimStart().startsWith(p))),
+  );
+}
+
+/** path → {mtimeMs, resolved prompt timestamp}. Same shape as the last-turn cache. */
+const promptCache = new Map<string, { mtimeMs: number; at: number | null }>();
+
+/**
+ * Epoch ms of the newest REAL user prompt in a transcript (see `isPromptRecord`), or
+ * null when none is found. The last prompt can sit far behind a long agentic turn's
+ * tail, so this scans backward in doubling windows (64KB → whole file) instead of a
+ * fixed tail — the scan stops at the first prompt, which is near the end in practice.
+ */
+export async function readLastPromptAt(transcriptPath: string): Promise<number | null> {
+  try {
+    const file = Bun.file(transcriptPath);
+    const stat = await file.stat();
+    if (!stat) return null;
+    const hit = promptCache.get(transcriptPath);
+    if (hit && hit.mtimeMs === stat.mtimeMs) return hit.at;
+
+    let at: number | null = null;
+    let scannedTo = stat.size; // lines at/after this offset were covered by a previous window
+    for (let window = TAIL_SIZE; ; window *= 2) {
+      const start = Math.max(0, stat.size - window);
+      const chunk = await file.slice(start, scannedTo).text();
+      const lines = chunk.split("\n");
+      const first = start > 0 ? 1 : 0; // leading line may be a partial record
+      for (let i = lines.length - 1; i >= first; i--) {
+        const line = lines[i]!.trim();
+        // Queued-prompt attachments don't carry `"type":"user"` — match their own marker.
+        if (!line || (!line.includes('"type":"user"') && !line.includes('"queued_command"'))) continue;
+        let rec: Parameters<typeof isPromptRecord>[0] & { timestamp?: string };
+        try {
+          rec = JSON.parse(line);
+        } catch {
+          continue;
+        }
+        if (!isPromptRecord(rec)) continue;
+        const ts = rec.timestamp ? new Date(rec.timestamp).getTime() : NaN;
+        if (!Number.isFinite(ts)) continue;
+        at = ts;
+        break;
+      }
+      if (at !== null || start === 0) break;
+      // Re-scan window overlap is bounded: the next pass reads [newStart, start+partial).
+      scannedTo = start + (lines[0]?.length ?? 0) + 1;
+    }
+    promptCache.set(transcriptPath, { mtimeMs: stat.mtimeMs, at });
+    return at;
+  } catch {
+    return null; // unreadable transcript
   }
 }
 

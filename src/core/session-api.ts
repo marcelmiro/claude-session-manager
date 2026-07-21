@@ -12,7 +12,7 @@
  */
 
 import { Glob } from "bun";
-import { resolveTranscriptPath } from "./last-turn";
+import { resolveTranscriptPath, readLastPromptAt } from "./last-turn";
 import { lastAssistantMessage, parseActiveBranch, parseTranscript } from "./transcript";
 import { pendingToolCall } from "./hook-events";
 import { loadPaneSessions, savePaneSessions } from "./state";
@@ -21,6 +21,7 @@ import {
   listPanes,
   sendTextAndEnter,
   answerQuestion,
+  isQuestionPickerOpen,
   getMainSession,
   launchClaudeWindow,
   launchResumeWindow,
@@ -31,7 +32,7 @@ import {
   killPane,
 } from "./tmux";
 import { isPermissionPrompt } from "./status";
-import { parseBackgroundTasks, pendingScripts, type BackgroundTask } from "./background-tasks";
+import { parseBackgroundTasks, liveScripts, type BackgroundTask } from "./background-tasks";
 import { decideQuestion, declineQuestion, buildAnswersMap } from "./approval";
 import type { PendingQuestion, PendingToolCall } from "./jsonl-reader";
 import type { TranscriptBlock, TranscriptTurn } from "../types";
@@ -55,6 +56,18 @@ export interface SessionTranscript {
    */
   pendingScripts?: BackgroundTask[];
   /**
+   * Messages sitting in Claude Code's input queue — sent while the session was mid-turn
+   * and not yet consumed. The phone renders these as dim "queued" bubbles: they are not
+   * turns yet (no transcript record beyond the queue op), but without them a second
+   * consecutive send is simply invisible until Claude picks it up. Omitted when empty.
+   */
+  queuedPending?: string[];
+  /**
+   * ISO instant of the newest real typed prompt — the phone's boundary between subagents
+   * that finished "since you last asked" (fresh reports, shown) and older ones (collapsed).
+   */
+  lastPromptAt?: string;
+  /**
    * Opaque disk revision of the transcript file (`size:mtimeMs`) — bumps on ANY JSONL write
    * (append OR rewind's new branch). The phone snapshots it at rewind time and clears its
    * optimistic (truncated + prefilled) view once `rev` changes, i.e. once the resend lands.
@@ -73,6 +86,8 @@ export interface SubagentSummary {
   description: string;
   status: "done" | "running";
   spawnDepth?: number;
+  /** When a done agent's jsonl last grew (its completion instant, as mtime ISO). */
+  finishedAt?: string;
 }
 
 /** Context-window usage for the mobile status-bar readout (mirrors the Mac statusline). */
@@ -139,8 +154,8 @@ export function parseStatusline(line: string): { model?: string; effort?: string
  * current permission mode (auto/plan), neither of which is in any file. The statusline
  * is anchored by its token `X/Y (Z%)` fragment; the mode by its ⏵⏵/⏸ marker.
  */
-export async function readPaneStatusline(paneId: string): Promise<PaneStatusline> {
-  const cap = await capturePane(paneId);
+export async function readPaneStatusline(paneId: string, capture?: string): Promise<PaneStatusline> {
+  const cap = capture ?? (await capturePane(paneId));
   const tail = cap.split("\n").map((l) => l.trimEnd()).slice(-12);
   const res: PaneStatusline = {};
   for (let i = tail.length - 1; i >= 0; i--) {
@@ -159,7 +174,7 @@ export async function readPaneStatusline(paneId: string): Promise<PaneStatusline
 /** Outcome of a send; `reason` is set only on rejection (nothing was sent). */
 export type SendResult = {
   ok: boolean;
-  reason?: "no-pane" | "no-question" | "not-held" | "no-prompt" | "no-session" | "rewind-unavailable" | "rewind-mismatch" | "rewind-mode" | "bad-image" | "bad-selection" | "no-confirm" | "no-repo" | "no-transcript" | "resume-failed" | "not-found";
+  reason?: "no-pane" | "no-question" | "stale-question" | "not-presented" | "not-held" | "no-prompt" | "no-session" | "rewind-unavailable" | "rewind-mismatch" | "rewind-mode" | "bad-image" | "bad-selection" | "no-confirm" | "no-repo" | "no-transcript" | "resume-failed" | "not-found";
   /** Fresh session id, set by createSession to the dictated id. */
   sessionId?: string;
 };
@@ -536,7 +551,8 @@ export async function listSubagents(transcriptPath: string): Promise<SubagentSum
       } catch {
         continue; // corrupt/unreadable meta — skip this row
       }
-      const status = await subagentStatus(`${dir}/agent-${agentId}.jsonl`);
+      const jsonlPath = `${dir}/agent-${agentId}.jsonl`;
+      const status = await subagentStatus(jsonlPath);
       const summary: SubagentSummary = {
         agentId,
         agentType: typeof meta.agentType === "string" ? meta.agentType : "agent",
@@ -544,6 +560,14 @@ export async function listSubagents(transcriptPath: string): Promise<SubagentSum
         status,
       };
       if (typeof meta.spawnDepth === "number") summary.spawnDepth = meta.spawnDepth;
+      if (status === "done") {
+        // A done agent's jsonl is immutable, so its mtime IS the completion instant —
+        // the phone groups "finished since your last prompt" vs older with it.
+        try {
+          const stat = await Bun.file(jsonlPath).stat();
+          if (stat) summary.finishedAt = new Date(stat.mtimeMs).toISOString();
+        } catch {}
+      }
       out.push(summary);
     }
   } catch {
@@ -633,7 +657,12 @@ export function slimTurns(turns: TranscriptTurn[]): TranscriptTurn[] {
       else if (b.type === "tool_use") content.push(slimToolUse(b));
     }
     if (content.length === 0 && t.content.length > 0) continue;
-    out.push({ role: t.role, content });
+    // Rebuild with only the fields the client uses — the per-turn flags must ride along
+    // (the compact-summary divider and the queued/rewind-skip handling both key on them).
+    const slim: TranscriptTurn = { role: t.role, content };
+    if (t.compactSummary) slim.compactSummary = true;
+    if (t.queued) slim.queued = true;
+    out.push(slim);
   }
   return out;
 }
@@ -651,10 +680,83 @@ export function buildSessionTranscript(
   const result: SessionTranscript = { turns };
   const lastAssistant = lastAssistantMessage(turns);
   if (lastAssistant !== undefined) result.lastAssistant = lastAssistant;
-  if (pendingTool) result.pendingTool = pendingTool;
-  if (pendingTool?.question) result.openQuestion = pendingTool.question;
-  if (pendingTool?.questions) result.openQuestions = pendingTool.questions;
+  Object.assign(result, pendingToolFields(pendingTool));
   return result;
+}
+
+/**
+ * Shape a pending tool call into the transcript payload's pendingTool/openQuestion(s)
+ * fields — shared by the full response (buildSessionTranscript) and the `?rev=`
+ * unchanged fast path, which must keep shipping these: they come from the hook events
+ * log and change while the transcript file doesn't.
+ */
+export function pendingToolFields(
+  pendingTool: PendingToolCall | null,
+): Pick<SessionTranscript, "pendingTool" | "openQuestion" | "openQuestions"> {
+  const out: Pick<SessionTranscript, "pendingTool" | "openQuestion" | "openQuestions"> = {};
+  if (pendingTool) out.pendingTool = pendingTool;
+  if (pendingTool?.question) out.openQuestion = pendingTool.question;
+  if (pendingTool?.questions) out.openQuestions = pendingTool.questions;
+  return out;
+}
+
+/**
+ * The transcript file's current disk revision (`size:mtimeMs`, matching the `rev` a full
+ * response carries), or null when no transcript exists. The `/transcript?rev=` fast path
+ * compares this against the client's held rev — one memoized path lookup + one stat.
+ */
+export async function transcriptRevAt(sessionId: string): Promise<{ path: string; rev: string } | null> {
+  const path = await resolveTranscriptPath(sessionId);
+  if (!path) return null;
+  try {
+    const stat = await Bun.file(path).stat();
+    if (!stat) return null;
+    return { path, rev: `${stat.size}:${stat.mtimeMs}` };
+  } catch {
+    return null; // vanished between resolve and stat
+  }
+}
+
+/**
+ * Replay a transcript's `queue-operation` records into the messages still queued at EOF.
+ * These are op-log lines, not tree nodes (no `uuid`), so this cannot be derived from the
+ * active-branch turns — it mirrors `parseBackgroundTasks`'s linear scan instead. Observed
+ * ops (validated against real history): `enqueue` carries the text, `dequeue` carries
+ * null (a FIFO shift), `remove` carries the text of the entry Claude consumed mid-turn,
+ * `popAll` drains everything (one record per drained entry — clearing is idempotent).
+ * Task-notification payloads ride the same queue and must be replayed (a dequeue shifts
+ * whatever is at the head) but are filtered from the returned survivors — they are
+ * harness plumbing, not something the phone should show as a queued message.
+ */
+export function parseQueuedPending(jsonl: string): string[] {
+  const queue: string[] = [];
+  for (const line of jsonl.split("\n")) {
+    if (!line.includes('"queue-operation"')) continue;
+    let rec: { type?: string; operation?: string; content?: unknown };
+    try {
+      rec = JSON.parse(line);
+    } catch {
+      continue; // torn/partial line
+    }
+    if (rec.type !== "queue-operation") continue;
+    switch (rec.operation) {
+      case "enqueue":
+        if (typeof rec.content === "string") queue.push(rec.content);
+        break;
+      case "dequeue":
+        queue.shift();
+        break;
+      case "remove": {
+        const i = typeof rec.content === "string" ? queue.indexOf(rec.content) : -1;
+        if (i >= 0) queue.splice(i, 1);
+        break;
+      }
+      case "popAll":
+        queue.length = 0;
+        break;
+    }
+  }
+  return queue.filter((text) => !text.trimStart().startsWith("<task-notification>"));
 }
 
 // Per-path cache of the parsed active branch, keyed by the file's size+mtime. Any change
@@ -663,31 +765,58 @@ export function buildSessionTranscript(
 // parse instead of re-reading and re-parsing a multi-MB log on every refresh.
 const branchCache = new Map<
   string,
-  { size: number; mtimeMs: number; turns: TranscriptTurn[]; pendingScripts: BackgroundTask[] }
+  {
+    size: number;
+    mtimeMs: number;
+    turns: TranscriptTurn[];
+    backgroundTasks: BackgroundTask[];
+    queuedPending: string[];
+    usage: ContextUsage | null;
+  }
 >();
 
-async function readActiveBranchCached(
-  path: string,
-): Promise<{ turns: TranscriptTurn[]; pendingScripts: BackgroundTask[] }> {
+async function readActiveBranchCached(path: string): Promise<{
+  turns: TranscriptTurn[];
+  pendingScripts: BackgroundTask[];
+  queuedPending: string[];
+  usage: ContextUsage | null;
+}> {
   try {
     const file = Bun.file(path);
     const stat = await file.stat();
-    if (!stat) return { turns: [], pendingScripts: [] };
+    if (!stat) return { turns: [], pendingScripts: [], queuedPending: [], usage: null };
     const hit = branchCache.get(path);
-    if (hit && hit.size === stat.size && hit.mtimeMs === stat.mtimeMs) return hit;
+    // pendingScripts is derived per READ, not cached: the runner-liveness probe must
+    // keep running while the file — and thus the cache entry — sits still, or a wait
+    // whose runner died would stay visible until the transcript next changes.
+    if (hit && hit.size === stat.size && hit.mtimeMs === stat.mtimeMs)
+      return {
+        turns: hit.turns,
+        pendingScripts: await liveScripts(hit.backgroundTasks),
+        queuedPending: hit.queuedPending,
+        usage: hit.usage,
+      };
     const text = await file.text();
     const entry = {
       size: stat.size,
       mtimeMs: stat.mtimeMs,
       turns: parseActiveBranch(text),
-      // Piggybacked on the same read: pending scripts change only when the file does
-      // (launch and notification are both transcript records), so one cache covers both.
-      pendingScripts: pendingScripts(parseBackgroundTasks(text)),
+      // Piggybacked on the same read: background tasks, the queued-message replay, and
+      // context usage change only when the file does (all are transcript records), so
+      // one cache covers all of them.
+      backgroundTasks: parseBackgroundTasks(text),
+      queuedPending: parseQueuedPending(text),
+      usage: contextUsageFromLines(text.split("\n")),
     };
     branchCache.set(path, entry);
-    return entry;
+    return {
+      turns: entry.turns,
+      pendingScripts: await liveScripts(entry.backgroundTasks),
+      queuedPending: entry.queuedPending,
+      usage: entry.usage,
+    };
   } catch {
-    return { turns: [], pendingScripts: [] }; // missing/unreadable transcript
+    return { turns: [], pendingScripts: [], queuedPending: [], usage: null }; // missing/unreadable transcript
   }
 }
 
@@ -704,21 +833,27 @@ export async function getTranscript(sessionId: string): Promise<SessionTranscrip
   // leaf→root path each time, always returning a full replacement (no cursor). The full
   // re-parse is gated behind a size+mtime cache (any change grows the file), so an idle
   // session re-uses the prior parse instead of re-reading a multi-MB log every refresh.
-  const branch = path
-    ? await readActiveBranchCached(path)
-    : { turns: [], pendingScripts: [] as BackgroundTask[] };
+  // Subagent listing and the last-prompt boundary only need the path — overlap them
+  // with the branch read.
+  const [branch, subagents, lastPromptAt] = path
+    ? await Promise.all([readActiveBranchCached(path), listSubagents(path), readLastPromptAt(path)])
+    : [
+        { turns: [], pendingScripts: [] as BackgroundTask[], queuedPending: [] as string[], usage: null },
+        [],
+        null,
+      ];
   const result = buildSessionTranscript(slimTurns(branch.turns), pendingToolCall(sessionId));
   if (branch.pendingScripts.length > 0) result.pendingScripts = branch.pendingScripts;
+  if (branch.queuedPending.length > 0) result.queuedPending = branch.queuedPending;
   if (path) {
     // Reuse the size+mtime the cached read just stat()'d — no extra syscall (see branchCache).
     const entry = branchCache.get(path);
     if (entry) result.rev = `${entry.size}:${entry.mtimeMs}`;
-    const usage = await readContextUsage(path);
-    if (usage) result.usage = usage;
-    // Source subagents from the directory beside the transcript (already-resolved path —
-    // no second glob). Omitted entirely when the session fanned out to none.
-    const subagents = await listSubagents(path);
+    // Usage rides the same cached read — no separate tail read of the file.
+    if (branch.usage) result.usage = branch.usage;
+    // Omitted entirely when the session fanned out to no subagents.
     if (subagents.length > 0) result.subagents = subagents;
+    if (lastPromptAt !== null) result.lastPromptAt = new Date(lastPromptAt).toISOString();
   }
   return result;
 }
@@ -736,27 +871,32 @@ export async function readContextUsage(transcriptPath: string): Promise<ContextU
     const bytes = file.size;
     if (!bytes) return null;
     const text = await file.slice(Math.max(0, bytes - 65536)).text();
-    const lines = text.split("\n");
-    for (let i = lines.length - 1; i >= 0; i--) {
-      const line = lines[i]!.trim();
-      if (!line.includes('"usage"')) continue;
-      let u: Record<string, unknown> | undefined;
-      try {
-        u = (JSON.parse(line) as { message?: { usage?: Record<string, unknown> } })?.message?.usage;
-      } catch {
-        continue; // partial line at the chunk's leading edge — skip it
-      }
-      if (u && typeof u.input_tokens === "number") {
-        const tokens =
-          (u.input_tokens as number) +
-          ((u.cache_creation_input_tokens as number) || 0) +
-          ((u.cache_read_input_tokens as number) || 0);
-        const size = tokens > 200_000 ? 1_000_000 : 200_000;
-        return { tokens, size, percent: Math.round((tokens * 100) / size) };
-      }
-    }
+    return contextUsageFromLines(text.split("\n"));
   } catch {
     // missing/unreadable transcript — no usage
+  }
+  return null;
+}
+
+/** Newest `usage` record among `lines`, scanned back-to-front (the newest is last). */
+function contextUsageFromLines(lines: string[]): ContextUsage | null {
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i]!.trim();
+    if (!line.includes('"usage"')) continue;
+    let u: Record<string, unknown> | undefined;
+    try {
+      u = (JSON.parse(line) as { message?: { usage?: Record<string, unknown> } })?.message?.usage;
+    } catch {
+      continue; // partial line at the chunk's leading edge — skip it
+    }
+    if (u && typeof u.input_tokens === "number") {
+      const tokens =
+        (u.input_tokens as number) +
+        ((u.cache_creation_input_tokens as number) || 0) +
+        ((u.cache_read_input_tokens as number) || 0);
+      const size = tokens > 200_000 ? 1_000_000 : 200_000;
+      return { tokens, size, percent: Math.round((tokens * 100) / size) };
+    }
   }
   return null;
 }
@@ -1047,12 +1187,23 @@ export async function setSessionModelEffort(
  * message actually submitted. The live input is the LAST `❯` line in the capture; any
  * non-whitespace after the glyph means the Enter hasn't landed yet. (Submitted messages
  * also echo as `❯ …` lines higher up, hence "last".)
+ *
+ * While a message sits in Claude's input queue the empty prompt renders a placeholder
+ * ("Press up to edit queued messages") — hint text, not a draft. Reading it as a draft
+ * made every send after a queued one wrap in stash/restore, and the restore C-y yanked
+ * whatever the kill-ring last held into the prompt. If a future Claude release rewords
+ * the placeholder, the exact-match miss just restores the old (false-draft) behavior.
  */
+const QUEUED_PLACEHOLDER = "Press up to edit queued messages";
+
 export function inputPending(capture: string): boolean {
   const lines = capture.split("\n");
   for (let i = lines.length - 1; i >= 0; i--) {
     const m = lines[i]!.match(/^❯\s?(.*)$/);
-    if (m) return m[1]!.trim().length > 0;
+    if (m) {
+      const input = m[1]!.trim();
+      return input.length > 0 && input !== QUEUED_PLACEHOLDER;
+    }
   }
   return false;
 }
@@ -1065,13 +1216,20 @@ export function inputPending(capture: string): boolean {
  * resolves it via `updatedInput.answers` (no live pane needed). Only the un-intercepted
  * (native-widget) case — not tracked, no live phone, or focused — falls through to
  * send-keys, which does need a pane. Rejects when no question is open or the length is off.
+ *
+ * `toolUseId` (when the client sends it) pins the answer to the question the client
+ * actually rendered: a card can go stale on the phone (the question was answered
+ * elsewhere and a NEW one is pending), and without the pin the selections would
+ * silently answer a question the user never saw.
  */
 export async function answerSessionQuestion(
   sessionId: string,
   selections: (number | number[])[],
+  toolUseId?: string,
 ): Promise<SendResult> {
   const pending = pendingToolCall(sessionId);
   if (!hasOpenQuestion(pending)) return { ok: false, reason: "no-question" };
+  if (toolUseId && toolUseId !== pending!.toolUseId) return { ok: false, reason: "stale-question" };
   // One selection per question — a length mismatch means the client is out of sync
   // with the live prompt; reject before sending any keystroke to a wrong tab.
   const questions = pending!.questions ?? [pending!.question!];
@@ -1080,9 +1238,13 @@ export async function answerSessionQuestion(
   if (decideQuestion(sessionId, pending!.toolUseId, buildAnswersMap(questions, selections))) {
     return { ok: true };
   }
-  // Un-intercepted (native widget) → drive the live pane.
+  // Un-intercepted (native widget) → drive the live pane, but only when the picker is
+  // actually on-screen: keystrokes fired at a spinner or bare composer are silently
+  // swallowed, and reporting ok for them is exactly the accepted-but-inert answer the
+  // phone experienced as "tapping does nothing".
   const paneId = await resolveSessionPane(sessionId);
   if (!paneId) return { ok: false, reason: "no-pane" };
+  if (!(await isQuestionPickerOpen(paneId))) return { ok: false, reason: "not-presented" };
   await answerQuestion(paneId, selections);
   return { ok: true };
 }

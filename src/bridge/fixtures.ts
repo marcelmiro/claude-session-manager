@@ -58,6 +58,9 @@ export const FIXTURE_SESSIONS = [
     summary: "Tighten the README wording",
     statusSource: "fixture",
     modified: ago(11 * 60_000),
+    // Reads ready but waits on a background script → inline ⏳ after the name,
+    // counted into the header's 🔄 chip.
+    pendingScripts: 1,
   },
   {
     id: "ingest",
@@ -123,10 +126,65 @@ export const FIXTURE_TRANSCRIPT = {
       ],
     },
     { role: "user", content: [{ type: "text", text: "looks good — ship it" }] },
+    {
+      role: "assistant",
+      content: [{ type: "text", text: "Shipping — wiring the cookie into the auth route now." }],
+    },
+    // A message consumed from the input queue MID-turn (queued_command attachment, never a
+    // `user` record) — renders as a normal user bubble, excluded from rewind checkpoints.
+    {
+      role: "user",
+      queued: true,
+      content: [{ type: "text", text: "also double-check the cookie's SameSite setting" }],
+    },
   ],
+  // Still sitting in the input queue (sent mid-turn, unconsumed) → dim "queued" bubble.
+  queuedPending: ["and update the README auth section once that lands"],
   usage: { percent: 62, current: 124_000, size: 200_000 },
   mode: "auto",
   statusline: "124k/200k • eng-2687-cookie-auth",
+  // Background work: one script wait + agents on both sides of lastPromptAt, so the
+  // pill (🤖 1 ⏳ 1) and the sheet's waiting/running/fresh/earlier grouping all render.
+  pendingScripts: [
+    {
+      toolUseId: "toolu_fixture1",
+      kind: "script",
+      label: "Background wait for Codex review to post",
+      status: "pending",
+      taskId: "bfixture1",
+      launchedAt: new Date(Date.now() - 12 * 60_000).toISOString(),
+    },
+  ],
+  lastPromptAt: new Date(Date.now() - 30 * 60_000).toISOString(),
+  subagents: [
+    {
+      agentId: "afix1",
+      agentType: "Explore",
+      description: "Trace the cookie exchange path",
+      status: "running",
+    },
+    {
+      agentId: "afix2",
+      agentType: "code-reviewer",
+      description: "Review the auth diff",
+      status: "done",
+      finishedAt: new Date(Date.now() - 5 * 60_000).toISOString(),
+    },
+    {
+      agentId: "afix3",
+      agentType: "general-purpose",
+      description: "Survey token storage options",
+      status: "done",
+      finishedAt: new Date(Date.now() - 3 * 60 * 60_000).toISOString(),
+    },
+    {
+      agentId: "afix4",
+      agentType: "Explore",
+      description: "Map current auth routes",
+      status: "done",
+      finishedAt: new Date(Date.now() - 4 * 60 * 60_000).toISOString(),
+    },
+  ],
   openQuestion: {
     question: "Which storage should the token use?",
     options: [

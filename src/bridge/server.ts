@@ -19,6 +19,9 @@ import { discoverSessions } from "../core/sessions";
 import {
   getTranscript,
   getSubagentTranscript,
+  listSubagents,
+  pendingToolFields,
+  transcriptRevAt,
   sendMessage,
   answerSessionQuestion,
   clarifySessionQuestion,
@@ -37,6 +40,8 @@ import {
   type SendResult,
 } from "../core/session-api";
 import { nativeStatus } from "../core/session-state";
+import { pendingScriptsAt } from "../core/background-tasks";
+import { resolveTranscriptPath } from "../core/last-turn";
 import { homedir } from "os";
 import { discoverRepos, getBaseRepoPath, compareRepos } from "../core/git";
 import { listSlashCommands } from "../core/skills";
@@ -192,8 +197,10 @@ function pruneOldUploads(): void {
 }
 
 // ---------------------------------------------------------------------------
-// /sessions — projection (drop the large lastCapture blob), 1s TTL cache so SSE
-// reconnect storms don't fan out into concurrent ps/tmux subprocess swarms.
+// /sessions — projection (drop the large lastCapture blob), served
+// stale-while-revalidate (see sessionsPayload) so a request never blocks on the
+// ps/tmux/git discovery sweep and SSE reconnect storms can't fan out into
+// concurrent subprocess swarms.
 // ---------------------------------------------------------------------------
 
 // A "main"/"master" branch tells you nothing about a session; for those, fall
@@ -219,12 +226,18 @@ function sessionLabel(s: Session): string {
   return base;
 }
 
-function projectSession(s: Session, approvalIds: Set<string>, unread: boolean, restorable?: boolean) {
+function projectSession(
+  s: Session,
+  pending: ReturnType<typeof pendingToolCall>,
+  approvalIds: Set<string>,
+  unread: boolean,
+  restorable?: boolean,
+  pendingScriptCount?: number,
+) {
   // Pending = blocked-on-USER, sourced from the hook log (not status): discovery can
   // mislabel a live blocked session as `archived`, but it must stay reachable from the
   // phone. ONLY a real question or a real awaiting-decision approval counts — an
   // in-flight auto-approved tool is NOT pending (that was the false bash-approval bug).
-  const pending = pendingToolCall(s.id);
   const pendingKind =
     pending?.name === "AskUserQuestion" && pending.question
       ? "question"
@@ -253,6 +266,9 @@ function projectSession(s: Session, approvalIds: Set<string>, unread: boolean, r
     // Present only for archived sessions: true when the phone can resume it (repo dir +
     // transcript both still on disk). Drives whether the Restore button renders.
     ...(restorable !== undefined ? { restorable } : {}),
+    // ≥1 background script still awaited (live sessions only) — the list's ⏳ badge, so
+    // a `ready` session mid-wait doesn't read as done from the list.
+    ...(pendingScriptCount ? { pendingScripts: pendingScriptCount } : {}),
   };
 }
 
@@ -289,10 +305,13 @@ async function markSessionRead(sessionId: string): Promise<void> {
 }
 
 // Repos available for a new session: active-session repos (worktrees deduped to base)
-// plus the configured repoPaths, exactly as the TUI wizard sources them.
+// plus the configured repoPaths, exactly as the TUI wizard sources them. Sources the
+// session set from the discovery snapshot computeSessionsPayload already produced
+// (repo membership changes on human timescales — no need for a dedicated sweep), and
+// falls back to a real discovery only before the first projection exists.
 async function reposPayload(): Promise<Array<{ name: string; path: string; branch: string; isWorktree: boolean }>> {
   const cfg = await loadConfig();
-  const { sessions } = await discoverSessions({});
+  const sessions = lastDiscovered ?? (await discoverSessions({})).sessions;
   const sessionRepos = sessions
     .filter((s) => s.repoPath)
     .map((s) => ({ name: s.repo, path: s.repoPath }));
@@ -315,38 +334,71 @@ async function reposPayload(): Promise<Array<{ name: string; path: string; branc
 }
 
 let sessionsCache: { ts: number; value: unknown } | null = null;
+// The full session set from the last completed discovery — reused by /repos so opening
+// the wizard doesn't re-run the ps/tmux/git sweep the projection just paid for.
+let lastDiscovered: Session[] | null = null;
+
+// The wizard is the only consumer and a repo appearing/disappearing is a human-timescale
+// event; 15s keeps a reopened wizard instant while an expired hit revalidates behind it.
+const REPOS_TTL = 15_000;
+const cachedRepos = swrCache(REPOS_TTL, () => reposPayload());
+
+/**
+ * Generic stale-while-revalidate cell (the /changes, /pr and /repos caches): a fresh
+ * hit serves the value; an EXPIRED hit serves the stale value immediately and kicks one
+ * deduplicated background recompute (a failed recompute keeps the stale value); only a
+ * cold miss (nothing cached for the key) blocks the request, deduped across concurrent
+ * callers. The phone therefore never waits on git/gh past a key's very first request.
+ */
+function swrCache<V>(ttl: number, compute: (key: string) => Promise<V>): (key: string) => Promise<V> {
+  const cache = new Map<string, { ts: number; value: V }>();
+  const inflight = new Map<string, Promise<V>>();
+  const start = (key: string): Promise<V> => {
+    let p = inflight.get(key);
+    if (!p) {
+      p = compute(key)
+        .then((value) => {
+          cache.set(key, { ts: Date.now(), value });
+          return value;
+        })
+        .finally(() => inflight.delete(key));
+      inflight.set(key, p);
+    }
+    return p;
+  };
+  return async (key: string): Promise<V> => {
+    const hit = cache.get(key);
+    if (!hit) return start(key); // cold miss — block, deduped
+    if (Date.now() - hit.ts >= ttl) start(key).catch(() => {}); // expired — revalidate behind the response
+    return hit.value;
+  };
+}
 
 // The changed-files card and the full list are separate components rendering the same URL,
 // and the list is an overlay — opening it doesn't unmount the card, so every transcript
-// revision ran the whole git sweep twice. 1s TTL, matching /sessions: short enough that
-// opening the list still reflects an out-of-band edit (you editing on the Mac, a formatter
-// running), long enough to collapse the duplicate. `/diff` shares it to resolve renames.
+// revision ran the whole git sweep twice. 1s freshness, matching /sessions: short enough
+// that opening the list still reflects an out-of-band edit (you editing on the Mac, a
+// formatter running), long enough to collapse the duplicate. `/diff` shares it to resolve
+// renames (a slightly stale `orig` self-corrects on the next fetch).
 const CHANGES_TTL = 1000;
-const changesCache = new Map<string, { ts: number; value: Awaited<ReturnType<typeof branchChanges>> }>();
-
-async function cachedBranchChanges(sessionId: string): Promise<Awaited<ReturnType<typeof branchChanges>>> {
-  const now = Date.now();
-  const hit = changesCache.get(sessionId);
-  if (hit && now - hit.ts < CHANGES_TTL) return hit.value;
-  const value = await branchChanges(sessionId);
-  changesCache.set(sessionId, { ts: now, value });
-  return value;
-}
+const cachedBranchChanges = swrCache(CHANGES_TTL, (sessionId) => branchChanges(sessionId));
 
 // The PR lookup shells out to `gh`, which hits the network — so unlike /changes (git only,
-// 1s TTL) it gets a minute. A PR's state changes on human timescales; re-querying GitHub every
-// time the changed-files list is opened would put a visible stall on a glance surface.
+// 1s freshness) it gets a minute. A PR's state changes on human timescales; re-querying
+// GitHub every time the changed-files list is opened would put a visible stall on a
+// glance surface.
 const PR_TTL = 60_000;
-const prCache = new Map<string, { ts: number; value: PullRequestInfo }>();
-
-async function cachedPullRequest(root: string): Promise<PullRequestInfo> {
-  const now = Date.now();
-  const hit = prCache.get(root);
-  if (hit && now - hit.ts < PR_TTL) return hit.value;
-  const value = await branchPullRequest(root);
-  prCache.set(root, { ts: now, value });
-  return value;
-}
+// Keyed by SESSION, with the root resolution inside the compute: repoRootForSession is
+// itself a transcript+git walk, so keying by root would leave it on every warm request.
+// `{ state: "none" }` (no live repo) caches like any other answer and revalidates the
+// same way, so an idle session that comes back live self-corrects within the TTL.
+const cachedSessionPr: (sessionId: string) => Promise<PullRequestInfo | { state: "none" }> = swrCache(
+  PR_TTL,
+  async (sessionId) => {
+    const root = await repoRootForSession(sessionId);
+    return root ? branchPullRequest(root) : { state: "none" };
+  },
+);
 
 // GET /sessions/:id/skills — slash-commands scoped to the session's repo. Cached per
 // resolved repo dir (30s TTL); the "" key holds the builtin+user fallback used when a
@@ -369,24 +421,68 @@ async function sessionSkills(sessionId: string): Promise<unknown> {
   return list;
 }
 
+/**
+ * Serve /sessions stale-while-revalidate with BOUNDED staleness: a projection younger
+ * than SESSIONS_FRESH_MS serves as-is; older kicks one deduped background recompute and
+ * serves the stale copy — but only up to SESSIONS_MAX_STALE_MS. Past that (the phone
+ * returning from a long background, where the "fresher data exists" broadcast may have
+ * been missed on a dead socket), the request WAITS for the recompute: a resume must
+ * paint the current world, not however-old the last connected moment was. Nothing
+ * cached at all (first request / explicit `sessionsCache = null` invalidation) also
+ * waits. A changed recompute broadcasts `session-changed` so live clients converge.
+ */
+const SESSIONS_FRESH_MS = 1000;
+const SESSIONS_MAX_STALE_MS = 10_000;
+let sessionsRefreshing: Promise<unknown> | null = null;
+
+/** One deduped recompute; rejections propagate to awaiting callers (never resolves null). */
+function startSessionsRefresh(): Promise<unknown> {
+  if (!sessionsRefreshing) {
+    const prev = sessionsCache ? JSON.stringify(sessionsCache.value) : null;
+    sessionsRefreshing = computeSessionsPayload()
+      .then((value) => {
+        if (prev !== null && JSON.stringify(value) !== prev) broadcast({ type: "session-changed" });
+        return value;
+      })
+      .finally(() => {
+        sessionsRefreshing = null;
+      });
+  }
+  return sessionsRefreshing;
+}
+
 async function sessionsPayload(): Promise<unknown> {
+  if (!sessionsCache) return startSessionsRefresh();
+  const age = Date.now() - sessionsCache.ts;
+  if (age >= SESSIONS_MAX_STALE_MS) return startSessionsRefresh();
+  if (age >= SESSIONS_FRESH_MS) startSessionsRefresh().catch(() => {}); // revalidate behind the response
+  return sessionsCache.value;
+}
+
+async function computeSessionsPayload(): Promise<unknown> {
   const now = Date.now();
-  if (sessionsCache && now - sessionsCache.ts < 1000) return sessionsCache.value;
   const nameCache = await loadNameCache();
-  const { sessions } = await discoverSessions({ nameMap: nameCache.names });
+  const { sessions } = await discoverSessions({ nameMap: nameCache.names, archivedTtlMs: 15_000 });
+  lastDiscovered = sessions; // snapshot for /repos (see reposPayload)
   const approvalIds = new Set(listPendingApprovals().map((a) => a.sessionId));
   const unread = await unreadPanes();
   const tracked = sessions.filter((s) => s.id); // untracked panes (no id) are unaddressable
+  // One event-log read per session per build: the waiting-session check below and
+  // projectSession both need the pending tool call.
+  const pendingById = new Map(tracked.map((s) => [s.id, pendingToolCall(s.id)]));
   // Attached sessions never get a pending-file (the PreToolUse hook exits neutral so the
   // instant desk prompt shows) — so a phone-approvable permission prompt must be sourced
   // from the live pane. For each WAITING session with no file-pending and no open question,
   // confirm a permission prompt is actually on-screen before flagging it `approval`.
-  for (const s of tracked) {
-    if (s.status !== "waiting" || approvalIds.has(s.id) || !s.tmuxPane) continue;
-    const pt = pendingToolCall(s.id);
-    if (pt?.name === "AskUserQuestion" && pt.question) continue;
-    if (isPermissionPrompt(await capturePane(s.tmuxPane.paneId))) approvalIds.add(s.id);
-  }
+  // Captures are independent per pane — run them concurrently.
+  await Promise.all(
+    tracked.map(async (s) => {
+      if (s.status !== "waiting" || approvalIds.has(s.id) || !s.tmuxPane) return;
+      const pt = pendingById.get(s.id);
+      if (pt?.name === "AskUserQuestion" && pt.question) return;
+      if (isPermissionPrompt(await capturePane(s.tmuxPane.paneId))) approvalIds.add(s.id);
+    }),
+  );
   // Apply the cached name (pinned wins over AI-generated), mirroring the TUI/tmux.
   for (const s of tracked) s.name = getSessionName(s.id, nameCache) || s.name;
   // Disambiguate same-repo name collisions with a -2/-3 suffix, matching the TUI/tmux.
@@ -406,15 +502,36 @@ async function sessionsPayload(): Promise<unknown> {
   // Restorable flag for archived sessions only (repo dir + transcript on disk) — computed in
   // an async pass before the sync `.map()`, mirroring the approvalIds loop above.
   const restorableMap = new Map<string, boolean>();
-  for (const s of tracked) {
-    if (s.status === "archived") restorableMap.set(s.id, await canRestore(s.id, s.repoPath));
-  }
+  await Promise.all(
+    tracked
+      .filter((s) => s.status === "archived")
+      .map(async (s) => {
+        restorableMap.set(s.id, await canRestore(s.id, s.repoPath));
+      }),
+  );
+  // Pending-script counts for sessions with a live Claude process only: without one the
+  // task runner is gone, no notification can ever arrive, and a stale "pending" would
+  // badge a dead session forever. Cached by (size, mtime) in pendingScriptsAt, so an
+  // unchanged transcript costs one stat here.
+  const scriptCounts = new Map<string, number>();
+  await Promise.all(
+    tracked
+      .filter((s) => s.status === "running" || s.status === "ready" || s.status === "waiting")
+      .map(async (s) => {
+        const path = await resolveTranscriptPath(s.id);
+        if (!path) return;
+        const n = (await pendingScriptsAt(path)).length;
+        if (n > 0) scriptCounts.set(s.id, n);
+      }),
+  );
   const value = tracked.map((s) =>
     projectSession(
       s,
+      pendingById.get(s.id) ?? null,
       approvalIds,
       !!(s.tmuxPane && unread.has(s.tmuxPane.paneId)),
       restorableMap.get(s.id),
+      scriptCounts.get(s.id),
     ),
   );
   sessionsCache = { ts: now, value };
@@ -593,7 +710,7 @@ async function route(req: Request): Promise<Response> {
   if (method === "GET" && path === "/sessions") return json(await sessionsPayload());
   if (method === "GET" && path === "/pending") return json(listPendingApprovals());
   if (method === "GET" && path === "/stream") return streamResponse();
-  if (method === "GET" && path === "/repos") return json(await reposPayload());
+  if (method === "GET" && path === "/repos") return json(await cachedRepos(""));
 
   // New session: launch `claude` in a new tmux window for the chosen repo (TUI `n`).
   if (method === "POST" && path === "/sessions/new") {
@@ -607,31 +724,60 @@ async function route(req: Request): Promise<Response> {
   const transcript = path.match(/^\/sessions\/([^/]+)\/transcript$/);
   if (method === "GET" && transcript) {
     const id = decodeURIComponent(transcript[1]!);
-    // Always returns the full active branch (reconstructed leaf→root) — a rewind can shrink
-    // the conversation, so an append-only delta would leak abandoned-branch turns.
-    const tx = await getTranscript(id);
-    const pane = await resolveSessionPane(id);
     // Real awaiting-decision approval (blocking hook), NOT the in-flight pendingTool —
     // so Allow/Deny only appears when a decision is genuinely required. Detached sessions
     // surface it via the pending-file; an ATTACHED session has no file, so confirm a
     // permission prompt is live on the pane and synthesize the same card shape from the
     // pending tool call (identical Allow/Deny UI; /decision drives the keys instead).
-    let approval = listPendingApprovals().find((a) => a.sessionId === id) ?? null;
-    if (!approval && pane) {
-      const pt = pendingToolCall(id);
-      if (pt && !(pt.name === "AskUserQuestion" && pt.question) && isPermissionPrompt(await capturePane(pane))) {
-        approval = {
-          sessionId: id,
-          ts: 0,
-          tool: pt.name,
-          tool_use_id: pt.toolUseId,
-          input: { command: pt.command, file_path: pt.filePath, description: pt.description },
-        };
+    const resolveApproval = (pt: ReturnType<typeof pendingToolCall>, pane: string | null, capture: string) => {
+      const blocked = listPendingApprovals().find((a) => a.sessionId === id) ?? null;
+      if (blocked || !pane || !pt) return blocked;
+      if (pt.name === "AskUserQuestion" && pt.question) return null;
+      if (!isPermissionPrompt(capture)) return null;
+      return {
+        sessionId: id,
+        ts: 0,
+        tool: pt.name,
+        tool_use_id: pt.toolUseId,
+        input: { command: pt.command, file_path: pt.filePath, description: pt.description },
+      };
+    };
+
+    // Fast path: the client holds this exact file revision (`?rev=`), so skip rebuilding
+    // and re-shipping the turns — the payload that scales with thread length. Everything
+    // that can change WITHOUT the file changing still ships fresh: the pending
+    // tool/question (hook events log), approval + statusline (pane scrape), and the
+    // subagent list (separate per-agent files — an agent finishing doesn't bump the
+    // session file). The client merges these over its held turns.
+    const wantRev = url.searchParams.get("rev");
+    if (wantRev) {
+      const at = await transcriptRevAt(id);
+      if (at && at.rev === wantRev) {
+        const [pane, subagents] = await Promise.all([resolveSessionPane(id), listSubagents(at.path)]);
+        const capture = pane ? await capturePane(pane) : "";
+        const pt = pendingToolCall(id);
+        const statusline = pane ? await readPaneStatusline(pane, capture) : {};
+        return json({
+          unchanged: true,
+          rev: at.rev,
+          ...pendingToolFields(pt),
+          subagents, // always present here ([] clears) — the client overwrites its copy
+          approval: resolveApproval(pt, pane, capture),
+          ...statusline,
+        });
       }
     }
+
+    // Full response: the whole active branch (reconstructed leaf→root) — a rewind can
+    // shrink the conversation, so an append-only delta would leak abandoned-branch turns.
+    // Transcript read and pane resolution share no state — overlap them.
+    const [tx, pane] = await Promise.all([getTranscript(id), resolveSessionPane(id)]);
+    // One capture serves both the permission-prompt check and the statusline scrape below.
+    const capture = pane ? await capturePane(pane) : "";
+    const approval = resolveApproval(pendingToolCall(id), pane, capture);
     // The live statusline + permission mode, scraped from the pane (the only faithful
     // source for the user's custom statusline and the auto/plan mode).
-    const statusline = pane ? await readPaneStatusline(pane) : {};
+    const statusline = pane ? await readPaneStatusline(pane, capture) : {};
     return json({ ...tx, approval, ...statusline });
   }
 
@@ -697,8 +843,7 @@ async function route(req: Request): Promise<Response> {
   // remote, no gh), and the UI renders nothing for it.
   const pr = path.match(/^\/sessions\/([^/]+)\/pr$/);
   if (method === "GET" && pr) {
-    const root = await repoRootForSession(decodeURIComponent(pr[1]!));
-    return json(root ? await cachedPullRequest(root) : { state: "none" });
+    return json(await cachedSessionPr(decodeURIComponent(pr[1]!)));
   }
 
   const decision = path.match(/^\/sessions\/([^/]+)\/decision$/);
@@ -769,8 +914,11 @@ async function route(req: Request): Promise<Response> {
 
   const answer = path.match(/^\/sessions\/([^/]+)\/answer$/);
   if (method === "POST" && answer) {
-    const body = (await req.json().catch(() => ({}))) as { selections?: unknown };
+    const body = (await req.json().catch(() => ({}))) as { selections?: unknown; toolUseId?: unknown };
     const sels = body.selections;
+    // Optional pin to the question the client rendered — a stale card must not answer
+    // the question that replaced it. Older cached clients omit it; the gate is skipped.
+    const toolUseId = typeof body.toolUseId === "string" ? body.toolUseId : undefined;
     // One entry per question: each is a number (single-select) or number[] (multi-select).
     const valid =
       Array.isArray(sels) &&
@@ -780,7 +928,7 @@ async function route(req: Request): Promise<Response> {
       );
     if (!valid) return json({ ok: false, reason: "bad-selection" }, 400);
     const id = decodeURIComponent(answer[1]!);
-    const r = await answerSessionQuestion(id, sels as (number | number[])[]);
+    const r = await answerSessionQuestion(id, sels as (number | number[])[], toolUseId);
     if (r.ok) markPortkeySource(id); // no text ⇒ anchors the current turn's prompt_id
     return sendResult(r);
   }
@@ -945,4 +1093,8 @@ export function startBridge(): void {
     },
   });
   console.error(`csm bridge listening on http://${host}:${port}${FIXTURES ? " (fixtures mode — canned data)" : ""}`);
+
+  // Pre-warm the /sessions projection so the phone's first request after a bridge
+  // (re)start hits the served-from-cache path instead of paying the discovery sweep.
+  if (!FIXTURES) void computeSessionsPayload().catch(() => {});
 }

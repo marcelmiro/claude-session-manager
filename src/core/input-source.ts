@@ -33,27 +33,26 @@ function markerPath(sessionId: string): string {
 }
 
 /**
- * Record that portkey drove this session. Message/rewind routes pass `text` (the
- * sent message → text-match); answer/decision routes pass nothing → the marker
- * anchors the current turn's `prompt_id`. Atomic (`.tmp`→rename) so a concurrent
- * reader never sees a half-written file. Non-fatal on error.
+ * Record that portkey drove this session. Message/rewind routes pass `text` (the sent
+ * message); answer/decision routes pass nothing. BOTH anchors are always written when
+ * available: a message sent while the session is mid-turn is queued and — when consumed
+ * inside a tool loop — never fires its own `UserPromptSubmit`, so the text alone would
+ * never match and the turn-complete push would be wrongly suppressed. The still-current
+ * turn's `prompt_id` covers that case; the text covers the turn-end dequeue (a NEW
+ * prompt whose text is ours). Atomic (`.tmp`→rename) so a concurrent reader never sees
+ * a half-written file. Non-fatal on error.
  */
 export function markPortkeySource(sessionId: string, text?: string): void {
   try {
     mkdirSync(SOURCE_DIR, { recursive: true });
-    let marker: SourceMarker;
-    if (text != null) {
-      marker = { text };
-    } else {
-      const events = readEvents(sessionId);
-      let turnPromptId: string | undefined;
-      for (let i = events.length - 1; i >= 0; i--) {
-        if (events[i]!.hook_event_name === "UserPromptSubmit" && events[i]!.prompt_id) {
-          turnPromptId = events[i]!.prompt_id;
-          break;
-        }
+    const marker: SourceMarker = {};
+    if (text != null) marker.text = text;
+    const events = readEvents(sessionId);
+    for (let i = events.length - 1; i >= 0; i--) {
+      if (events[i]!.hook_event_name === "UserPromptSubmit" && events[i]!.prompt_id) {
+        marker.turnPromptId = events[i]!.prompt_id;
+        break;
       }
-      marker = turnPromptId ? { turnPromptId } : {};
     }
     const tmp = `${markerPath(sessionId)}.tmp`;
     writeFileSync(tmp, JSON.stringify(marker));

@@ -48,13 +48,27 @@ test('"portkey" when marker turnPromptId equals the last UserPromptSubmit.prompt
 });
 
 test('"tui" when a newer UserPromptSubmit follows the anchor turn', () => {
-  // Portkey message, then a desk-typed prompt starts a new turn.
+  // Portkey message (marked at send time, when its own UPS is the newest), then a
+  // desk-typed prompt starts a new turn — both anchors are shadowed.
+  writeLog("s4", [{ hook_event_name: "UserPromptSubmit", prompt: "from phone", prompt_id: "p1" }]);
+  markPortkeySource("s4", "from phone");
   writeLog("s4", [
     { hook_event_name: "UserPromptSubmit", prompt: "from phone", prompt_id: "p1" },
     { hook_event_name: "UserPromptSubmit", prompt: "typed at desk", prompt_id: "p2" },
   ]);
-  markPortkeySource("s4", "from phone");
   expect(sourceForSession("s4")).toBe("tui");
+});
+
+test('"portkey" for a message queued mid-turn (no UPS of its own — prompt_id anchor)', () => {
+  // The turn was desk-typed; the phone sends while it runs. The queued message is
+  // consumed inside the tool loop and never fires UserPromptSubmit, so the text alone
+  // would never match — the still-current turn's prompt_id is what attributes it.
+  writeLog("s7", [
+    { hook_event_name: "UserPromptSubmit", prompt: "typed at desk", prompt_id: "turn-4" },
+    { hook_event_name: "PreToolUse", tool_name: "Bash", tool_use_id: "t1" },
+  ]);
+  markPortkeySource("s7", "queued from phone");
+  expect(sourceForSession("s7")).toBe("portkey");
 });
 
 test('truncation: anchor UserPromptSubmit trimmed out of the tail ⇒ "tui", never a stuck "portkey"', () => {

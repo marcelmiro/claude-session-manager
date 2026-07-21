@@ -15,7 +15,10 @@
     <meta name="apple-mobile-web-app-title" content="portkey" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-    <!-- Resolve the bare specifiers the vendored dist files import (preact, etc.). -->
+    <!-- Resolve the bare specifiers the vendored dist files import (preact, etc.).
+         MUST precede the modulepreload links: a preload can start module resolution
+         before an import map placed later is processed, and Chrome then disregards the
+         map entirely — every bare `preact` import fails (a race; it broke intermittently). -->
     <script type="importmap">
       {
         "imports": {
@@ -28,6 +31,17 @@
         }
       }
     </script>
+    <!-- Preload every module the app imports: without these, the browser only discovers
+         them after downloading and parsing app.js — a full extra round-trip before any
+         vendor code is in flight on a cold/evicted open. -->
+    <link rel="modulepreload" href="/vendor/preact.mjs" />
+    <link rel="modulepreload" href="/vendor/hooks.mjs" />
+    <link rel="modulepreload" href="/vendor/signals-core.mjs" />
+    <link rel="modulepreload" href="/vendor/signals.mjs" />
+    <link rel="modulepreload" href="/vendor/htm.mjs" />
+    <link rel="modulepreload" href="/vendor/marked.mjs" />
+    <link rel="modulepreload" href="/time-ago.js" />
+    <link rel="modulepreload" href="/diff-lines.js" />
     <style>
       :root {
         --bg: #101010;
@@ -280,6 +294,10 @@
       .bubble.user { background: var(--user-bubble); border: 1px solid var(--user-bubble-border); border-bottom-right-radius: 5px; margin-left: auto; -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; transition: transform 0.12s ease; }
       .bubble.user:active { transform: scale(0.97); }
       .bubble.pending { opacity: 0.5; }
+      /* Server-confirmed queue entry: sent mid-turn, waiting for Claude to consume it.
+         Dashed + dim to read as "held", distinct from the optimistic .pending fade. */
+      .bubble.queued { opacity: 0.55; border-style: dashed; }
+      .queuedtag { margin-top: 4px; font-size: 10px; letter-spacing: 0.04em; text-transform: uppercase; text-align: right; color: var(--muted); }
       .tool {
         font-size: 12px;
         color: var(--peach);
@@ -633,11 +651,11 @@
       .modebadge { flex: none; color: var(--mint); border: 1px solid currentColor; border-radius: 10px; padding: 0 7px; font-weight: 600; white-space: nowrap; }
       /* fill the row and right-align so usage+branch hug the right edge, badge stays left */
       .sltext { flex: 1; min-width: 0; text-align: right; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-variant-numeric: tabular-nums; }
-      .scriptbar { display: flex; align-items: baseline; gap: 6px; padding: 0 4px 8px; font-size: 11px; color: var(--muted); }
-      .scriptbar .scriptdot { flex: none; }
-      .scriptbar .scriptcmd { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-family: ui-monospace, monospace; }
-      .scriptbar .scriptmore { flex: none; color: var(--dim); }
-      .scriptbar .scriptage { flex: none; margin-left: auto; color: var(--dim); font-variant-numeric: tabular-nums; }
+      /* sessions-list ⏳: a ready session mid-background-wait — inline left of the name,
+         inside .name so only the title line carries it (the sub line keeps the column's
+         left edge); vertical-align centers the smaller emoji against the name's x-height
+         instead of letting it sit on the baseline */
+      .row .scriptmark { font-size: 11px; margin-right: 3px; vertical-align: 2px; }
 
       /* iOS-style long-press action sheet */
       .scrim {
@@ -826,6 +844,8 @@
       }
       .agentspill:active { background: var(--hover); }
       .agentspill .run { color: var(--mint); font-weight: 700; }
+      /* nothing running: the pill is an archive entry point, not a status — dim it */
+      .agentspill.archive { color: var(--dim); border-color: var(--border); }
 
       /* subagent list (an action sheet over the detail) — rows reuse the sheet surface but
          lay out left-aligned like list rows (.sheet .agent-row outspecifies the centered
@@ -842,6 +862,10 @@
       }
       .agents-sheet > .agent-row:first-child { border-top: none; }
       .agent-row .chev { flex: none; color: var(--dim); font-size: 18px; }
+      /* collapsed "N earlier agents" divider row — a toggle, not a drill-in target */
+      .agent-row.older-toggle { color: var(--dim); }
+      /* pending-script row — same anatomy as agent rows but inert (no drill-in) */
+      .agent-row.script .scripthint { flex: none; font-size: 13px; }
 
       /* subagent drill-in — a full-screen push over the detail (iOS-style slide-in) */
       .subagent-view {

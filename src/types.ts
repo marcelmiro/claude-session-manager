@@ -273,6 +273,11 @@ export interface TranscriptTurn {
   // lets the UI render it as a "continued from compacted summary" divider instead of a giant
   // user bubble, making it clear the branch originated from a compact.
   compactSummary?: boolean;
+  // Set on a message consumed from Claude Code's input queue MID-turn (a `queued_command`
+  // attachment record — it never becomes a `user` record). It ran like any prompt, but
+  // Claude's /rewind picker does not list it as a checkpoint, so rewind-count walks must
+  // skip queued turns or every earlier prompt's upCount shifts by one.
+  queued?: boolean;
 }
 
 /**

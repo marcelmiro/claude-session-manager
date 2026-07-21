@@ -88,8 +88,12 @@ const turnMarkerText = (turn) => {
 // thread. The rewind `upCount` walk must count ONLY prompt turns, or every tool result /
 // interrupt marker inflates the count and the picker cursor overshoots → the server aborts
 // with rewind-mismatch.
+// `queued` turns (messages consumed from the input queue mid-turn) are excluded too:
+// Claude's /rewind picker does not list them, so counting one would shift every earlier
+// prompt's upCount by one.
 const isPromptTurn = (turn) =>
   turn.role === "user" &&
+  !turn.queued &&
   !turnMarkerText(turn) &&
   (turn.content || []).some((b) => b.type === "text" || b.type === "image");
 
@@ -138,8 +142,35 @@ const composerPrefill = signal(null);
 // transcript poll drops openQuestions). Cleared on reconcile (poll shows no question), on
 // failure, or by a safety timeout. null = off.
 const clarifying = signal(null);
+// Optimistic approve: the sessionId whose blocking APPROVAL card was just decided.
+// Hides the card the instant the choice is tapped — before the POST round-trip and the
+// transcript catch-up — mirroring `clarifying`. Cleared on reconcile (the refetched
+// transcript no longer carries the card), on failure, or by a safety timeout. null = off.
+const deciding = signal(null);
+// Optimistic ANSWER for a question specifically: {id, toolUseId} of the question card
+// that was just tapped. Separate from `deciding` (which stays sessionId-shaped for
+// approvals) because a question needs identity: the card only stays hidden while the
+// SAME question is open — a different toolUseId in the payload means a new question
+// arrived and its card must show. Cleared on reconcile, on failure, or by the
+// post-settle verify timer in QuestionCard. null = off.
+const decidingQuestion = signal(null);
 
 let es = null;
+
+// Last-fetched payloads per session, so re-opening a session paints instantly
+// (stale-while-revalidate — the mount fetch replaces them). Bounded so a long day of
+// hopping between sessions doesn't grow memory unchecked.
+function boundedSet(map, key, value, max = 20) {
+  map.delete(key); // re-insert → newest position
+  map.set(key, value);
+  if (map.size > max) map.delete(map.keys().next().value);
+}
+const transcriptCache = new Map(); // sessionId → last /transcript payload (open() paints it)
+const changesDataCache = new Map(); // sessionId → last /changes payload (ChangesCard/FilesView)
+const prDataCache = new Map(); // sessionId → last /pr payload (usePullRequest)
+function cacheTranscript(id, data) {
+  boundedSet(transcriptCache, id, data);
+}
 
 // Text of every user turn already in the transcript — used to retire optimistic
 // bubbles once the real send lands (the transcript lags the pane by a few seconds).
@@ -164,25 +195,78 @@ async function refreshSessions() {
     const r = await fetch("/sessions");
     if (r.status === 401) return (authed.value = false);
     if (!r.ok) return;
-    sessions.value = await r.json();
+    const list = await r.json();
+    if (!Array.isArray(list)) return; // malformed payload — never poison the render with it
+    sessions.value = list;
     authed.value = true;
     if (error.value === "bridge unreachable") error.value = ""; // recovered — drop the banner
+    // Persist for the next cold open (iOS evicts the page constantly): boot hydrates
+    // from this so reopening paints the list instantly instead of a spinner.
+    try {
+      localStorage.setItem("csm-sessions", JSON.stringify(sessions.value));
+    } catch {
+      /* private mode / quota — persistence is best-effort */
+    }
   } catch {
     error.value = "bridge unreachable";
   }
 }
 
+// Volatile transcript fields — everything that can change while the JSONL doesn't (hook
+// events, pane scrape, per-agent files). On an `unchanged` response these are replaced
+// wholesale from the fresh payload; the file-derived bulk (turns, usage, pendingScripts,
+// lastPromptAt, rev) is kept from the copy we already hold.
+const VOLATILE_FIELDS = [
+  "approval",
+  "pendingTool",
+  "openQuestion",
+  "openQuestions",
+  "subagents",
+  "statusline",
+  "mode",
+  "model",
+  "effort",
+];
+
 async function refreshTranscript() {
   const id = selectedId.value;
   if (!id) return;
+  // Offer the held file revision so an unchanged transcript comes back as a tiny
+  // volatile-fields-only response instead of the full turn list.
+  const heldRev = transcript.value && transcript.value.rev;
+  const q = heldRev ? `?rev=${encodeURIComponent(heldRev)}` : "";
   try {
-    const r = await fetch(`/sessions/${encodeURIComponent(id)}/transcript`);
+    const r = await fetch(`/sessions/${encodeURIComponent(id)}/transcript${q}`);
     if (!r.ok) return;
-    const data = await r.json();
+    let data = await r.json();
     if (id !== selectedId.value) return; // session switched mid-flight — drop stale response
+    if (data.unchanged) {
+      const held = transcript.value;
+      if (!held || held.rev !== data.rev) return; // held copy moved on — next poll refetches full
+      const merged = { ...held };
+      for (const k of VOLATILE_FIELDS) {
+        if (k in data) merged[k] = data[k];
+        else delete merged[k]; // omitted volatile field = cleared (e.g. question resolved)
+      }
+      data = merged;
+    }
     // The server always returns the full active conversation branch (reconstructed
     // leaf→root), so we replace rather than append — a rewind can shrink the conversation.
     transcript.value = data;
+    cacheTranscript(id, data);
+    // Retire the optimistic approve/answer flip once the card is actually gone from the
+    // refetched transcript (the decision resolved server-side).
+    if (deciding.value === id && !(data.approval || data.openQuestions || data.openQuestion)) {
+      deciding.value = null;
+    }
+    // Retire the optimistic answer once ITS question left the payload — either resolved
+    // (no question) or replaced (different toolUseId, whose card must show immediately).
+    const dq = decidingQuestion.value;
+    if (dq && dq.id === id) {
+      const openId = data.pendingTool && data.pendingTool.toolUseId;
+      const sameStillOpen = (data.openQuestions || data.openQuestion) && openId === dq.toolUseId;
+      if (!sameStillOpen) decidingQuestion.value = null;
+    }
     // Retire the optimistic rewind view once the transcript file actually changed on disk
     // (the resend's append bumps `rev` even for a byte-identical resend) — the real active
     // branch is now the truncated one, so stop overriding it.
@@ -190,9 +274,11 @@ async function refreshTranscript() {
     // Retire the optimistic "Chat about this" flip once the declined question is actually
     // gone from the transcript (the deny resolved → PostToolUse cleared openQuestions).
     if (clarifying.value === id && !(data.openQuestions || data.openQuestion)) clarifying.value = null;
-    // Drop optimistic bubbles that have now materialized as real user turns.
+    // Drop optimistic bubbles that have now materialized as real user turns — or as
+    // server-confirmed queue entries (the dim queued bubble takes over from there).
     if (pendingSends.value.length) {
       const seen = userTurnTexts(transcript.value);
+      for (const q of transcript.value.queuedPending || []) seen.add(q.trim());
       const remaining = pendingSends.value.filter((p) => !seen.has(p.trim()));
       if (remaining.length !== pendingSends.value.length) pendingSends.value = remaining;
     }
@@ -234,6 +320,30 @@ async function refreshSubagent() {
   }
 }
 
+// Coalesce refetch bursts: an action's eager refresh and the SSE broadcast it triggers
+// land within a few hundred ms, and each fired a full /sessions + /transcript pair. The
+// leading call runs immediately; calls inside the window collapse into one trailing run.
+// Sites that must await a guaranteed-fresh result (login, boot) call the raw functions.
+function coalesce(fn, ms = 300) {
+  let last = 0;
+  let timer = null;
+  return () => {
+    const now = Date.now();
+    if (now - last >= ms) {
+      last = now;
+      fn();
+    } else if (!timer) {
+      timer = setTimeout(() => {
+        timer = null;
+        last = Date.now();
+        fn();
+      }, ms - (now - last));
+    }
+  };
+}
+const refreshSessionsSoon = coalesce(refreshSessions);
+const refreshTranscriptSoon = coalesce(refreshTranscript);
+
 function connectStream() {
   if (es) es.close();
   es = new EventSource("/stream");
@@ -257,9 +367,9 @@ function connectStream() {
       return;
     }
     if (msg.type === "session-changed") {
-      refreshSessions();
+      refreshSessionsSoon();
       if (msg.id === selectedId.value) {
-        refreshTranscript(); // updates the subagent list (status flips) on the open session
+        refreshTranscriptSoon(); // updates the subagent list (status flips) on the open session
         if (openSubagent.value) refreshSubagent();
       }
     }
@@ -327,8 +437,8 @@ async function action(path, body) {
       data = await r.json();
     } catch {}
     if (r.ok && data.ok !== false) {
-      refreshTranscript();
-      refreshSessions();
+      refreshTranscriptSoon();
+      refreshSessionsSoon();
       return true;
     }
     flashError(`✗ ${data.reason || r.status}`);
@@ -353,8 +463,8 @@ async function actionJson(path, body) {
       data = await r.json();
     } catch {}
     if (r.ok && data.ok !== false) {
-      refreshTranscript();
-      refreshSessions();
+      refreshTranscriptSoon();
+      refreshSessionsSoon();
       return data;
     }
     flashError(`✗ ${data.reason || r.status}`);
@@ -375,8 +485,8 @@ async function actionForm(path, formData) {
       data = await r.json();
     } catch {}
     if (r.ok && data.ok !== false) {
-      refreshTranscript();
-      refreshSessions();
+      refreshTranscriptSoon();
+      refreshSessionsSoon();
       return true;
     }
     flashError(`✗ ${data.reason || r.status}`);
@@ -419,7 +529,9 @@ function clearAttachments() {
 
 function open(id) {
   selectedId.value = id;
-  transcript.value = null;
+  // Paint the last-fetched copy instantly (stale-while-revalidate) instead of blanking
+  // to "loading…"; the refetch below replaces it. First-ever open still shows loading.
+  transcript.value = transcriptCache.get(id) ?? null;
   flash.value = ""; // drop any stale error from the previously-open session
   pendingSends.value = [];
   rewindFloor.value = null; // never carry an optimistic rewind across sessions
@@ -931,7 +1043,10 @@ function List() {
       >
         <span class="dot" style=${dotStyle(s)}></span>
         <span class="grow">
-          <span class="name">${t}</span>
+          <span class="name"
+            >${s.pendingScripts > 0 &&
+            html`<span class="scriptmark" title="waiting on a background script">⏳</span>`}${t}</span
+          >
           ${sub && html`<span class="sub">${sub}</span>`}
         </span>
         ${s.pending
@@ -959,7 +1074,9 @@ function List() {
   // to the first needy session (blocked first, else oldest unread).
   const attnTotal = new Set([...needsYou.map((s) => s.id), ...attentionSessions().map((s) => s.id)]).size;
   const attnTarget = needsYou[0] || attentionSessions()[0];
-  const runningCount = all.filter((s) => s.status === "running").length;
+  // A session waiting on a background script is churning without needing you — same
+  // answer the 🔄 chip gives, so it counts there (once; no double count when also running).
+  const runningCount = all.filter((s) => s.status === "running" || s.pendingScripts > 0).length;
   return html`
     <div class="screen">
       <div class="scroll">
@@ -1119,9 +1236,61 @@ function Turn({ turn, upCount, canCode }) {
 
 // The server's /answer takes one selection PER QUESTION (a prompt may carry several):
 // each entry is a number (single-select) or number[] (multi-select), in question order.
-function QuestionCard({ questions }) {
-  const post = (selections) =>
-    action(`/sessions/${encodeURIComponent(selectedId.value)}/answer`, { selections });
+function QuestionCard({ questions, toolUseId }) {
+  // Optimistic: drop the card the instant an option is tapped — the composer takes the
+  // dock immediately instead of waiting out the POST + transcript refetch. Reverts with
+  // a bespoke message on failure. Raw fetch (not action(), which auto-flashes the raw
+  // reason code). After a SUCCESSFUL answer there is no idle transcript poll and a
+  // swallowed answer produces no SSE event, so a verify timer drives the refetch: if
+  // the SAME question is still open ~8s after the server accepted, the answer didn't
+  // land — re-show the card so the user can retry, instead of hiding it forever.
+  // (The old blind 5s timer re-showed the card during ordinarily-slow successful
+  // resolutions, inviting the double-tap this replaced.)
+  const post = (selections) => {
+    const id = selectedId.value;
+    decidingQuestion.value = { id, toolUseId };
+    const active = () => {
+      const dq = decidingQuestion.value;
+      return dq && dq.id === id && dq.toolUseId === toolUseId;
+    };
+    fetch(`/sessions/${encodeURIComponent(id)}/answer`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ selections, toolUseId }),
+    })
+      .then((r) => r.json().catch(() => ({})))
+      .then((d) => {
+        if (!active()) return; // reconciled or superseded while the POST was in flight
+        if (d && d.ok) {
+          refreshTranscriptSoon();
+          refreshSessionsSoon();
+          setTimeout(() => {
+            if (!active()) return;
+            if (selectedId.value !== id) return (decidingQuestion.value = null); // left the session
+            refreshTranscript().then(() => {
+              if (!active()) return; // the refetch reconciled it — answer landed
+              decidingQuestion.value = null;
+              flashError("✗ answer may not have landed — try again");
+            });
+          }, 8000);
+        } else {
+          decidingQuestion.value = null;
+          const reason = (d && d.reason) || "answer failed";
+          if (reason === "stale-question") {
+            flashError("✗ question changed — refreshing");
+            refreshTranscript();
+          } else if (reason === "not-presented") {
+            flashError("✗ couldn't reach the prompt — check the Mac");
+          } else {
+            flashError(`✗ ${reason}`);
+          }
+        }
+      })
+      .catch(() => {
+        if (active()) decidingQuestion.value = null;
+        flashError("✗ bridge unreachable");
+      });
+  };
   // "Chat about this": decline the whole prompt (regardless of wizard step) so the agent
   // yields and waits for a typed message. Optimistically flip to the composer + focus it;
   // a bare fetch (not action(), whose refreshTranscript would flicker the card back before
@@ -1278,8 +1447,17 @@ function ApprovalCard({ approval }) {
   const input = approval.input || {};
   const detail = input.command || input.file_path || "";
   const risky = typeof input.command === "string" && DESTRUCTIVE.test(input.command);
+  // Optimistic: clear the card on tap (Allow flips the dock to the running tool / composer
+  // instantly); revert on failure, safety-timeout if the prompt somehow stays up.
   function decide(decision) {
-    action(`/sessions/${encodeURIComponent(selectedId.value)}/decision`, { decision });
+    const id = selectedId.value;
+    deciding.value = id;
+    action(`/sessions/${encodeURIComponent(id)}/decision`, { decision }).then((ok) => {
+      if (!ok && deciding.value === id) deciding.value = null;
+    });
+    setTimeout(() => {
+      if (deciding.value === id) deciding.value = null;
+    }, 5000);
   }
   return html`
     <div class="card alert">
@@ -1767,6 +1945,11 @@ function Detail() {
   // render-time guard so a just-sent message never shows twice (the SSE only watches hook
   // events, so the pendingSends cleanup in refreshTranscript can lag the fetch). Scoped to
   // displayTurns so a rewound-then-resent message still shows as a pending bubble.
+  // Messages still sitting in Claude's input queue — sent mid-turn, not yet consumed.
+  // Gated on a running/waiting status: on an idle session a surviving entry is a stale
+  // leftover (interrupt/popAll edge), not something about to run.
+  const queued =
+    t && (status === "running" || status === "waiting") ? t.queuedPending || [] : [];
   const landed = new Set();
   for (const turn of displayTurns) {
     if (turn.role !== "user") continue;
@@ -1774,11 +1957,18 @@ function Detail() {
       if (b.type === "text" && b.text) landed.add(stripImagePrefix(b.text).trim());
     }
   }
+  // Queue entries count as landed too: the dim queued bubble renders them, so the
+  // optimistic copy of the same text must stand down.
+  for (const q of queued) landed.add(q.trim());
   const rawQuestions = t && (t.openQuestions || (t.openQuestion ? [t.openQuestion] : null));
-  // "Chat about this" optimistically hides the question card so the composer takes the dock
-  // immediately, before the hook's deny lands and the poll drops openQuestions.
-  const questions = clarifying.value === selectedId.value ? null : rawQuestions;
-  const approval = t && t.approval;
+  // "Chat about this" and a just-tapped answer/decision optimistically hide the blocking
+  // card so the dock flips immediately, before the server resolves and the poll catches up.
+  const optimisticHide =
+    clarifying.value === selectedId.value ||
+    deciding.value === selectedId.value ||
+    (decidingQuestion.value && decidingQuestion.value.id === selectedId.value);
+  const questions = optimisticHide ? null : rawQuestions;
+  const approval = optimisticHide ? null : t && t.approval;
   // While blocked on a question/approval, the structured answer UI takes the dock —
   // otherwise it's the free-text composer (this is the "replace the message box with
   // the question/answers" behavior).
@@ -1798,27 +1988,28 @@ function Detail() {
   // Attention-jump button: count of OTHER blocked sessions (the queue minus this one).
   const otherAttention = attentionSessions().filter((s) => s.id !== selectedId.value).length;
 
-  // Subagents this session fanned out to (sourced from disk by the bridge). The 🤖 pill
-  // opens the list; the running count tints mint.
+  // Background work — agents the session fanned out to plus background scripts it is
+  // waiting on (run_in_background Bash, no completion notification yet). Both are the
+  // same harness machinery (tasks + task-notification) and share one surface: the
+  // navbar pill (glance) → the AgentList sheet (labels). A script wait is the case
+  // where status honestly reads "ready" while work is in flight — the mint pill is
+  // the in-detail tell, same affordance as running agents.
   const agents = (t && t.subagents) || [];
   const runningAgents = agents.filter((a) => a.status === "running").length;
-
-  // Background scripts the session is waiting on (run_in_background Bash, no completion
-  // notification yet). The session reads "ready" during such a wait — this strip is the
-  // only tell that it's actually mid-work (e.g. a pr-triage Codex wait).
   const scripts = (t && t.pendingScripts) || [];
+  const activeWork = runningAgents + scripts.length;
 
-  // 15s safety poll while any subagent is running — covers hard-kills (which fire no
-  // SubagentStop hook) and any missed SSE edge. SSE stays the instant primary path; this
-  // runs ONLY while something is running and stops the moment all are done.
+  // 15s safety poll while any background work is live — covers agent hard-kills (which
+  // fire no SubagentStop hook) and a script wake that produces no immediate hook edge.
+  // SSE stays the instant primary path; this stops the moment everything is done.
   useEffect(() => {
-    if (runningAgents === 0) return;
+    if (activeWork === 0) return;
     const iv = setInterval(() => {
       refreshTranscript();
       if (openSubagent.value) refreshSubagent();
     }, 15000);
     return () => clearInterval(iv);
-  }, [runningAgents]);
+  }, [activeWork]);
 
   // Track whether we're pinned to the bottom of the thread. The 80px slack keeps auto-follow
   // alive through small jitters; the floating controls (down button + prompt-nav pill) appear
@@ -1923,6 +2114,12 @@ function Detail() {
             return html`<${Turn} key=${i} turn=${turn} upCount=${up} canCode=${editAfter[i]} />`;
           });
         })()}
+        ${queued.map(
+          (text, i) => html`<div class="bubble user queued" key=${`q${i}`}>
+            ${text}
+            <div class="queuedtag">queued</div>
+          </div>`,
+        )}
         ${pendingSends.value
           .filter((text) => !landed.has(text.trim()))
           .map((text, i) => html`<div class="bubble user pending" key=${`p${i}`}>${text}</div>`)}
@@ -1984,9 +2181,18 @@ function Detail() {
           <div class="navbar">
             <button class="iconbtn" onClick=${back} aria-label="Back to sessions">‹</button>
             <div class="navtitle">${session ? session.label || session.repo : "session"}</div>
-            ${agents.length > 0 &&
-            html`<button class="agentspill" onClick=${() => (showAgents.value = true)} aria-label="Subagents">
-              🤖 ${agents.length}${runningAgents > 0 ? html`<span class="run"> ${runningAgents}</span>` : ""}
+            ${(agents.length > 0 || scripts.length > 0) &&
+            html`<button
+              class="agentspill${activeWork > 0 ? "" : " archive"}"
+              onClick=${() => (showAgents.value = true)}
+              aria-label="Background work"
+            >
+              ${activeWork > 0
+                ? html`${runningAgents > 0 && html`🤖 <span class="run">${runningAgents}</span>`}${runningAgents >
+                      0 && scripts.length > 0
+                      ? " "
+                      : ""}${scripts.length > 0 && html`⏳ <span class="run">${scripts.length}</span>`}`
+                : html`🤖 ${agents.length}`}
             </button>`}
             <span class="meta">
               ${status && html`<span style=${`color:${DOT_COLOR[status] ?? "var(--dim)"}`}>${DOT[status]}</span>`}
@@ -2004,15 +2210,8 @@ function Detail() {
             ${mode && html`<span class="modebadge" style=${`color:${modeColor}`}>${mode}</span>`}
             ${statusline && html`<span class="sltext">${statusline}</span>`}
           </div>`}
-          ${scripts.length > 0 &&
-          html`<div class="scriptbar">
-            <span class="scriptdot">⏳</span>
-            <span class="scriptcmd">${scripts[0].label}</span>
-            ${scripts.length > 1 && html`<span class="scriptmore">+${scripts.length - 1}</span>`}
-            <span class="scriptage">${formatTimeAgo(scripts[0].launchedAt)}</span>
-          </div>`}
           ${questions
-            ? html`<${QuestionCard} questions=${questions} />`
+            ? html`<${QuestionCard} questions=${questions} toolUseId=${t.pendingTool && t.pendingTool.toolUseId} />`
             : approval
               ? html`<${ApprovalCard} approval=${approval} />`
               : html`<${Composer} disabled=${archived} status=${status} />`}
@@ -2096,40 +2295,86 @@ function SessionSheet() {
   `;
 }
 
-// Subagent list — an action sheet over the detail listing every agent the session fanned
-// out to (sourced from the subagents/ directory by the bridge). A mint dot = running, a
-// peach dot = done; tapping a row drills into that agent's conversation.
+// Background-work sheet — everything the session runs beside the main conversation, in one
+// list. Pending background scripts first (they explain a session that reads "ready" while
+// mid-work, and have no other surface — script rows aren't tappable, there's no conversation
+// behind a shell loop), then running agents, then agents that finished SINCE YOUR LAST
+// PROMPT (fresh reports — likely why the sheet was opened), then everything older collapsed
+// behind one "earlier" row: fan-out-heavy sessions pile up dozens of stale rows, but
+// finished reports must stay reachable — the drill-in is the only place a phone user can
+// read them (tool_results are stripped from the thread).
 function AgentList() {
+  const [showOlder, setShowOlder] = useState(false);
   if (!showAgents.value) return null;
   const t = transcript.value;
   const list = (t && t.subagents) || [];
-  const close = () => (showAgents.value = false);
+  const scripts = (t && t.pendingScripts) || [];
+  const close = () => ((showAgents.value = false), setShowOlder(false));
+  // Boundary unknown (no prompt yet / no finishedAt) → err toward fresh: hiding a report
+  // is worse than one extra row.
+  const lastPrompt = t && t.lastPromptAt ? new Date(t.lastPromptAt).getTime() : null;
+  const isFresh = (a) =>
+    !lastPrompt || !a.finishedAt || new Date(a.finishedAt).getTime() >= lastPrompt;
+  const running = list.filter((a) => a.status === "running");
+  const fresh = list.filter((a) => a.status !== "running" && isFresh(a));
+  const older = list.filter((a) => a.status !== "running" && !isFresh(a));
+  // Drill-in prev/next walks the DISPLAY order, older included, so nothing is unreachable.
+  const ordered = [...running, ...fresh, ...older];
+  const row = (a) => html`
+    <button
+      type="button"
+      class="agent-row"
+      key=${a.agentId}
+      onClick=${() => openAgent(a, ordered)}
+      style=${a.spawnDepth > 1 ? `padding-left:${12 + Math.min(a.spawnDepth - 1, 4) * 14}px` : ""}
+    >
+      <span class="dot" style=${`background:${a.status === "running" ? "var(--mint)" : "var(--peach)"}`}></span>
+      <span class="grow">
+        <span class="name">${a.description || a.agentType}</span>
+        <span class="sub">
+          ${a.agentType}${a.status === "running"
+            ? " · running"
+            : a.finishedAt
+              ? ` · ${formatTimeAgo(a.finishedAt)}`
+              : ""}
+        </span>
+      </span>
+      <span class="chev">›</span>
+    </button>
+  `;
+  // Script row — same anatomy as agent rows (dot / name / sub) so the sheet reads as one
+  // list, but a div (not a button): no drill-in target exists.
+  const scriptRow = (sc) => html`
+    <div class="agent-row script" key=${sc.toolUseId}>
+      <span class="dot" style="background:var(--mint)"></span>
+      <span class="grow">
+        <span class="name">${sc.label}</span>
+        <span class="sub">script · ${formatTimeAgo(sc.launchedAt) || "running"}</span>
+      </span>
+      <span class="scripthint">⏳</span>
+    </div>
+  `;
+  // Header = state summary, not a bare noun: "1 waiting · 2 running · 5 done".
+  const doneCount = fresh.length + older.length;
+  const headParts = [
+    scripts.length > 0 && `${scripts.length} waiting on script${scripts.length === 1 ? "" : "s"}`,
+    running.length > 0 && `${running.length} running`,
+    doneCount > 0 && `${doneCount} done`,
+  ].filter(Boolean);
   return html`
     <div class="scrim" onClick=${close}>
       <div class="sheet" onClick=${(e) => e.stopPropagation()}>
         <div class="sheetgroup">
           <div class="sheethead">
-            <span class="grow"><span class="name">${list.length} agent${list.length === 1 ? "" : "s"}</span></span>
+            <span class="grow"><span class="name">${headParts.join(" · ") || "background work"}</span></span>
           </div>
           <div class="agents-sheet">
-            ${list.map(
-              (a) => html`
-                <button
-                  type="button"
-                  class="agent-row"
-                  key=${a.agentId}
-                  onClick=${() => openAgent(a, list)}
-                  style=${a.spawnDepth > 1 ? `padding-left:${12 + Math.min(a.spawnDepth - 1, 4) * 14}px` : ""}
-                >
-                  <span class="dot" style=${`background:${a.status === "running" ? "var(--mint)" : "var(--peach)"}`}></span>
-                  <span class="grow">
-                    <span class="name">${a.description || a.agentType}</span>
-                    <span class="sub">${a.agentType}${a.status === "running" ? " · running" : ""}</span>
-                  </span>
-                  <span class="chev">›</span>
-                </button>
-              `,
-            )}
+            ${scripts.map(scriptRow)} ${running.map(row)} ${fresh.map(row)}
+            ${older.length > 0 &&
+            html`<button type="button" class="agent-row older-toggle" onClick=${() => setShowOlder(!showOlder)}>
+              <span class="grow"><span class="sub">${showOlder ? "▾" : "▸"} ${older.length} earlier agent${older.length === 1 ? "" : "s"}</span></span>
+            </button>`}
+            ${showOlder && older.map(row)}
           </div>
           <button class="sheetcancel" onClick=${close}>Close</button>
         </div>
@@ -2242,10 +2487,13 @@ function ChangesCard() {
   const sid = selectedId.value;
   const rev = transcript.value && transcript.value.rev;
   const online = connected.value;
-  const [data, setData] = useState(null);
-  // A session switch must not leave the previous session's files on screen. Declared before
-  // the fetch effect so it runs first when `sid` changes.
-  useEffect(() => setData(null), [sid]);
+  // Paint the last-known list for this session immediately (stale-while-revalidate);
+  // the fetch below replaces it.
+  const [data, setData] = useState(() => (sid && changesDataCache.get(sid)) || null);
+  // A session switch must not leave the previous session's files on screen — reset to
+  // the NEW session's cached list (or nothing). Declared before the fetch effect so it
+  // runs first when `sid` changes.
+  useEffect(() => setData((sid && changesDataCache.get(sid)) || null), [sid]);
   useEffect(() => {
     if (!sid) return;
     let stale = false;
@@ -2254,6 +2502,7 @@ function ChangesCard() {
         const r = await fetch(`/sessions/${encodeURIComponent(sid)}/changes`);
         if (!r.ok) return;
         const d = await r.json();
+        boundedSet(changesDataCache, sid, d);
         if (!stale) setData(d);
       } catch {
         // Unreachable bridge (the normal state on a train). Keep the last known list rather
@@ -2423,14 +2672,19 @@ const PR_TONE = { open: "pr-open", draft: "pr-draft", merged: "pr-merged", close
 const prLoc = (d) =>
   html`<span class="pr-loc"><span class="cadd">+${d.add}</span> <span class="cdel">−${d.del}</span></span>`;
 function usePullRequest(sid) {
-  const [d, setD] = useState(null);
+  // Same stale-while-revalidate as ChangesCard: last-known PR paints instantly, the
+  // fetch replaces it (the /pr route itself revalidates behind its 60s freshness).
+  const [d, setD] = useState(() => (sid && prDataCache.get(sid)) || null);
   useEffect(() => {
-    setD(null);
+    setD((sid && prDataCache.get(sid)) || null);
     let stale = false;
     (async () => {
       try {
         const r = await fetch(`/sessions/${encodeURIComponent(sid)}/pr`);
-        if (r.ok && !stale) setD(await r.json());
+        if (!r.ok) return;
+        const fresh = await r.json();
+        boundedSet(prDataCache, sid, fresh);
+        if (!stale) setD(fresh);
       } catch {
         // Unreachable bridge — the surrounding surfaces already report it; stay silent here.
       }
@@ -2475,9 +2729,10 @@ function FilesView() {
   const online = connected.value;
   const { rootRef, onTouchStart, onTouchEnd } = useSwipeBack(() => (filesView.value = false), [open]);
   const sid = selectedId.value;
-  // Never carry one session's file list into another. Declared before the fetch effect so it
+  // Never carry one session's file list into another — reset to the new session's
+  // cached list (shared with ChangesCard). Declared before the fetch effect so it
   // runs first when `sid` changes.
-  useEffect(() => setData(null), [sid]);
+  useEffect(() => setData((sid && changesDataCache.get(sid)) || null), [sid]);
   useEffect(() => {
     if (!open) return;
     let stale = false;
@@ -2485,6 +2740,7 @@ function FilesView() {
       try {
         const r = await fetch(`/sessions/${encodeURIComponent(sid)}/changes`);
         const d = r.ok ? await r.json() : { error: true };
+        if (r.ok) boundedSet(changesDataCache, sid, d);
         if (!stale) setData(d);
       } catch {
         // Unreachable bridge: hold the last known list (see ChangesCard) and say so only
@@ -2620,7 +2876,12 @@ function resync() {
   refreshSessions();
   if (selectedId.value) refreshTranscript();
   if (openSubagent.value) refreshSubagent();
-  if (!es || es.readyState !== 1 /* OPEN */) connectStream();
+  // ALWAYS rebuild the stream on foreground — no readyState check. iOS can resume the
+  // page with the socket long dead but no error ever delivered, so the EventSource
+  // still claims OPEN; gating on readyState keeps that zombie and the app never hears
+  // another broadcast. Reconnecting is one cheap request; a phantom-open stream is a
+  // permanently silent app.
+  connectStream();
 }
 // Advance the age clock once a minute while the page is visible — the labels' finest
 // unit is minutes, so anything faster is wasted renders. A backgrounded tab stops
@@ -2669,6 +2930,21 @@ function applyDeepLink() {
   if (!id) return;
   if (sessions.value.some((s) => s.id === id)) open(id);
   history.replaceState(null, "", location.pathname);
+}
+
+// Stale-while-revalidate boot: iOS evicts the backgrounded page constantly, so the most
+// common interaction — reopen after minutes — used to boot from a blank spinner. Paint
+// the last-persisted list immediately and let the auth probe below reconcile: a fresh
+// snapshot replaces it in place, and a 401 flips authed → the login screen as before.
+try {
+  const saved = JSON.parse(localStorage.getItem("csm-sessions") || "null");
+  if (Array.isArray(saved) && saved.length) {
+    sessions.value = saved;
+    authed.value = true;
+    boot();
+  }
+} catch {
+  /* corrupt/absent snapshot — normal spinner boot */
 }
 
 let bootTimeout;

@@ -5,7 +5,7 @@
  */
 
 import { test, expect } from "bun:test";
-import { questionAnswerKeys, multiQuestionKeys, answerKeys } from "./tmux";
+import { questionAnswerKeys, multiQuestionKeys, answerKeys, questionPickerVisible } from "./tmux";
 
 test("single-select presses the option's 1-based digit, then Enter to submit", () => {
   expect(questionAnswerKeys(0)).toEqual(["1", "Enter"]);
@@ -63,4 +63,92 @@ test("answerKeys dispatches single-question to questionAnswerKeys (no reset/extr
 
 test("answerKeys dispatches multi-question to multiQuestionKeys", () => {
   expect(answerKeys([2, [0]])).toEqual(multiQuestionKeys([2, [0]]));
+});
+
+// --- questionPickerVisible: gates the send-keys fallback on the widget being on-screen ---
+
+// Live capture of a real single-select AskUserQuestion widget (2026-07-21).
+const WIDGET_SINGLE = ` ☐ Repro
+Test question 1: pick one
+❯ 1. Alpha
+     First test option
+  2. Bravo
+     Second test option
+  3. Type something.
+──────────────────────
+  4. Chat about this
+Enter to select · ↑/↓ to navigate · Esc to cancel`;
+
+// A running pane with a todo list — ☐ glyphs present, but NO picker. The old bare-☐
+// heuristic would have misread this and fired keystrokes into the spinner.
+const SPINNER_WITH_TASKS = `⏺ Working through the list
+  ⎿  ☐ Fix the bug
+     ☐ Add the test
+✽ Cranking… (12s · ↓ 1.2k tokens)
+──────────────────────
+❯
+──────────────────────`;
+
+const PERMISSION_PROMPT = `⏺ Bash command
+   rm -rf node_modules
+Do you want to proceed?
+❯ 1. Yes
+  2. Yes, and don't ask again
+  3. No, and tell Claude what to do differently`;
+
+// Rewind picker footer says "Enter to continue", not "Enter to select".
+const REWIND_MENU = `  Rewind
+  ❯ 1. Restore code and conversation
+    2. Restore conversation
+  Enter to continue · Esc to cancel`;
+
+test("questionPickerVisible: real widget capture → visible", () => {
+  expect(questionPickerVisible(WIDGET_SINGLE)).toBe(true);
+});
+
+test("questionPickerVisible: spinner with ☐ task list → NOT visible", () => {
+  expect(questionPickerVisible(SPINNER_WITH_TASKS)).toBe(false);
+});
+
+test("questionPickerVisible: permission prompt → NOT visible", () => {
+  expect(questionPickerVisible(PERMISSION_PROMPT)).toBe(false);
+});
+
+test("questionPickerVisible: rewind menu → NOT visible", () => {
+  expect(questionPickerVisible(REWIND_MENU)).toBe(false);
+});
+
+test("questionPickerVisible: multi-question nav bar → visible", () => {
+  expect(questionPickerVisible("← Q1 ☐ · Q2 ✔ →")).toBe(true);
+});
+
+test("questionPickerVisible: only samples the bottom 20 lines", () => {
+  const scrollback = WIDGET_SINGLE + "\n" + Array(25).fill("output line").join("\n");
+  expect(questionPickerVisible(scrollback)).toBe(false);
+});
+
+// Live capture of a real multiSelect widget (2026-07-21): checkboxes render as "[ ]"
+// (not ☐), so the footer is the load-bearing signal for this variant too.
+const WIDGET_MULTISELECT = `Pick toppings
+❯ 1. [ ] Cheese
+  Add cheese
+  2. [ ] Olives
+  Add olives
+  3. [ ] Ham
+  Add ham
+  4. [ ] Type something
+     Submit
+──────────────────────
+  5. Chat about this
+Enter to select · ↑/↓ to navigate · Esc to cancel`;
+
+test("questionPickerVisible: real multiSelect widget capture → visible", () => {
+  expect(questionPickerVisible(WIDGET_MULTISELECT)).toBe(true);
+});
+
+test("questionPickerVisible: widget above a short pane's trailing blank rows → visible", () => {
+  // A capture spans the full pane height; on a young session the widget sits at the
+  // top with dozens of empty rows below it (caught live: not-presented on a real picker).
+  const cap = WIDGET_SINGLE + "\n" + Array(50).fill("   ").join("\n");
+  expect(questionPickerVisible(cap)).toBe(true);
 });
