@@ -224,6 +224,10 @@ Helpers in `notifications.ts`: `buildBaseName()`, `extractAIName()`, `extractRep
 
 `/model` or `/effort` in the phone composer opens a selection sheet; tapping an option `POST`s to `/sessions/:id/config`, which sends the arg-form slash command via the existing send path and toasts Claude's confirmation. Validated against `MODEL_ARGS`/`EFFORT_ARGS` (`session-api.ts`). Scoping, the statusline prerequisite and the smoke test: [ADR 4](docs/adr/0004-model-effort-switcher-scope.md).
 
+### Portkey pending-script strip
+
+A session waiting on a `run_in_background` script (e.g. pr-triage's Codex wait loop) genuinely ends its turn — status correctly reads `ready` — so the phone showed no sign it was mid-work. `core/background-tasks.ts` recovers pending scripts from the transcript by pairing background launches against `<task-notification>` records, and the detail view renders a `⏳ <command> · age` strip above the composer. Detection rules (each one validated against real transcript history): the tool_result must *confirm* task creation (a denied/failed launch never notifies; a sync Agent result is its report; a foreground command that merely prints launch-shaped text can't match), and notifications arrive via three carriers (`user` message, `queue-operation`, queued_command `attachment` — the latter two when the session is mid-turn). Computed in the same cached full-read as the transcript parse (`branchCache`), so it costs no extra IO. Scripts only — running agents/workflow children already surface via `subagents/`. Visibility only, by decision: dead/infinite scripts make "pending" unreliable as a status or notification input. Prototype that validated the rules: branch `proto/bg-task-detection`.
+
 ### Portkey changed-files viewer
 
 A changed-files strip at the end of the thread → full file list → per-file diff. Backed by `core/repo-files.ts` (`branchChanges`, `fileDiff`, `safeRepoPath`) via `GET /sessions/:id/changes` and `/sessions/:id/diff?path=`, both containment-guarded to the session's repo root.

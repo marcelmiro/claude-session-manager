@@ -31,6 +31,7 @@ import {
   killPane,
 } from "./tmux";
 import { isPermissionPrompt } from "./status";
+import { parseBackgroundTasks, pendingScripts, type BackgroundTask } from "./background-tasks";
 import { decideQuestion, declineQuestion, buildAnswersMap } from "./approval";
 import type { PendingQuestion, PendingToolCall } from "./jsonl-reader";
 import type { TranscriptBlock, TranscriptTurn } from "../types";
@@ -46,6 +47,13 @@ export interface SessionTranscript {
   usage?: ContextUsage;
   /** Subagents this session fanned out to (sourced from the `subagents/` dir); omitted when none. */
   subagents?: SubagentSummary[];
+  /**
+   * Background scripts the session launched and is still waiting on (`run_in_background`
+   * Bash whose `<task-notification>` hasn't arrived). The turn genuinely ends during such
+   * a wait, so without this the session just reads "ready" while e.g. a pr-triage Codex
+   * wait runs for tens of minutes. Omitted when none.
+   */
+  pendingScripts?: BackgroundTask[];
   /**
    * Opaque disk revision of the transcript file (`size:mtimeMs`) — bumps on ANY JSONL write
    * (append OR rewind's new branch). The phone snapshots it at rewind time and clears its
@@ -653,20 +661,33 @@ export function buildSessionTranscript(
 // to a JSONL — append OR rewind (which still appends a new branch) — grows the file and
 // bumps mtime, so an unchanged (size, mtime) pair means unchanged content: re-use the
 // parse instead of re-reading and re-parsing a multi-MB log on every refresh.
-const branchCache = new Map<string, { size: number; mtimeMs: number; turns: TranscriptTurn[] }>();
+const branchCache = new Map<
+  string,
+  { size: number; mtimeMs: number; turns: TranscriptTurn[]; pendingScripts: BackgroundTask[] }
+>();
 
-async function readActiveBranchCached(path: string): Promise<TranscriptTurn[]> {
+async function readActiveBranchCached(
+  path: string,
+): Promise<{ turns: TranscriptTurn[]; pendingScripts: BackgroundTask[] }> {
   try {
     const file = Bun.file(path);
     const stat = await file.stat();
-    if (!stat) return [];
+    if (!stat) return { turns: [], pendingScripts: [] };
     const hit = branchCache.get(path);
-    if (hit && hit.size === stat.size && hit.mtimeMs === stat.mtimeMs) return hit.turns;
-    const turns = parseActiveBranch(await file.text());
-    branchCache.set(path, { size: stat.size, mtimeMs: stat.mtimeMs, turns });
-    return turns;
+    if (hit && hit.size === stat.size && hit.mtimeMs === stat.mtimeMs) return hit;
+    const text = await file.text();
+    const entry = {
+      size: stat.size,
+      mtimeMs: stat.mtimeMs,
+      turns: parseActiveBranch(text),
+      // Piggybacked on the same read: pending scripts change only when the file does
+      // (launch and notification are both transcript records), so one cache covers both.
+      pendingScripts: pendingScripts(parseBackgroundTasks(text)),
+    };
+    branchCache.set(path, entry);
+    return entry;
   } catch {
-    return []; // missing/unreadable transcript — no turns
+    return { turns: [], pendingScripts: [] }; // missing/unreadable transcript
   }
 }
 
@@ -683,8 +704,11 @@ export async function getTranscript(sessionId: string): Promise<SessionTranscrip
   // leaf→root path each time, always returning a full replacement (no cursor). The full
   // re-parse is gated behind a size+mtime cache (any change grows the file), so an idle
   // session re-uses the prior parse instead of re-reading a multi-MB log every refresh.
-  const turns = path ? await readActiveBranchCached(path) : [];
-  const result = buildSessionTranscript(slimTurns(turns), pendingToolCall(sessionId));
+  const branch = path
+    ? await readActiveBranchCached(path)
+    : { turns: [], pendingScripts: [] as BackgroundTask[] };
+  const result = buildSessionTranscript(slimTurns(branch.turns), pendingToolCall(sessionId));
+  if (branch.pendingScripts.length > 0) result.pendingScripts = branch.pendingScripts;
   if (path) {
     // Reuse the size+mtime the cached read just stat()'d — no extra syscall (see branchCache).
     const entry = branchCache.get(path);

@@ -633,6 +633,11 @@
       .modebadge { flex: none; color: var(--mint); border: 1px solid currentColor; border-radius: 10px; padding: 0 7px; font-weight: 600; white-space: nowrap; }
       /* fill the row and right-align so usage+branch hug the right edge, badge stays left */
       .sltext { flex: 1; min-width: 0; text-align: right; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-variant-numeric: tabular-nums; }
+      .scriptbar { display: flex; align-items: baseline; gap: 6px; padding: 0 4px 8px; font-size: 11px; color: var(--muted); }
+      .scriptbar .scriptdot { flex: none; }
+      .scriptbar .scriptcmd { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-family: ui-monospace, monospace; }
+      .scriptbar .scriptmore { flex: none; color: var(--dim); }
+      .scriptbar .scriptage { flex: none; margin-left: auto; color: var(--dim); font-variant-numeric: tabular-nums; }
 
       /* iOS-style long-press action sheet */
       .scrim {

@@ -1803,6 +1803,11 @@ function Detail() {
   const agents = (t && t.subagents) || [];
   const runningAgents = agents.filter((a) => a.status === "running").length;
 
+  // Background scripts the session is waiting on (run_in_background Bash, no completion
+  // notification yet). The session reads "ready" during such a wait — this strip is the
+  // only tell that it's actually mid-work (e.g. a pr-triage Codex wait).
+  const scripts = (t && t.pendingScripts) || [];
+
   // 15s safety poll while any subagent is running — covers hard-kills (which fire no
   // SubagentStop hook) and any missed SSE edge. SSE stays the instant primary path; this
   // runs ONLY while something is running and stops the moment all are done.
@@ -1998,6 +2003,13 @@ function Detail() {
           html`<div class="statusbar">
             ${mode && html`<span class="modebadge" style=${`color:${modeColor}`}>${mode}</span>`}
             ${statusline && html`<span class="sltext">${statusline}</span>`}
+          </div>`}
+          ${scripts.length > 0 &&
+          html`<div class="scriptbar">
+            <span class="scriptdot">⏳</span>
+            <span class="scriptcmd">${scripts[0].label}</span>
+            ${scripts.length > 1 && html`<span class="scriptmore">+${scripts.length - 1}</span>`}
+            <span class="scriptage">${formatTimeAgo(scripts[0].launchedAt)}</span>
           </div>`}
           ${questions
             ? html`<${QuestionCard} questions=${questions} />`
