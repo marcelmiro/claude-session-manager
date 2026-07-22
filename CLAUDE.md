@@ -97,7 +97,7 @@ src/
 
 `discoverSessions()` → scan index files + `listPanes()` + `findClaudeProcesses()` in parallel → correlate by TTY → `capturePane()` for status detection → `getBaseRepoPath()` for worktree resolution → `groupSessions()` → `buildDisplayRows()` → `renderSessionList()`
 
-Two-phase discovery: Phase A = active tmux panes (fast), Phase B = archived from index files (>3h old, no active pane). Session UUIDs resolved via Claude Code's `SessionStart` hook (writes paneId→sessionId to `~/.config/csm/hook-events`). Run `csm setup` to install the hook.
+Two-phase discovery: Phase A = active tmux panes (fast), Phase B = archived from index files (last 24h, no active pane). Session UUIDs resolved via Claude Code's `SessionStart` hook (writes paneId→sessionId to `~/.config/csm/hook-events`). Run `csm setup` to install the hook.
 
 ### Worktree-aware repo grouping
 
@@ -162,9 +162,9 @@ Neovim which-key style popup at bottom-left. Press a key to select an action:
 | running | ⦿ | Spinner chars (braille, unicode dots) |
 | ready | ● | ❯ prompt visible |
 | idle | ○ | No claude process on pane |
-| archived | ○ | >3h old, no active pane |
+| archived | ○ | Modified in last 24h, no active pane |
 
-Sort order: waiting → running → ready → idle → archived. Within same status: non-worktrees before worktrees. Priority repos pinned at top.
+Sort order: waiting → running → ready → idle → archived. Within same status: non-worktrees before worktrees; archived sorted most recent first. Priority repos pinned at top.
 
 ### Session labels
 

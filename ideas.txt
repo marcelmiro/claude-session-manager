@@ -56,6 +56,10 @@ CSM Ideas Backlog
 - Impl sketch: let `/answer` accept a string entry in the per-question selections array (alongside number / number[]); `buildAnswersMap` passes a string straight through.
 - Deferred in favor of the global "Chat about this" (decline→clarify→chat) flow, which covers redirect/clarify/dislike-options via a real conversation. This is the narrower one-shot-custom-answer case — additive later.
 
+## Mobile bridge (portkey)
+- A better PR reviewer for mobile phones — GitHub's mobile review UI wastes small-screen space and is bad for reading diffs
+- Voice dictation mode with conversation context — iOS's built-in keyboard dictation doesn't know the conversation's vocabulary, so domain keywords like "CustomerOS" or "PR" get mis-transcribed
+
 ## Quality of Life
 - Session duration tracking (how long has this been running?)
 - Show model being used per session (opus vs sonnet)

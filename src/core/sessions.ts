@@ -693,7 +693,7 @@ async function discoverArchivedSessions(
   }
 
   const sessions: Session[] = [];
-  const threeHours = 3 * 60 * 60 * 1000;
+  const archiveWindow = 24 * 60 * 60 * 1000;
   const indexSessionIds = new Set<string>();
 
   for (const indexFile of indexFiles) {
@@ -712,10 +712,10 @@ async function discoverArchivedSessions(
         // Skip if this session is already active
         if (activeSessionIds.has(entry.sessionId)) continue;
 
-        // Skip entries older than 3h
+        // Skip entries older than 24h
         const modifiedMs = new Date(entry.modified).getTime();
         const ageMs = Date.now() - modifiedMs;
-        if (ageMs > threeHours) continue;
+        if (ageMs > archiveWindow) continue;
 
         let baseRepoPath = entry.projectPath;
         try { baseRepoPath = await getBaseRepoPath(entry.projectPath); } catch {}
@@ -775,12 +775,12 @@ async function discoverArchivedSessions(
           // Skip if already known from active sessions or index files
           if (activeSessionIds.has(sessionId) || indexSessionIds.has(sessionId)) continue;
 
-          // Check mtime — skip files older than 3h (cheap stat, no file read)
+          // Check mtime — skip files older than 24h (cheap stat, no file read)
           const file = Bun.file(path);
           const stat = await file.stat();
           if (!stat) continue;
           const ageMs = Date.now() - stat.mtimeMs;
-          if (ageMs > threeHours) continue;
+          if (ageMs > archiveWindow) continue;
 
           // Parse the JSONL for metadata
           const metadata = await parseJsonlMetadata(path);
@@ -881,6 +881,11 @@ export function groupSessions(sessions: Session[], priorityRepos: string[]): Rep
     groupSessions.sort((a, b) => {
       const statusDiff = statusPriority[a.status] - statusPriority[b.status];
       if (statusDiff !== 0) return statusDiff;
+      // Archived sessions have stable mtimes (index/file), so recency sorting is safe:
+      // most recent first.
+      if (a.status === "archived") {
+        return b.modified.getTime() - a.modified.getTime();
+      }
       // Non-worktrees before worktrees (same status)
       const aWt = a.repoPath !== a.baseRepoPath ? 1 : 0;
       const bWt = b.repoPath !== b.baseRepoPath ? 1 : 0;
