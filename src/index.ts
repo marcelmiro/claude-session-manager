@@ -17,6 +17,8 @@ import { buildLaunchCommand } from "./core/launch-command";
 import { initWizard, renderWizard, renderWizardPreview, renderWizardStatusBar, handleWizardKey, setWizardBranches } from "./ui/wizard";
 import { loadAllSessions, searchEntries, type SearchEntry } from "./core/search";
 import { recoverWorktreeTranscript } from "./core/recover";
+import { resolveTranscriptPath } from "./core/last-turn";
+import { pendingScriptsAt } from "./core/background-tasks";
 import { renderSearchResults } from "./ui/search-list";
 import { createSpaceMenuState, renderSpaceMenu, handleSpaceMenuKey, getMenuDimensions, type SpaceMenuState } from "./ui/space-menu";
 import { createQuestionPicker, renderQuestionPicker, handleQuestionPickerKey, getPickerDimensions, type QuestionPickerState } from "./ui/question-picker";
@@ -447,6 +449,19 @@ async function refresh(opts?: { skipArchivedSummaries?: boolean }) {
     for (const session of sessions) {
       session.name = getSessionName(session.id, nameCache);
     }
+
+    // ⏳ script-wait: a ready session may still be driving a run_in_background
+    // script. Cheap here — the TUI is long-lived, so pendingScriptsAt's mtime
+    // cache and liveness-probe TTL persist across refreshes. Visibility only:
+    // never affects status, sort, or attention.
+    await Promise.all(
+      sessions
+        .filter((s) => s.status === "ready" && s.id)
+        .map(async (s) => {
+          const path = await resolveTranscriptPath(s.id);
+          if (path) s.scriptWaiting = (await pendingScriptsAt(path)).length > 0;
+        }),
+    );
 
     const groups = groupSessions(sessions, notifConfig.priorityRepos ?? []);
 

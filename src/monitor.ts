@@ -15,8 +15,9 @@ import { reapDeadSessionFiles } from "./core/approval";
 import { loadConfig } from "./core/config";
 import { debugLog } from "./core/debug";
 import { loadState, saveState, computeAggregate, buildSessionStates, loadPaneSessions, savePaneSessions, processHookEvents } from "./core/state";
-import { detectTransitions, dispatchNotifications, syncWindowPrefix, ATTENTION_PREFIX, stripAllPrefixes, desiredPrefix, buildBaseName, NAME_SEPARATOR } from "./core/notifications";
+import { detectTransitions, dispatchNotifications, syncWindowPrefix, ATTENTION_PREFIX, RUNNING_PREFIX, SCRIPT_PREFIX, stripAllPrefixes, desiredPrefix, buildBaseName, NAME_SEPARATOR } from "./core/notifications";
 import { clearSource } from "./core/input-source";
+import { detectScriptWaits } from "./core/script-wait";
 import { getBaseRepoPath } from "./core/git";
 import { repoNameFromPath } from "./core/sessions";
 import { loadNameCache, saveNameCache, generateAIName, getSessionName, slugify, acquireNamingLock, releaseNamingLock, type NameCache } from "./core/names";
@@ -311,16 +312,31 @@ async function main(): Promise<void> {
     await dispatchNotifications(notableWithAttention, config);
   }
 
+  // Script-wait detection: a ready session may still be driving a run_in_background
+  // script (the turn genuinely ends while the runner lives — pr-triage waits this way
+  // for tens of minutes). Visibility only: feeds the ⏳ window prefix, never
+  // notifications, attention, or the status-right counts. paneSessionMap is consulted
+  // first — quickDiscoverActive resolved ids before hook events / fork correction.
+  const sidOf = (s: Session): string =>
+    (s.tmuxPane ? paneSessionMap[s.tmuxPane.paneId] : undefined) ?? s.id;
+  const readyIds = [...new Set(sessions.filter((s) => s.status === "ready" && sidOf(s)).map(sidOf))];
+  const scriptWaitIds = readyIds.length > 0 ? await detectScriptWaits(readyIds) : new Set<string>();
+  if (scriptWaitIds.size > 0) {
+    await debugLog(`script-wait: ${[...scriptWaitIds].join(", ")}`);
+  }
+
   // Sync prefixes on tmux window names.
   // Group sessions by window, compute desired prefix + name-aware base name.
-  const windowMap = new Map<string, { sessionName: string; windowIndex: number; windowName: string; hasAttention: boolean; hasRunning: boolean; paneIds: string[] }>();
+  const windowMap = new Map<string, { sessionName: string; windowIndex: number; windowName: string; hasAttention: boolean; hasRunning: boolean; hasScriptWait: boolean; paneIds: string[] }>();
   for (const session of sessions) {
     if (!session.tmuxPane) continue;
+    const hasScriptWait = session.status === "ready" && scriptWaitIds.has(sidOf(session));
     const wKey = `${session.tmuxPane.sessionName}:${session.tmuxPane.windowIndex}`;
     const existing = windowMap.get(wKey);
     if (existing) {
       if (needsAttention.has(session.tmuxPane.paneId)) existing.hasAttention = true;
       if (session.status === "running") existing.hasRunning = true;
+      if (hasScriptWait) existing.hasScriptWait = true;
       existing.paneIds.push(session.tmuxPane.paneId);
     } else {
       windowMap.set(wKey, {
@@ -329,6 +345,7 @@ async function main(): Promise<void> {
         windowName: session.tmuxPane.windowName,
         hasAttention: needsAttention.has(session.tmuxPane.paneId),
         hasRunning: session.status === "running",
+        hasScriptWait,
         paneIds: [session.tmuxPane.paneId],
       });
     }
@@ -354,7 +371,7 @@ async function main(): Promise<void> {
   }
 
   for (const win of windowMap.values()) {
-    const prefix = desiredPrefix(win.hasAttention, win.hasRunning);
+    const prefix = desiredPrefix(win.hasAttention, win.hasRunning, win.hasScriptWait);
 
     // Resolve repo name(s) for this window's panes
     const paneRepos = win.paneIds.map(id => {
@@ -515,7 +532,8 @@ async function phase2(
             // Apply name to window immediately (with current prefix)
             const currentWindowName = unnamed.tmuxPane.windowName;
             const prefix = currentWindowName.startsWith(ATTENTION_PREFIX) ? ATTENTION_PREFIX
-              : currentWindowName.startsWith("🔄") ? "🔄" : "";
+              : currentWindowName.startsWith(RUNNING_PREFIX) ? RUNNING_PREFIX
+              : currentWindowName.startsWith(SCRIPT_PREFIX) ? SCRIPT_PREFIX : "";
             const repo = repoNameFromPath(unnamed.baseRepoPath);
             await renameWindow(unnamed.tmuxPane.sessionName, unnamed.tmuxPane.windowIndex, `${prefix}${buildBaseName(repo, slugify(name) || undefined)}`);
           } else {

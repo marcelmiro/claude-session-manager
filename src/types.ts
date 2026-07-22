@@ -32,6 +32,8 @@ export interface Session {
   lastCapture?: string;
   /** Where `status` came from: Claude's native status file › event-sourced hook log › viewport scraper. */
   statusSource?: "event" | "scraper" | "native";
+  /** Ready but still waiting on a live run_in_background script (⏳). Visibility only. */
+  scriptWaiting?: boolean;
 }
 
 /**

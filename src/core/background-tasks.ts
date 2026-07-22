@@ -177,7 +177,7 @@ const ALIVE_TTL_MS = 15_000;
  * "pending" forever (seen in real data: a 3-day-old wait on a live pane), and this
  * probe is what catches it. A missing output file (tmp pruned, reboot) reads dead too.
  */
-async function runnerAlive(outputPath: string): Promise<boolean> {
+export async function runnerAlive(outputPath: string): Promise<boolean> {
   try {
     const proc = Bun.spawn(["lsof", "-t", outputPath], { stdout: "ignore", stderr: "ignore" });
     return (await proc.exited) === 0;

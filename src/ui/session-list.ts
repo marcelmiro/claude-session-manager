@@ -150,12 +150,16 @@ export function renderSessionList(
       const statusText = (session.status === "ready" ? "input" : session.status).padEnd(8);
       const timeStr = formatTimeAgo(sessionActivityAt(session)).padStart(5);
 
-      const rawLabel = buildSessionLabel(session, dnMap.get(session.id));
-      const labelMax = Math.max(8, contentWidth - 2 - 15 - 2);
+      // \u23f3 = ready but still waiting on a live background script. The emoji renders
+      // 2 cols but counts 1 in .length, so the gap math subtracts the extra column.
+      const waitMark = session.scriptWaiting ? "\u23f3 " : "";
+      const waitCols = session.scriptWaiting ? 1 : 0;
+      const rawLabel = waitMark + buildSessionLabel(session, dnMap.get(session.id));
+      const labelMax = Math.max(8, contentWidth - 2 - 15 - 2 - waitCols);
       const truncLabel = rawLabel.length > labelMax
         ? rawLabel.slice(0, labelMax - 1) + "\u2026"
         : rawLabel;
-      const gap = " ".repeat(Math.max(2, contentWidth - 2 - truncLabel.length - 15));
+      const gap = " ".repeat(Math.max(2, contentWidth - 2 - truncLabel.length - waitCols - 15));
 
       if (isSelected) {
         lines.push(

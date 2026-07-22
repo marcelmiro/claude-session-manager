@@ -10,19 +10,27 @@ import type { PushPayload } from "../types";
 
 export const ATTENTION_PREFIX = "⚡";
 export const RUNNING_PREFIX = "🔄";
+export const SCRIPT_PREFIX = "⏳";
 export const NAME_SEPARATOR = "/";
 
-/** Strip both ⚡ and 🔄 prefixes from a window name */
+/** Strip the ⚡/🔄/⏳ prefix from a window name */
 export function stripAllPrefixes(name: string): string {
   if (name.startsWith(ATTENTION_PREFIX)) return name.slice(ATTENTION_PREFIX.length);
   if (name.startsWith(RUNNING_PREFIX)) return name.slice(RUNNING_PREFIX.length);
+  if (name.startsWith(SCRIPT_PREFIX)) return name.slice(SCRIPT_PREFIX.length);
   return name;
 }
 
-/** Determine the desired prefix: ⚡ > 🔄 > "" */
-export function desiredPrefix(hasAttention: boolean, isRunning: boolean): string {
+/**
+ * Determine the desired prefix: ⚡ > 🔄 > ⏳ > "".
+ * ⏳ = the turn is over but the session still waits on a live background script
+ * (run_in_background). Visibility only — it never feeds notifications, attention,
+ * or the status-right counts.
+ */
+export function desiredPrefix(hasAttention: boolean, isRunning: boolean, hasScriptWait = false): string {
   if (hasAttention) return ATTENTION_PREFIX;
   if (isRunning) return RUNNING_PREFIX;
+  if (hasScriptWait) return SCRIPT_PREFIX;
   return "";
 }
 
@@ -299,19 +307,22 @@ export function pushPayloadFor(event: TransitionEvent, session: Session): PushPa
 }
 
 /**
- * Sync the prefix (⚡/🔄/none) on a tmux window to match the desired state.
- * Callers pass the window's computed attention/running flags.
+ * Sync the prefix (⚡/🔄/⏳/none) on a tmux window to match the desired state.
+ * Callers pass the window's computed attention/running flags. Only the monitor
+ * computes script-wait; other callers leave `hasScriptWait` undefined and a ⏳
+ * already on the window is preserved rather than stripped-then-restored next tick.
  */
 export async function syncWindowPrefix(
   sessionName: string,
   windowIndex: number,
   hasAttention: boolean,
   hasRunning: boolean,
+  hasScriptWait?: boolean,
 ): Promise<void> {
   const currentName = await getWindowName(sessionName, windowIndex);
   if (!currentName) return;
   const baseName = stripAllPrefixes(currentName);
-  const prefix = desiredPrefix(hasAttention, hasRunning);
+  const prefix = desiredPrefix(hasAttention, hasRunning, hasScriptWait ?? currentName.startsWith(SCRIPT_PREFIX));
   const desired = `${prefix}${baseName}`;
   if (currentName !== desired) {
     await renameWindow(sessionName, windowIndex, desired);

@@ -178,7 +178,7 @@ Session rows display "TICKET · name" labels extracted from branch names (Linear
 3. macOS native notification (terminal-notifier/osascript; sound-only while Ghostty is frontmost)
 4. Web Push to the portkey device that drove the turn (see below)
 
-Window prefix priority: ⚡ (needs attention) > 🔄 (running) > none. Monitor syncs prefixes on each cycle. `stripAllPrefixes()` and `desiredPrefix()` in `notifications.ts` centralize prefix logic.
+Window prefix priority: ⚡ (needs attention) > 🔄 (running) > ⏳ (waiting on background script) > none. Monitor syncs prefixes on each cycle. `stripAllPrefixes()` and `desiredPrefix()` in `notifications.ts` centralize prefix logic.
 
 Auto-clears when user focuses the attention pane. Config in `~/.config/csm/config.json`.
 
@@ -214,11 +214,13 @@ Priority: cache → summary → plan title → first prompt + branch context. AI
 
 ### Window naming format
 
-Tmux windows use the format `[⚡|🔄]{repo}[/{ai-name}][+]`:
+Tmux windows use the format `[⚡|🔄|⏳]{repo}[/{ai-name}][+]`:
 - `{repo}` = base repo name from pane cwd (worktrees resolved via `getBaseRepoPath`)
 - `/{ai-name}` = AI-generated compact name (1-3 words, kebab-case)
 - `+` = fork indicator (transitional, until fork gets its own AI name)
-- `⚡`/`🔄` = status prefixes (attention > running > none)
+- `⚡`/`🔄`/`⏳` = status prefixes (attention > running > script-wait > none)
+
+`⏳` = the turn is over (status `ready`) but the session still waits on a live `run_in_background` script (same detection as portkey's list badge: transcript pending-scripts + `lsof` runner-liveness probe). Visibility only — it never feeds notifications, attention, `csm next`, sort order, or the status-right counts. The monitor computes it per tick via `core/script-wait.ts`, which persists the transcript parse + liveness verdicts to `~/.config/csm/script-wait.json` (the monitor is a fresh process per tick, so the in-process caches in `background-tasks.ts` don't survive). The TUI shows the same ⏳ inline before the row label, computed via `pendingScriptsAt` directly (long-lived process, in-process caches work).
 
 Examples: `csm`, `csm/fix-auth`, `⚡csm/fix-auth`, `🔄api`, `csm/fix-auth+`
 Multi-pane same repo: `{repo}`. Multi-pane mixed: `{repo1}+{repo2}`.
@@ -326,4 +328,5 @@ Restore: `resurrect-sessions.json` (coordinate→{sessionId, cwd}) + `tmux list-
 - Hook script: `~/.config/csm/hooks/session-start.sh` (installed by `csm setup`)
 - Resurrect map: `~/.config/csm/resurrect-sessions.json` (coordinate→sessionId, written by save-sessions)
 - Web Push state: `~/.config/csm/push-vapid.json` (VAPID keypair), `push-subscriptions.json` (deviceId→subscription), `consumers/<deviceId>` (per-device SSE liveness), `source/<sessionId>.json` (which device drove the turn)
+- Script-wait cache: `~/.config/csm/script-wait.json` (per-session transcript parse + runner-liveness verdicts for the ⏳ prefix)
 - Debug log: `~/.config/csm/debug.log` (monitor debug, create file to enable)
