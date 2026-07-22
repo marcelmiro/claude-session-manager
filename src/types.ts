@@ -206,6 +206,7 @@ export interface GlobalSearchState {
   cursor: number;
   entries: SearchEntryRef[];  // all loaded entries (cached for search session)
   results: SearchEntryRef[];  // filtered/ranked subset (max 50)
+  total: number;              // full match count before the 50-row cap
   selectedIndex: number;
   loading: boolean;
 }

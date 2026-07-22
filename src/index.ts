@@ -3,7 +3,7 @@ import { createLayout } from "./ui/layout";
 import { renderStatusBar } from "./ui/status-bar";
 import { buildDisplayRows, renderSessionList, moveSelection, moveToGroup, getSelectableIndices } from "./ui/session-list";
 import { handleTextInputKey, renderTextWithCursor } from "./ui/text-input";
-import { updatePreview, getPreviewPlainText, renderMessage, getSessionPath } from "./ui/preview-pane";
+import { updatePreview, getPreviewPlainText, renderMessage } from "./ui/preview-pane";
 import { discoverSessions, groupSessions, seedPaneSessionCache } from "./core/sessions";
 import { readPreviewMessages, type PendingToolCall, type PendingQuestion } from "./core/jsonl-reader";
 import { switchToPane, getMainSession, killPane, sendKeys, sendKeysSequential, sendTextAndEnter, answerQuestion } from "./core/tmux";
@@ -15,7 +15,7 @@ import { syncWindowPrefix, buildBaseName } from "./core/notifications";
 import { discoverRepos, listBranches, fetchRepo, getDefaultBranch, branchCheckedOutPath } from "./core/git";
 import { buildLaunchCommand } from "./core/launch-command";
 import { initWizard, renderWizard, renderWizardPreview, renderWizardStatusBar, handleWizardKey, setWizardBranches } from "./ui/wizard";
-import { loadAllSessions, filterAndRankEntries, type SearchEntry } from "./core/search";
+import { loadAllSessions, searchEntries, type SearchEntry } from "./core/search";
 import { recoverWorktreeTranscript } from "./core/recover";
 import { renderSearchResults } from "./ui/search-list";
 import { createSpaceMenuState, renderSpaceMenu, handleSpaceMenuKey, getMenuDimensions, type SpaceMenuState } from "./ui/space-menu";
@@ -257,18 +257,25 @@ function handleRename() {
 function renderSearchBar() {
   if (!globalSearch) return;
   const text = renderTextWithCursor(globalSearch.query, globalSearch.cursor);
+  const shown = globalSearch.results.length;
   const countStr = globalSearch.loading
     ? "loading…"
-    : `${globalSearch.results.length} result${globalSearch.results.length === 1 ? "" : "s"}`;
+    : globalSearch.total > shown
+      ? `${shown} of ${globalSearch.total}`
+      : `${shown} result${shown === 1 ? "" : "s"}`;
+  const enterHint = getSelectedSearchEntry()?.isActive ? "switch" : "resume";
+  const escHint = globalSearch.query ? "clear" : "close";
   statusBar.setContent(
     `{${C.peach}-fg}/{/${C.peach}-fg} ${text}` +
-    `  {${C.dim}-fg}${countStr}  ↑/↓ move  ⏎ switch/resume  Esc cancel{/${C.dim}-fg}`,
+    `  {${C.dim}-fg}${countStr}  ↑/↓ move  ⏎ ${enterHint}  ^U/^D scroll  repo: filter  Esc ${escHint}{/${C.dim}-fg}`,
   );
 }
 
 function applySearchFilter() {
   if (!globalSearch) return;
-  globalSearch.results = filterAndRankEntries(globalSearch.entries, globalSearch.query);
+  const { results, total } = searchEntries(globalSearch.entries, globalSearch.query);
+  globalSearch.results = results;
+  globalSearch.total = total;
   if (globalSearch.results.length > 0) {
     globalSearch.selectedIndex = Math.min(globalSearch.selectedIndex, globalSearch.results.length - 1);
   } else {
@@ -364,7 +371,10 @@ function flashStatusMessage(msg: string, duration = 2000) {
   screen.render();
   flashTimer = setTimeout(() => {
     flashTimer = null;
-    updateStatusBar();
+    // updateStatusBar no-ops while search is active, which would leave the flash
+    // text stuck in the bar — restore the search bar explicitly.
+    if (globalSearch) renderSearchBar();
+    else updateStatusBar();
     screen.render();
   }, duration);
 }
@@ -623,7 +633,11 @@ async function handleResume() {
   isExiting = true;
 
   const targetSession = await getMainSession();
-  if (!targetSession) return;
+  if (!targetSession) {
+    isExiting = false;
+    flashStatusMessage(`{${C.dim}-fg}No tmux session found{/${C.dim}-fg}`);
+    return;
+  }
 
   // Relocate to the base repo if the session's worktree was deleted, so the resume lands.
   const effectivePath = await recoverWorktreeTranscript(session.id, session.repoPath, session.baseRepoPath);
@@ -632,8 +646,9 @@ async function handleResume() {
   try {
     const cmd = `claude --resume=${session.id}; exec zsh -l`;
     await Bun.$`tmux new-window -a -t ${targetSession} -n ${repoName} -c ${effectivePath} zsh -c ${cmd}`.quiet();
-  } catch {
-    // ignore
+  } catch (e) {
+    console.error(`csm: failed to resume session: ${e instanceof Error ? e.message : e}`);
+    process.exit(1);
   }
   process.exit(0);
 }
@@ -705,7 +720,11 @@ async function handleFork() {
   isExiting = true;
 
   const targetSession = await getMainSession();
-  if (!targetSession) return;
+  if (!targetSession) {
+    isExiting = false;
+    flashStatusMessage(`{${C.dim}-fg}No tmux session found{/${C.dim}-fg}`);
+    return;
+  }
 
   // Relocate to the base repo if the session's worktree was deleted, so the fork resume lands.
   const effectivePath = await recoverWorktreeTranscript(session.id, session.repoPath, session.baseRepoPath);
@@ -717,8 +736,9 @@ async function handleFork() {
     const forkId = crypto.randomUUID();
     const cmd = `claude --session-id ${forkId} --resume=${session.id} --fork-session; exec zsh -l`;
     await Bun.$`tmux new-window -a -t ${targetSession} -n ${forkName} -c ${effectivePath} zsh -c ${cmd}`.quiet();
-  } catch {
-    // ignore
+  } catch (e) {
+    console.error(`csm: failed to fork session: ${e instanceof Error ? e.message : e}`);
+    process.exit(1);
   }
   process.exit(0);
 }
@@ -1099,6 +1119,7 @@ screen.on("keypress", (_ch: string, key: any) => {
       cursor: 0,
       entries: [],
       results: [],
+      total: 0,
       selectedIndex: 0,
       loading: true,
     };
@@ -1117,7 +1138,7 @@ screen.on("keypress", (_ch: string, key: any) => {
       if (!globalSearch) return; // exited search while loading
       globalSearch.entries = entries;
       globalSearch.loading = false;
-      globalSearch.results = filterAndRankEntries(entries, globalSearch.query);
+      applySearchFilter();
       renderSearchResults(listBox, globalSearch.results, globalSearch.selectedIndex);
       renderSearchBar();
       // Update preview for first result
@@ -1164,12 +1185,15 @@ async function handleSearchEnter() {
     cleanup();
     await switchToPane(paneId, sessionName, windowIndex);
     process.exit(0);
-    return;
   }
 
   // Archived session: resume in new tmux window
   const targetSession = await getMainSession();
-  if (!targetSession) return;
+  if (!targetSession) {
+    isExiting = false; // keep Enter usable — a stuck flag dead-locks every exit path
+    flashStatusMessage(`{${C.dim}-fg}No tmux session found{/${C.dim}-fg}`);
+    return;
+  }
 
   // Use base repo if the worktree is deleted, relocating the transcript there so the resume lands.
   const effectivePath = await recoverWorktreeTranscript(entry.sessionId, entry.projectPath, entry.baseRepoPath);
@@ -1180,8 +1204,9 @@ async function handleSearchEnter() {
   try {
     const cmd = `claude --resume=${entry.sessionId}; exec zsh -l`;
     await Bun.$`tmux new-window -a -t ${targetSession} -n ${repoName} -c ${effectivePath} zsh -c ${cmd}`.quiet();
-  } catch {
-    // ignore
+  } catch (e) {
+    console.error(`csm: failed to resume session: ${e instanceof Error ? e.message : e}`);
+    process.exit(1);
   }
   process.exit(0);
 }
@@ -1306,6 +1331,19 @@ screen.on("keypress", async (_ch: string, key: any) => {
   }
 });
 
+/** Move the search selection and refresh list/bar/preview together. */
+async function moveSearchSelection(delta: number) {
+  if (!globalSearch || globalSearch.results.length === 0) return;
+  globalSearch.selectedIndex = Math.max(
+    0,
+    Math.min(globalSearch.results.length - 1, globalSearch.selectedIndex + delta),
+  );
+  renderSearchResults(listBox, globalSearch.results, globalSearch.selectedIndex);
+  renderSearchBar(); // the ⏎ switch/resume hint tracks the selected entry
+  await updateSearchPreview(getSelectedSearchEntry());
+  screen.render();
+}
+
 // Search keypress handler (intercepts all keys when search is active)
 screen.on("keypress", async (_ch: string, key: any) => {
   if (!globalSearch || !key || searchJustActivated) return;
@@ -1314,7 +1352,19 @@ screen.on("keypress", async (_ch: string, key: any) => {
   const ch = _ch || "";
 
   if (keyName === "escape") {
-    exitSearch();
+    // Two-stage, matching the wizard filters: first Esc clears the query, second exits.
+    if (globalSearch.query) {
+      if (searchDebounceTimer) { clearTimeout(searchDebounceTimer); searchDebounceTimer = null; }
+      globalSearch.query = "";
+      globalSearch.cursor = 0;
+      applySearchFilter();
+      renderSearchResults(listBox, globalSearch.results, globalSearch.selectedIndex);
+      renderSearchBar();
+      await updateSearchPreview(getSelectedSearchEntry());
+      screen.render();
+    } else {
+      exitSearch();
+    }
     return;
   }
 
@@ -1323,23 +1373,21 @@ screen.on("keypress", async (_ch: string, key: any) => {
     return;
   }
 
-  if (keyName === "up") {
-    if (globalSearch.results.length > 0) {
-      globalSearch.selectedIndex = Math.max(0, globalSearch.selectedIndex - 1);
-      renderSearchResults(listBox, globalSearch.results, globalSearch.selectedIndex);
-      await updateSearchPreview(getSelectedSearchEntry());
-      screen.render();
-    }
+  // ^J arrives as blessed keyName "linefeed", not "C-j" (same quirk as the wizard).
+  if (keyName === "up" || keyName === "C-k") {
+    await moveSearchSelection(-1);
+    return;
+  }
+  if (keyName === "down" || keyName === "linefeed" || keyName === "C-j") {
+    await moveSearchSelection(1);
     return;
   }
 
-  if (keyName === "down") {
-    if (globalSearch.results.length > 0) {
-      globalSearch.selectedIndex = Math.min(globalSearch.results.length - 1, globalSearch.selectedIndex + 1);
-      renderSearchResults(listBox, globalSearch.results, globalSearch.selectedIndex);
-      await updateSearchPreview(getSelectedSearchEntry());
-      screen.render();
-    }
+  // Preview scroll, mirroring the home list's u/d (which are text here). ^U shadows
+  // text-input's clear-line in search only — Esc already clears the query.
+  if (keyName === "C-u" || keyName === "C-d") {
+    previewBox.scroll(keyName === "C-u" ? -6 : 6);
+    screen.render();
     return;
   }
 
@@ -1356,6 +1404,7 @@ screen.on("keypress", async (_ch: string, key: any) => {
         if (!globalSearch) return;
         applySearchFilter();
         renderSearchResults(listBox, globalSearch.results, globalSearch.selectedIndex);
+        renderSearchBar(); // count + switch/resume hint follow the fresh results
         updateSearchPreview(getSelectedSearchEntry());
         screen.render();
       }, 100);
@@ -1498,6 +1547,7 @@ async function handleWizardLaunch(
   isExiting = true;
   const targetSession = await getMainSession();
   if (!targetSession) {
+    isExiting = false; // keep the wizard usable for a retry
     return "No tmux session found";
   }
 

@@ -1,7 +1,7 @@
 import { test, expect, beforeEach, afterEach } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
-import { readSearchArtifacts, scoreSearchEntry, filterAndRankEntries, type SearchEntry } from "./search";
+import { readSearchArtifacts, scoreSearchEntry, filterAndRankEntries, searchEntries, type SearchEntry } from "./search";
 
 let dir: string;
 let n = 0;
@@ -144,6 +144,36 @@ test("content-only match snippets from the original-case corpus", () => {
   const [hit] = filterAndRankEntries([e], "xylophone");
   expect(hit!.matchField).toBe("content");
   expect(hit!.matchSnippet).toContain("Xylophone");
+});
+
+// --- repo: scope + total ----------------------------------------------------
+
+test("repo: token scopes to that repo; a bare word does not exclude other repos", () => {
+  const inCsm = mkEntry({ repo: "csm", summary: "fix resurrect" });
+  const elsewhere = mkEntry({ repo: "throxy", summary: "resurrect the csm bridge" });
+  const scoped = searchEntries([inCsm, elsewhere], "repo:csm resurrect");
+  expect(scoped.results.map((e) => e.sessionId)).toEqual([inCsm.sessionId]);
+  // Same words without the token: both repos stay in play.
+  const unscoped = searchEntries([inCsm, elsewhere], "csm resurrect");
+  expect(unscoped.results).toHaveLength(2);
+});
+
+test("repo: matches by prefix and a bare scope browses that repo in given order", () => {
+  // Entries arrive pre-sorted by recency from loadAllSessions; a word-less scope
+  // must keep that order, only filtered.
+  const newer = mkEntry({ repo: "csm", modified: new Date("2026-07-01") });
+  const other = mkEntry({ repo: "throxy" });
+  const older = mkEntry({ repo: "csm", modified: new Date("2026-01-01") });
+  const { results, total } = searchEntries([newer, other, older], "repo:cs");
+  expect(results.map((e) => e.sessionId)).toEqual([newer.sessionId, older.sessionId]);
+  expect(total).toBe(2);
+});
+
+test("total reports all matches even when the page is capped", () => {
+  const many = Array.from({ length: 7 }, () => mkEntry({ summary: "resurrect fix" }));
+  const { results, total } = searchEntries(many, "resurrect", 3);
+  expect(results).toHaveLength(3);
+  expect(total).toBe(7);
 });
 
 test("empty query returns recency order untouched", () => {

@@ -512,22 +512,47 @@ async function parseJsonlHeader(filePath: string): Promise<ExtendedIndexEntry | 
 }
 
 /**
- * Filter and rank entries by multi-word query.
- * If query is empty, returns entries sorted by recency (already the default order).
+ * Filter and rank entries by multi-word query, reporting the total match count
+ * alongside the truncated page so UIs can say "50 of 137" instead of lying.
+ *
+ * `repo:<name>` tokens scope the search to repos whose name equals or starts with
+ * <name> (multiple tokens OR together); remaining words search as usual. A bare
+ * `repo:` scope with no other words browses that repo by recency. Explicit syntax
+ * on purpose: a bare word equal to a repo name must NOT silently exclude sessions
+ * in other repos that mention it in content.
+ *
+ * If the query is empty, returns entries sorted by recency (already the default order).
  */
-export function filterAndRankEntries(
+export function searchEntries(
   entries: SearchEntry[],
   query: string,
   limit = 50,
-): SearchEntry[] {
-  if (!query.trim()) {
-    return entries.slice(0, limit);
+): { results: SearchEntry[]; total: number } {
+  const tokens = query.toLowerCase().trim().split(/\s+/).filter(Boolean);
+  const repoScopes: string[] = [];
+  const words: string[] = [];
+  for (const token of tokens) {
+    if (token.startsWith("repo:")) {
+      const scope = token.slice(5);
+      if (scope) repoScopes.push(scope); // a bare "repo:" mid-typing filters nothing
+    } else {
+      words.push(token);
+    }
   }
 
-  const words = query.toLowerCase().trim().split(/\s+/);
+  const pool = repoScopes.length
+    ? entries.filter((e) => {
+        const repo = e.repo.toLowerCase();
+        return repoScopes.some((scope) => repo.startsWith(scope));
+      })
+    : entries;
+
+  if (words.length === 0) {
+    return { results: pool.slice(0, limit), total: pool.length };
+  }
 
   const scored: Array<{ entry: SearchEntry; score: number }> = [];
-  for (const entry of entries) {
+  for (const entry of pool) {
     const { score, field, word } = scoreEntryDetailed(entry, words);
     if (score > 0) {
       // Provenance rides on the entry (in place — recomputed per query; only returned
@@ -553,5 +578,14 @@ export function filterAndRankEntries(
     return b.entry.modified.getTime() - a.entry.modified.getTime();
   });
 
-  return scored.slice(0, limit).map((s) => s.entry);
+  return { results: scored.slice(0, limit).map((s) => s.entry), total: scored.length };
+}
+
+/** searchEntries without the total, for callers that only render the page. */
+export function filterAndRankEntries(
+  entries: SearchEntry[],
+  query: string,
+  limit = 50,
+): SearchEntry[] {
+  return searchEntries(entries, query, limit).results;
 }
