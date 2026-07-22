@@ -278,6 +278,10 @@ export interface TranscriptTurn {
   // Claude's /rewind picker does not list it as a checkpoint, so rewind-count walks must
   // skip queued turns or every earlier prompt's upCount shifts by one.
   queued?: boolean;
+  // Set on an executed slash command (`<command-name>` runner record): the typed command
+  // ("/pr-triage args"), shown as a normal user message — the terminal echoes commands as
+  // your prompt line. `content` is empty, so it is never a rewind checkpoint.
+  command?: string;
 }
 
 /**

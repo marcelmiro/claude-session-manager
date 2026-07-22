@@ -178,6 +178,9 @@ function userTurnTexts(t) {
   const out = new Set();
   for (const turn of (t && t.turns) || []) {
     if (turn.role !== "user") continue;
+    // Executed slash commands land with their text on `command` (content is empty) — the
+    // optimistic bubble for a "/cmd args" send must retire against that, not content.
+    if (turn.command) out.add(turn.command.trim());
     for (const b of turn.content || []) if (b.type === "text" && b.text) out.add(b.text.trim());
   }
   return out;
@@ -1175,6 +1178,14 @@ function Turn({ turn, upCount, canCode }) {
     </div>`;
   }
 
+  // An executed slash command — rendered as a normal user bubble showing exactly what was
+  // typed, matching the terminal (which echoes the command as your prompt line). Not a
+  // rewind checkpoint (content is empty, so isPromptTurn already excludes it), hence no
+  // long-press rewind handlers.
+  if (turn.command) {
+    return html`<div class="turn"><div class="bubble user">${turn.command}</div></div>`;
+  }
+
   // Interrupt / system markers ("[Request interrupted by user…]") render as a dim event
   // line, never a user bubble — they're not typed messages and aren't rewind checkpoints.
   const marker = turnMarkerText(turn);
@@ -1953,6 +1964,7 @@ function Detail() {
   const landed = new Set();
   for (const turn of displayTurns) {
     if (turn.role !== "user") continue;
+    if (turn.command) landed.add(turn.command.trim());
     for (const b of turn.content || []) {
       if (b.type === "text" && b.text) landed.add(stripImagePrefix(b.text).trim());
     }
@@ -2010,6 +2022,20 @@ function Detail() {
     }, 15000);
     return () => clearInterval(iv);
   }, [activeWork]);
+
+  // 2.5s poll while a send is in flight (optimistic bubble up) or a message sits in
+  // Claude's queue. Both states advance WITHOUT any hook event — a mid-turn send fires
+  // no UserPromptSubmit when enqueued, and its consumption (queue remove + attachment)
+  // is a bare transcript append — so the SSE never wakes and the thread would sit on
+  // the optimistic/queued bubble until the next unrelated event or a remount. Stops
+  // the moment nothing is pending or queued.
+  const sendsInFlight = pendingSends.value.length + pendingImageSends.value.length;
+  const queuedCount = (t && t.queuedPending && t.queuedPending.length) || 0;
+  useEffect(() => {
+    if (sendsInFlight === 0 && queuedCount === 0) return;
+    const iv = setInterval(refreshTranscript, 2500);
+    return () => clearInterval(iv);
+  }, [sendsInFlight > 0, queuedCount > 0]);
 
   // Track whether we're pinned to the bottom of the thread. The 80px slack keeps auto-follow
   // alive through small jitters; the floating controls (down button + prompt-nav pill) appear

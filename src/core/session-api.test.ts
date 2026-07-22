@@ -270,15 +270,17 @@ test("slimTurns: keeps the byte-free image marker alongside text", () => {
   expect(t!.content).toEqual([{ type: "text", text: "[Image #1] look" }, { type: "image" }]);
 });
 
-test("slimTurns: per-turn flags (queued, compactSummary) survive the rebuild", () => {
+test("slimTurns: per-turn flags (queued, compactSummary, command) survive the rebuild", () => {
   const out = slimTurns([
     { role: "user", content: [{ type: "text", text: "queued msg" }], queued: true },
     { role: "user", content: [{ type: "text", text: "summary" }], compactSummary: true },
+    { role: "user", content: [], command: "/pr-triage" },
     { role: "user", content: [{ type: "text", text: "plain" }] },
   ]);
   expect(out[0]!.queued).toBe(true);
   expect(out[1]!.compactSummary).toBe(true);
-  expect(out[2]).toEqual({ role: "user", content: [{ type: "text", text: "plain" }] });
+  expect(out[2]).toEqual({ role: "user", content: [], command: "/pr-triage" });
+  expect(out[3]).toEqual({ role: "user", content: [{ type: "text", text: "plain" }] });
 });
 
 // --- composeMessageSteps (keystroke sequence for a message) ---------------------

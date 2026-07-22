@@ -126,6 +126,8 @@ export const FIXTURE_TRANSCRIPT = {
       ],
     },
     { role: "user", content: [{ type: "text", text: "looks good — ship it" }] },
+    // An executed slash command → normal user bubble showing the typed command.
+    { role: "user", content: [], command: "/pr-triage" },
     {
       role: "assistant",
       content: [{ type: "text", text: "Shipping — wiring the cookie into the auth route now." }],

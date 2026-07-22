@@ -109,7 +109,7 @@ test("tolerates a truncated last line and unknown keys", () => {
   );
 });
 
-test("drops slash-command runner records (/compact, /clear) as plumbing", () => {
+test("slash-command runner records become command turns; output/caveat stay dropped", () => {
   const raw = [
     '{"type":"user","isMeta":true,"message":{"role":"user","content":"<local-command-caveat>Caveat: ...</local-command-caveat>"}}',
     '{"type":"user","message":{"role":"user","content":"<command-name>/compact</command-name>\\n  <command-message>compact</command-message>\\n  <command-args></command-args>"}}',
@@ -117,8 +117,21 @@ test("drops slash-command runner records (/compact, /clear) as plumbing", () => 
     '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Compacted."}]}}',
   ].join("\n");
   const turns = parseTranscript(raw);
-  expect(turns.map((t) => t.role)).toEqual(["assistant"]);
+  // The runner record surfaces as a command turn (empty content, label on `command`) —
+  // the terminal echoes the command line, and dropping it made a phone-sent command look lost.
+  expect(turns).toEqual([
+    { role: "user", content: [], command: "/compact" },
+    { role: "assistant", content: [{ type: "text", text: "Compacted." }] },
+  ]);
   expect(lastAssistantMessage(turns)).toBe("Compacted.");
+});
+
+test("command turn label includes the args", () => {
+  const raw =
+    '{"type":"user","message":{"role":"user","content":"<command-name>/pr-triage</command-name>\\n<command-message>pr-triage</command-message>\\n<command-args>fix the review</command-args>"}}';
+  expect(parseTranscript(raw)).toEqual([
+    { role: "user", content: [], command: "/pr-triage fix the review" },
+  ]);
 });
 
 test("drops isMeta user records (e.g. skill base-directory injection)", () => {

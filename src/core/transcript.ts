@@ -110,6 +110,20 @@ function recordToTurn(record: RawRecord): TranscriptTurn | null {
         ? (content as RawBlock[]).map(toBlock).filter((b): b is TranscriptBlock => b !== null)
         : [];
 
+  // An executed slash command's runner record (`<command-name>…`): map to a command turn
+  // instead of dropping it — the terminal echoes the command as your prompt line; dropping
+  // it made a command sent from the phone look lost. Output/caveat records (`<local-command-*>`)
+  // carry no <command-name> and stay dropped below.
+  const joined = blocks
+    .filter((b): b is Extract<TranscriptBlock, { type: "text" }> => b.type === "text")
+    .map((b) => b.text)
+    .join("\n");
+  const name = joined.match(/<command-name>([^<]+)<\/command-name>/)?.[1]?.trim();
+  if (name) {
+    const args = joined.match(/<command-args>([^<]+)<\/command-args>/)?.[1]?.trim();
+    return { role: record.type, content: [], command: args ? `${name} ${args}` : name };
+  }
+
   const visible = blocks.filter(
     (b) =>
       !(b.type === "text" && (LOCAL_COMMAND_META.test(b.text) || TASK_NOTIFICATION.test(b.text))),
