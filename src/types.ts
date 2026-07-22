@@ -34,6 +34,14 @@ export interface Session {
   statusSource?: "event" | "scraper" | "native";
 }
 
+/**
+ * Whether — and where — an archived session can be resumed from the phone.
+ * "yes" = original dir intact; "relocated" = worktree gone, resumes in the base repo;
+ * "no" = base repo or transcript gone (readable, not restorable). Never treat as a
+ * boolean: "no" is truthy.
+ */
+export type RestoreState = "yes" | "relocated" | "no";
+
 export interface RepoGroup {
   name: string;
   path: string;

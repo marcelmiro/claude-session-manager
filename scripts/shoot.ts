@@ -178,6 +178,24 @@ async function main() {
   await cdp.send("Runtime.evaluate", { expression: "document.querySelector('.agentspill')?.click()" });
   await shoot(cdp, "agents.png");
 
+  // 3f. History (clock button in the list header) → day groups + repo chips.
+  await navigate(cdp, `${BASE}/`);
+  await cdp.send("Runtime.evaluate", {
+    expression: "document.querySelector('[aria-label=\"Session history\"]')?.click()",
+  });
+  await shoot(cdp, "history.png", 600);
+
+  // 3g. Type a query → flat ranked results with highlighted match snippets. Set the
+  // value via the native setter so Preact's onInput fires like a real keystroke.
+  await cdp.send("Runtime.evaluate", {
+    expression: `(() => {
+      const i = document.querySelector('.histsearch input');
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(i, 'resurrect');
+      i.dispatchEvent(new Event('input', { bubbles: true }));
+    })()`,
+  });
+  await shoot(cdp, "history-search.png", 800); // 250ms debounce + fetch
+
   log(`done → ${OUT}`);
 }
 

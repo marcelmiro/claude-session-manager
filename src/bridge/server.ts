@@ -26,7 +26,7 @@ import {
   answerSessionQuestion,
   clarifySessionQuestion,
   createSession,
-  canRestore,
+  restoreState,
   restoreSession,
   rewindSession,
   archiveSession,
@@ -66,8 +66,9 @@ import {
 } from "../core/names";
 import { buildSessionLabel, disambiguateNames } from "../core/session-label";
 import { loadState, saveState } from "../core/state";
+import { loadAllSessions, filterAndRankEntries, type SearchEntry } from "../core/search";
 import { fixtureData } from "./fixtures";
-import type { Session } from "../types";
+import type { RestoreState, Session } from "../types";
 
 const PUBLIC_DIR = `${import.meta.dir}/public`;
 
@@ -231,7 +232,7 @@ function projectSession(
   pending: ReturnType<typeof pendingToolCall>,
   approvalIds: Set<string>,
   unread: boolean,
-  restorable?: boolean,
+  restorable?: RestoreState,
   pendingScriptCount?: number,
 ) {
   // Pending = blocked-on-USER, sourced from the hook log (not status): discovery can
@@ -263,8 +264,8 @@ function projectSession(
     // The age the phone renders: last conversational turn, falling back to the mtime in
     // `modified` when the transcript holds no timestamped turn.
     lastTurn: sessionActivityAt(s).toISOString(),
-    // Present only for archived sessions: true when the phone can resume it (repo dir +
-    // transcript both still on disk). Drives whether the Restore button renders.
+    // Present only for archived sessions: whether/where the phone can resume it
+    // ("yes" | "relocated" | "no") — drives the restore bar's button and label.
     ...(restorable !== undefined ? { restorable } : {}),
     // ≥1 background script still awaited (live sessions only) — the list's ⏳ badge, so
     // a `ready` session mid-wait doesn't read as done from the list.
@@ -459,6 +460,70 @@ async function sessionsPayload(): Promise<unknown> {
   return sessionsCache.value;
 }
 
+// --- History: the windowless archive (browse + search) ------------------------
+// Backed by the TUI's global-search engine (core/search.ts): every transcript Claude
+// still retains, no 24h window. Browse (empty q) pages by recency via a `before`
+// timestamp cursor; a query returns one relevance-ranked page (rank order isn't
+// chronological, so no cursor). Entries are cached briefly — the corpus scan reads
+// head+tail of every transcript (~1s cold) and a debounced search keystroke shouldn't
+// re-pay it; archive/restore bust the cache so a just-archived session appears at once.
+const HISTORY_PAGE = 50;
+const HISTORY_TTL_MS = 15_000;
+let historyCache: { ts: number; entries: SearchEntry[] } | null = null;
+
+async function historyEntries(): Promise<SearchEntry[]> {
+  if (historyCache && Date.now() - historyCache.ts < HISTORY_TTL_MS) return historyCache.entries;
+  const nameCache = await loadNameCache();
+  // isActive should mean "has a live pane to switch to" — discovery's archived entries
+  // carry ids too and must not count.
+  const live = (lastDiscovered ?? []).filter((s) => s.tmuxPane);
+  const entries = await loadAllSessions(nameCache, live);
+  historyCache = { ts: Date.now(), entries };
+  return entries;
+}
+
+async function historyPayload(params: URLSearchParams): Promise<unknown> {
+  const q = (params.get("q") || "").trim();
+  const repo = (params.get("repo") || "").trim();
+  const before = Number(params.get("before") || NaN);
+  const entries = await historyEntries();
+
+  // Rank/filter before the repo facet is applied, so the chips row can show which
+  // repos the current query still matches (and their counts).
+  const matched = q ? filterAndRankEntries(entries, q, Number.MAX_SAFE_INTEGER) : entries;
+  const repoCounts = new Map<string, number>();
+  for (const e of matched) repoCounts.set(e.repo, (repoCounts.get(e.repo) ?? 0) + 1);
+
+  let rows = repo ? matched.filter((e) => e.repo === repo) : matched;
+  if (!q && Number.isFinite(before)) rows = rows.filter((e) => e.modified.getTime() < before);
+  rows = rows.slice(0, HISTORY_PAGE);
+
+  const payload = await Promise.all(
+    rows.map(async (e) => ({
+      id: e.sessionId,
+      repo: e.repo,
+      branch: e.branch,
+      name: e.name,
+      summary: e.summary,
+      firstPrompt: e.firstPrompt,
+      lastAssistant: e.lastAssistant,
+      modified: e.modified.toISOString(),
+      isActive: e.isActive,
+      ...(e.matchField && q ? { matchField: e.matchField } : {}),
+      ...(e.matchSnippet && q ? { matchSnippet: e.matchSnippet } : {}),
+      // Disk checks for the returned page only; live rows just open their session.
+      ...(e.isActive ? {} : { restorable: await restoreState(e.sessionId, e.projectPath, e.baseRepoPath) }),
+    })),
+  );
+
+  return {
+    rows: payload,
+    // Cursor only while browsing, and only when the page filled (more may exist).
+    before: !q && rows.length === HISTORY_PAGE ? rows[rows.length - 1]!.modified.getTime() : null,
+    repos: [...repoCounts.entries()].map(([r, count]) => ({ repo: r, count })),
+  };
+}
+
 async function computeSessionsPayload(): Promise<unknown> {
   const now = Date.now();
   const nameCache = await loadNameCache();
@@ -499,14 +564,14 @@ async function computeSessionsPayload(): Promise<unknown> {
   // Apply the suffixed name onto the projection so the phone's name-first row title
   // (listTitle = s.name || s.label) shows `-2`/`-3`, matching the TUI/tmux.
   for (const s of tracked) s.name = dnMap.get(s.id) ?? s.name;
-  // Restorable flag for archived sessions only (repo dir + transcript on disk) — computed in
-  // an async pass before the sync `.map()`, mirroring the approvalIds loop above.
-  const restorableMap = new Map<string, boolean>();
+  // Restore state for archived sessions only (disk checks) — computed in an async pass
+  // before the sync `.map()`, mirroring the approvalIds loop above.
+  const restorableMap = new Map<string, RestoreState>();
   await Promise.all(
     tracked
       .filter((s) => s.status === "archived")
       .map(async (s) => {
-        restorableMap.set(s.id, await canRestore(s.id, s.repoPath));
+        restorableMap.set(s.id, await restoreState(s.id, s.repoPath, s.baseRepoPath));
       }),
   );
   // Pending-script counts for sessions with a live Claude process only: without one the
@@ -703,7 +768,7 @@ async function route(req: Request): Promise<Response> {
 
   // --- Demo/test mode: canned data for the GET/action routes (`/stream` falls through) ---
   if (FIXTURES) {
-    const fixture = fixtureData(method, path);
+    const fixture = fixtureData(method, path, url.searchParams);
     if (fixture !== undefined) return json(fixture);
   }
 
@@ -711,6 +776,7 @@ async function route(req: Request): Promise<Response> {
   if (method === "GET" && path === "/pending") return json(listPendingApprovals());
   if (method === "GET" && path === "/stream") return streamResponse();
   if (method === "GET" && path === "/repos") return json(await cachedRepos(""));
+  if (method === "GET" && path === "/history") return json(await historyPayload(url.searchParams));
 
   // New session: launch `claude` in a new tmux window for the chosen repo (TUI `n`).
   if (method === "POST" && path === "/sessions/new") {
@@ -955,6 +1021,7 @@ async function route(req: Request): Promise<Response> {
   if (method === "POST" && archive) {
     const result = await archiveSession(decodeURIComponent(archive[1]!));
     sessionsCache = null; // force re-projection — the killed pane drops from the next list
+    historyCache = null; // the just-archived session should surface in History at once
     broadcast({ type: "session-changed", id: decodeURIComponent(archive[1]!) });
     return sendResult(result);
   }
@@ -968,14 +1035,24 @@ async function route(req: Request): Promise<Response> {
     // scan, dropping index-less sessions the phone DID list → spurious not-found).
     const { sessions } = await discoverSessions({});
     const s = sessions.find((x) => x.id === id);
-    if (!s) return json({ ok: false, reason: "not-found" }, 404);
     // Already live (the Mac resumed it between list-render and tap) — the client just opens it.
-    if (s.status !== "archived") return json({ ok: true, sessionId: id });
+    if (s && s.status !== "archived") return json({ ok: true, sessionId: id });
+    let repoPath = s?.repoPath;
+    let basePath = s?.baseRepoPath;
+    if (!s) {
+      // Older than discovery's 24h archived sweep — a History row. Resolve its repo
+      // paths from the same engine that listed it.
+      const entry = (await historyEntries()).find((e) => e.sessionId === id);
+      if (!entry) return json({ ok: false, reason: "not-found" }, 404);
+      repoPath = entry.projectPath;
+      basePath = entry.baseRepoPath;
+    }
     // Relocate to the base repo if the session's worktree was deleted, so the resume lands
     // (and doesn't fail `restoreSession`'s isDirectory guard). Mirrors the TUI resume path.
-    const effectivePath = await recoverWorktreeTranscript(id, s.repoPath, s.baseRepoPath);
+    const effectivePath = await recoverWorktreeTranscript(id, repoPath!, basePath!);
     const result = await restoreSession(id, effectivePath);
     sessionsCache = null; // drop the 1s projection cache so the refetch re-derives the now-live status
+    historyCache = null; // the row's isActive/restorable just changed
     broadcast({ type: "session-changed", id });
     return sendResult(result);
   }

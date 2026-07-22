@@ -35,7 +35,7 @@ import { isPermissionPrompt } from "./status";
 import { parseBackgroundTasks, liveScripts, type BackgroundTask } from "./background-tasks";
 import { decideQuestion, declineQuestion, buildAnswersMap } from "./approval";
 import type { PendingQuestion, PendingToolCall } from "./jsonl-reader";
-import type { TranscriptBlock, TranscriptTurn } from "../types";
+import type { RestoreState, TranscriptBlock, TranscriptTurn } from "../types";
 
 export interface SessionTranscript {
   turns: TranscriptTurn[];
@@ -224,16 +224,23 @@ export async function createSession(repoPath: string, name: string): Promise<Sen
 }
 
 /**
- * Whether an archived session can be resumed from the phone: its original repo dir must
- * still exist as a directory AND its transcript JSONL must still be on disk. `claude
- * --resume` is project-cwd-scoped, so a missing/renamed repo makes resume impossible, and a
- * deleted transcript makes it meaningless. Cheap disk checks (one `stat` via Bun.file — NOT
- * `Bun.file().exists()`, which is false for directories); the phone hides the Restore button
- * when this is false. Never throws.
+ * Whether — and where — an archived session can be resumed from the phone. "yes": its
+ * original dir still exists, resume lands in place. "relocated": the original dir (a
+ * worktree) is gone but the base repo survives — the restore route already relocates
+ * there via recoverWorktreeTranscript, so the phone shows "restore in <repo>" instead
+ * of hiding the button. "no": base repo gone too (or the transcript is), so there is
+ * nowhere to resume; the thread stays readable. Cheap disk checks (one `stat` via
+ * Bun.file — NOT `Bun.file().exists()`, which is false for directories). Never throws.
  */
-export async function canRestore(sessionId: string, repoPath: string): Promise<boolean> {
-  if (!(await isDirectory(repoPath))) return false;
-  return (await resolveTranscriptPath(sessionId)) !== null;
+export async function restoreState(
+  sessionId: string,
+  repoPath: string,
+  baseRepoPath: string,
+): Promise<RestoreState> {
+  if ((await resolveTranscriptPath(sessionId)) === null) return "no";
+  if (await isDirectory(repoPath)) return "yes";
+  if (baseRepoPath && baseRepoPath !== repoPath && (await isDirectory(baseRepoPath))) return "relocated";
+  return "no";
 }
 
 /** True iff `path` exists and is a directory. Bun-native stat, guarded (mirrors tailRecords). */

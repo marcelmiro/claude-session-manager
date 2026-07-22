@@ -3,9 +3,13 @@ import type { SessionIndexEntry, SessionIndex, Session } from "../types";
 import { getBaseRepoPath, extractTicketId } from "./git";
 import { repoNameFromPath } from "./sessions";
 import { slugify, type NameCache } from "./names";
+import { isConversationalRecord } from "./last-turn";
 
 const home = homedir();
 const projectsDir = `${home}/.claude/projects`;
+
+/** Which field a query matched, for the "why did this row show up" line in both UIs. */
+export type MatchField = "summary" | "firstPrompt" | "name" | "branch" | "repo" | "content";
 
 export interface SearchEntry {
   sessionId: string;
@@ -20,18 +24,30 @@ export interface SearchEntry {
   modified: Date;
   messageCount: number;
   searchText: string; // pre-built lowercase concat of all searchable fields
+  /** Original-case head+tail conversation text — snippet source for content matches. */
+  corpus?: string;
+  /** Last assistant message text (truncated) — display sub-line for archived rows. */
+  lastAssistant?: string;
   isActive: boolean;
   activePaneId?: string;
   activeSessionName?: string;
   activeWindowIndex?: number;
   activeStatus?: Session["status"];
   isDeletedWorktree: boolean;
+  /** Set by filterAndRankEntries on returned entries: where the query matched. */
+  matchField?: MatchField;
+  /** Set alongside matchField for content-ish fields: text around the first hit. */
+  matchSnippet?: string;
 }
 
 /** Synthetic index entry with extra field for longer search content */
 interface ExtendedIndexEntry extends SessionIndexEntry {
-  /** Full first prompt (not truncated) — used for searchText only */
+  /** Full head+tail conversation text (not truncated) — used for searchText/snippets */
   fullFirstPrompt?: string;
+  /** Newest conversational-turn timestamp from the transcript tail (epoch ms) */
+  lastTurnAtMs?: number;
+  /** Last assistant message text from the transcript tail (truncated) */
+  lastAssistant?: string;
 }
 
 /**
@@ -113,15 +129,19 @@ export async function loadAllSessions(
     // Non-fatal: index-only search still works
   }
 
-  // Supplement indexed entries with searchable content from JSONL files.
-  // The index truncates firstPrompt at ~200 chars, losing searchable content.
-  // Reading 32KB of 1000+ files is ~30ms (parallel), so this is cheap.
+  // Supplement every entry with transcript artifacts: head+tail searchable corpus (the
+  // index truncates firstPrompt at ~200 chars, and what a session BECAME often lives in
+  // its tail), the true last-turn timestamp (index modified / file mtime move on
+  // bookkeeping writes with no conversation behind them), and the last assistant
+  // message for display. Two 32KB reads per file, parallel — cheap at ~1000 files.
   await Promise.all(
     rawEntries.map(async (entry: ExtendedIndexEntry) => {
-      if (entry.fullFirstPrompt) return; // already has full content (from parseJsonlHeader)
       if (!entry.fullPath) return;
       try {
-        entry.fullFirstPrompt = await extractSearchContent(entry.fullPath);
+        const artifacts = await readSearchArtifacts(entry.fullPath);
+        if (artifacts.corpus) entry.fullFirstPrompt = artifacts.corpus;
+        if (artifacts.lastTurnAt !== undefined) entry.lastTurnAtMs = artifacts.lastTurnAt;
+        if (artifacts.lastAssistant) entry.lastAssistant = artifacts.lastAssistant;
       } catch {}
     }),
   );
@@ -177,9 +197,12 @@ export async function loadAllSessions(
         summary: (entry.summary || "").replace(/\s+/g, " ").trim(),
         firstPrompt: (entry.firstPrompt || "").replace(/\s+/g, " ").trim(),
         name: aiName,
-        modified: new Date(entry.modified),
+        // Real conversational recency when the transcript yields it; index/mtime otherwise.
+        modified: entry.lastTurnAtMs !== undefined ? new Date(entry.lastTurnAtMs) : new Date(entry.modified),
         messageCount: entry.messageCount,
         searchText,
+        corpus: entry.fullFirstPrompt,
+        lastAssistant: entry.lastAssistant,
         isActive: !!activeSession,
         activePaneId: activeSession?.tmuxPane?.paneId,
         activeSessionName: activeSession?.tmuxPane?.sessionName,
@@ -202,81 +225,121 @@ export async function loadAllSessions(
  * Score = sum of per-word best match scores + recency bonus.
  */
 export function scoreSearchEntry(entry: SearchEntry, words: string[]): number {
+  return scoreEntryDetailed(entry, words).score;
+}
+
+/** Tier a single word against a single field's text. */
+function wordFieldTier(field: string, word: string): number {
+  if (!field) return 0;
+  if (field === word) return 100;
+  if (field.startsWith(word)) return 80;
+  if (field.includes(word)) return 60;
+  if (field.split(/[-_\s]+/).some((w) => w.startsWith(word))) return 40;
+  return 0;
+}
+
+/**
+ * Score plus provenance: which field won (for the "why did this match" line). Named
+ * fields (summary, name, etc.) score higher than raw searchText (which includes
+ * conversation content) so metadata matches rank above conversation-only matches —
+ * EXCEPT repo, capped at 40: repo is a filter dimension (chips on the phone, visible
+ * grouping in the TUI), so "csm resurrect" should rank by "resurrect", not by every
+ * session that merely lives in csm.
+ */
+function scoreEntryDetailed(
+  entry: SearchEntry,
+  words: string[],
+): { score: number; field: MatchField | null; word: string | null } {
   // All words must be present in searchText
   for (const word of words) {
-    if (!entry.searchText.includes(word)) return 0;
+    if (!entry.searchText.includes(word)) return { score: 0, field: null, word: null };
   }
 
-  // Score each word against individual fields for quality ranking.
-  // Named fields (summary, name, etc.) score higher than raw searchText
-  // (which includes conversation content) so metadata matches rank above
-  // conversation-only matches.
-  let totalScore = 0;
-  const namedFields = [
-    entry.summary?.toLowerCase() || "",
-    entry.firstPrompt?.toLowerCase() || "",
-    entry.name?.toLowerCase() || "",
-    entry.branch?.toLowerCase() || "",
-    entry.repo?.toLowerCase() || "",
+  const namedFields: Array<[MatchField, string]> = [
+    ["summary", entry.summary?.toLowerCase() || ""],
+    ["firstPrompt", entry.firstPrompt?.toLowerCase() || ""],
+    ["name", entry.name?.toLowerCase() || ""],
+    ["branch", entry.branch?.toLowerCase() || ""],
+    ["repo", entry.repo?.toLowerCase() || ""],
   ];
 
-  for (const word of words) {
-    let bestWordScore = 0;
+  let totalScore = 0;
+  let bestField: MatchField | null = null;
+  let bestWord: string | null = null;
+  let bestWordScore = -1;
 
-    // Score against named fields (higher tiers)
-    for (const field of namedFields) {
-      if (!field) continue;
-      if (field === word) {
-        bestWordScore = Math.max(bestWordScore, 100);
-      } else if (field.startsWith(word)) {
-        bestWordScore = Math.max(bestWordScore, 80);
-      } else if (field.includes(word)) {
-        bestWordScore = Math.max(bestWordScore, 60);
-      } else {
-        const fieldWords = field.split(/[-_\s]+/);
-        if (fieldWords.some((w) => w.startsWith(word))) {
-          bestWordScore = Math.max(bestWordScore, 40);
-        }
+  for (const word of words) {
+    let wordScore = 0;
+    let wordField: MatchField | null = null;
+
+    for (const [fieldName, field] of namedFields) {
+      let tier = wordFieldTier(field, word);
+      if (fieldName === "repo") tier = Math.min(tier, 40);
+      if (tier > wordScore) {
+        wordScore = tier;
+        wordField = fieldName;
       }
     }
 
     // Fall back to searchText (includes conversation content) — lower tier
-    if (bestWordScore === 0 && entry.searchText.includes(word)) {
-      bestWordScore = 20;
+    if (wordScore === 0 && entry.searchText.includes(word)) {
+      wordScore = 20;
+      wordField = "content";
     }
 
-    totalScore += bestWordScore;
+    totalScore += wordScore;
+    if (wordScore > bestWordScore) {
+      bestWordScore = wordScore;
+      bestField = wordField;
+      bestWord = word;
+    }
   }
 
-  // Recency bonus: up to 10 points for sessions modified today, decaying over 30 days
+  // Recency bonus: up to 10 points for sessions active today, decaying to zero at the
+  // retention horizon (~90 days) so it discriminates across the whole archive.
   const ageMs = Date.now() - entry.modified.getTime();
   const ageDays = ageMs / (1000 * 60 * 60 * 24);
-  const recencyBonus = Math.max(0, 10 - ageDays / 3);
+  const recencyBonus = Math.max(0, 10 - ageDays / 9);
   totalScore += recencyBonus;
 
-  return totalScore;
+  return { score: totalScore, field: bestField, word: bestWord };
 }
 
 /**
- * Extract searchable content (user + assistant text) from a JSONL file's first 32KB.
- * Returns up to MAX_SEARCH_CONTENT chars of concatenated message text.
+ * Snippet around the first occurrence of `word` in `source` (original case), or
+ * undefined when the word isn't there. Ellipses mark truncation on either side.
  */
-async function extractSearchContent(filePath: string): Promise<string | undefined> {
-  const file = Bun.file(filePath);
-  const stat = await file.stat();
-  if (!stat) return undefined;
+function buildSnippet(source: string | undefined, word: string): string | undefined {
+  if (!source) return undefined;
+  const idx = source.toLowerCase().indexOf(word);
+  if (idx === -1) return undefined;
+  const start = Math.max(0, idx - 40);
+  const end = Math.min(source.length, idx + word.length + 40);
+  return (start > 0 ? "…" : "") + source.slice(start, end).trim() + (end < source.length ? "…" : "");
+}
 
-  const chunk = await file.slice(0, Math.min(stat.size, 32768)).text();
-  const lines = chunk.split("\n").filter(Boolean);
-  const contentParts: string[] = [];
-  let totalLen = 0;
-  const MAX_SEARCH_CONTENT = 3000;
+const CHUNK_SIZE = 32768; // head/tail read size per transcript
+const MAX_SEARCH_CONTENT = 3000; // corpus cap per chunk
 
-  for (const line of lines) {
-    if (totalLen >= MAX_SEARCH_CONTENT) break;
+/** One parsed conversational record: extracted display text + timestamp (ms, or null). */
+interface ConversationRecord {
+  type: "user" | "assistant";
+  text: string;
+  at: number | null;
+}
+
+/**
+ * Parse a JSONL chunk into conversational records (user/assistant only — same
+ * definition as last-turn.ts). Partial lines at either edge of a mid-file chunk fail
+ * JSON.parse and drop, like every other JSONL reader here.
+ */
+function parseConversationRecords(chunk: string): ConversationRecord[] {
+  const records: ConversationRecord[] = [];
+  for (const line of chunk.split("\n")) {
+    if (!line.trim()) continue;
     try {
       const parsed = JSON.parse(line);
-      if (parsed.type !== "user" && parsed.type !== "assistant") continue;
+      if (!isConversationalRecord(parsed)) continue;
       let text = "";
       const content = parsed.message?.content;
       if (typeof content === "string") text = content;
@@ -284,16 +347,92 @@ async function extractSearchContent(filePath: string): Promise<string | undefine
         const tb = content.find((b: { type: string }) => b.type === "text");
         if (tb?.text) text = tb.text;
       }
-      if (!text) continue;
-      if (parsed.type === "user" && (text.startsWith("[Request interrupted") || text.trimStart().startsWith("<"))) continue;
-      const clean = text.replace(/\s+/g, " ").trim();
-      const remaining = MAX_SEARCH_CONTENT - totalLen;
-      contentParts.push(clean.length > remaining ? clean.slice(0, remaining) : clean);
-      totalLen += clean.length;
-    } catch { continue; }
+      if (parsed.type === "user" && (text.startsWith("[Request interrupted") || text.trimStart().startsWith("<"))) text = "";
+      const ts = parsed.timestamp ? new Date(parsed.timestamp).getTime() : NaN;
+      records.push({
+        type: parsed.type,
+        text: text.replace(/\s+/g, " ").trim(),
+        at: Number.isFinite(ts) ? ts : null,
+      });
+    } catch {
+      continue;
+    }
+  }
+  return records;
+}
+
+/**
+ * Concatenate record texts up to MAX_SEARCH_CONTENT chars. `fromEnd` keeps the LAST
+ * records instead of the first — the tail chunk exists to capture how the session
+ * ended, so its cap must trim from the front, not eat the ending.
+ */
+function corpusFrom(records: ConversationRecord[], fromEnd = false): string {
+  const ordered = fromEnd ? [...records].reverse() : records;
+  const parts: string[] = [];
+  let totalLen = 0;
+  for (const r of ordered) {
+    if (totalLen >= MAX_SEARCH_CONTENT) break;
+    if (!r.text) continue;
+    const remaining = MAX_SEARCH_CONTENT - totalLen;
+    parts.push(r.text.length > remaining ? r.text.slice(0, remaining) : r.text);
+    totalLen += r.text.length;
+  }
+  if (fromEnd) parts.reverse();
+  return parts.join(" ");
+}
+
+/**
+ * Everything search wants from a transcript, in at most two reads (head + tail chunk;
+ * one read when the file fits in a single chunk): searchable corpus covering how the
+ * session started AND ended, the newest conversational-turn timestamp (the same
+ * semantics as readLastTurnAt — file mtime lies after bookkeeping writes and bulk
+ * resumes), and the last assistant message for display. Exported for tests.
+ */
+export async function readSearchArtifacts(filePath: string): Promise<{
+  corpus?: string;
+  lastTurnAt?: number;
+  lastAssistant?: string;
+}> {
+  try {
+    return await readSearchArtifactsInner(filePath);
+  } catch {
+    return {}; // missing/unreadable transcript — entry keeps its index metadata
+  }
+}
+
+async function readSearchArtifactsInner(filePath: string): Promise<{
+  corpus?: string;
+  lastTurnAt?: number;
+  lastAssistant?: string;
+}> {
+  const file = Bun.file(filePath);
+  const stat = await file.stat();
+  if (!stat) return {};
+
+  const headChunk = await file.slice(0, Math.min(stat.size, CHUNK_SIZE)).text();
+  const headRecords = parseConversationRecords(headChunk);
+
+  let tailRecords = headRecords;
+  let corpus = corpusFrom(headRecords);
+  if (stat.size > CHUNK_SIZE) {
+    const tailChunk = await file.slice(stat.size - CHUNK_SIZE, stat.size).text();
+    tailRecords = parseConversationRecords(tailChunk);
+    const tailCorpus = corpusFrom(tailRecords, true);
+    if (tailCorpus) corpus = corpus ? `${corpus} ${tailCorpus}` : tailCorpus;
   }
 
-  return contentParts.length > 0 ? contentParts.join(" ") : undefined;
+  let lastTurnAt: number | undefined;
+  let lastAssistant: string | undefined;
+  for (let i = tailRecords.length - 1; i >= 0; i--) {
+    const r = tailRecords[i]!;
+    if (lastTurnAt === undefined && r.at !== null) lastTurnAt = r.at;
+    if (lastAssistant === undefined && r.type === "assistant" && r.text) {
+      lastAssistant = r.text.length > 200 ? r.text.slice(0, 200) + "..." : r.text;
+    }
+    if (lastTurnAt !== undefined && lastAssistant !== undefined) break;
+  }
+
+  return { corpus: corpus || undefined, lastTurnAt, lastAssistant };
 }
 
 /**
@@ -350,11 +489,10 @@ async function parseJsonlHeader(filePath: string): Promise<ExtendedIndexEntry | 
     if (isSidechain) return null;
     if (firstPromptDisplay?.startsWith("Name this coding session in 2-4 words")) return null;
 
-    // Extract searchable content (reuses the same 32KB already cached by OS)
-    const fullFirstPrompt = await extractSearchContent(filePath);
-
     const sessionId = filePath.split("/").pop()!.replace(/\.jsonl$/, "");
 
+    // Searchable corpus / last-turn artifacts come from the shared supplement pass in
+    // loadAllSessions (readSearchArtifacts) — no separate content read here.
     return {
       sessionId,
       fullPath: filePath,
@@ -367,7 +505,6 @@ async function parseJsonlHeader(filePath: string): Promise<ExtendedIndexEntry | 
       gitBranch,
       projectPath,
       isSidechain: false,
-      fullFirstPrompt,
     };
   } catch {
     return null;
@@ -391,8 +528,20 @@ export function filterAndRankEntries(
 
   const scored: Array<{ entry: SearchEntry; score: number }> = [];
   for (const entry of entries) {
-    const score = scoreSearchEntry(entry, words);
+    const { score, field, word } = scoreEntryDetailed(entry, words);
     if (score > 0) {
+      // Provenance rides on the entry (in place — recomputed per query; only returned
+      // entries are read, so stale fields on filtered-out entries are inert). Snippets
+      // only for content-ish fields: name/branch/repo are already visible on the row.
+      entry.matchField = field ?? undefined;
+      entry.matchSnippet =
+        field === "summary"
+          ? buildSnippet(entry.summary, word!)
+          : field === "firstPrompt"
+            ? buildSnippet(entry.firstPrompt, word!)
+            : field === "content"
+              ? buildSnippet(entry.corpus, word!)
+              : undefined;
       scored.push({ entry, score });
     }
   }

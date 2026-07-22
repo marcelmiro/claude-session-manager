@@ -258,13 +258,119 @@ const FIXTURE_DIFF = {
   ].join("\n"),
 };
 
+// History browse page: several days, several repos, one still-live row, and all three
+// restore states (yes / relocated / no) so the row + drill-in treatments are exercised.
+const FIXTURE_HISTORY = {
+  rows: [
+    {
+      id: "api-refactor",
+      repo: "csm",
+      branch: "refactor-session-api",
+      name: "session-api",
+      summary: "Extract session-api helpers from sessions.ts",
+      firstPrompt: "extract the pane helpers out of sessions.ts",
+      lastAssistant: "Moved the pane helpers into session-api.ts and updated the imports.",
+      modified: ago(40_000),
+      isActive: true,
+    },
+    {
+      id: "hist-restore-fix",
+      repo: "csm",
+      branch: "restore-sessions",
+      name: "resurrect-fix",
+      summary: "Never overwrite a real cwd with $HOME in pickSavedCwd",
+      firstPrompt: "restore-sessions resumes in the home dir after a crash",
+      lastAssistant: "pickSavedCwd now keeps the recorded repo path when a restored pane still reports $HOME.",
+      modified: ago(3 * 3_600_000),
+      isActive: false,
+      restorable: "yes",
+    },
+    {
+      id: "hist-diff-view",
+      repo: "csm",
+      branch: "portkey-diff-view",
+      name: "diff-view",
+      summary: "Changed-files strip styling for the thread",
+      firstPrompt: "make the changed-files glance readable on a phone",
+      lastAssistant: "The strip is full-bleed with hairline rules now — no more assistant-bubble look.",
+      modified: ago(7 * 3_600_000),
+      isActive: false,
+      restorable: "yes",
+    },
+    {
+      id: "hist-tomba",
+      repo: "throxy",
+      branch: "cursor/add-tomba-provider",
+      name: "tomba-provider",
+      summary: "Add Tomba as an enrichment provider",
+      firstPrompt: "add tomba as an enrichment provider behind the existing interface",
+      lastAssistant: "Tomba is wired behind the provider interface with retries matching the others.",
+      modified: ago(26 * 3_600_000),
+      isActive: false,
+      restorable: "relocated", // worktree deleted → resumes in the base repo
+    },
+    {
+      id: "hist-icp",
+      repo: "cortex",
+      branch: "main",
+      name: "icp-notes",
+      summary: "Summarize ICP interview notes",
+      firstPrompt: "summarize the ICP interview notes into a one-pager",
+      lastAssistant: "One-pager written to notes/icp-summary.md.",
+      modified: ago(30 * 3_600_000),
+      isActive: false,
+      restorable: "no", // repo folder gone — readable only
+    },
+    {
+      id: "hist-usage",
+      repo: "csm",
+      branch: "main",
+      name: "usage-readout",
+      summary: "Token-usage readout thresholds",
+      firstPrompt: "mirror the statusline usage colors on the phone",
+      lastAssistant: "Usage now colors at the same 50/75% thresholds as the Mac statusline.",
+      modified: ago(3 * 86_400_000),
+      isActive: false,
+      restorable: "yes",
+    },
+  ],
+  before: null,
+  repos: [
+    { repo: "csm", count: 4 },
+    { repo: "throxy", count: 1 },
+    { repo: "cortex", count: 1 },
+  ],
+};
+
+// Search page for the same surface: flat, relevance-ranked, with match provenance —
+// the snippet carries the query word so the .hl highlight renders.
+const FIXTURE_HISTORY_SEARCH = {
+  rows: [
+    {
+      ...FIXTURE_HISTORY.rows[1]!,
+      matchField: "summary",
+      matchSnippet: "…the resurrect map kept $HOME after a crash-restore…",
+    },
+    {
+      ...FIXTURE_HISTORY.rows[5]!,
+      matchField: "content",
+      matchSnippet: "…tested resurrect end-to-end after the threshold change…",
+    },
+  ],
+  before: null,
+  repos: [{ repo: "csm", count: 2 }],
+};
+
 /**
  * Canned payload for a request, or `undefined` if this isn't a fixture route (so the
  * caller falls through to the real handler — e.g. `/stream` keeps its live SSE).
  */
-export function fixtureData(method: string, path: string): unknown | undefined {
+export function fixtureData(method: string, path: string, params?: URLSearchParams): unknown | undefined {
   if (method === "GET" && path === "/sessions") return FIXTURE_SESSIONS;
   if (method === "GET" && path === "/repos") return FIXTURE_REPOS;
+  if (method === "GET" && path === "/history") {
+    return params?.get("q") ? FIXTURE_HISTORY_SEARCH : FIXTURE_HISTORY;
+  }
   if (method === "GET" && path === "/pending") return [];
   if (method === "GET" && /^\/sessions\/[^/]+\/transcript$/.test(path)) return FIXTURE_TRANSCRIPT;
   if (method === "GET" && /^\/sessions\/[^/]+\/changes$/.test(path)) return FIXTURE_CHANGES;

@@ -77,6 +77,15 @@ export async function resolveTranscriptPath(
  * Epoch ms of the newest conversational record in a transcript, or null when the file
  * is unreadable or holds no timestamped turn (callers fall back to the file mtime).
  */
+/**
+ * The record types that carry conversation. This is what "last turn" means here and what
+ * the search corpus is built from (`core/search.ts`) — one definition, so a session's
+ * age and its searchable content can never disagree about which records count.
+ */
+export function isConversationalRecord(rec: { type?: string }): boolean {
+  return rec.type === "user" || rec.type === "assistant";
+}
+
 export async function readLastTurnAt(transcriptPath: string): Promise<number | null> {
   try {
     const file = Bun.file(transcriptPath);
@@ -101,7 +110,7 @@ export async function readLastTurnAt(transcriptPath: string): Promise<number | n
       } catch {
         continue;
       }
-      if (record.type !== "user" && record.type !== "assistant") continue;
+      if (!isConversationalRecord(record)) continue;
       const ts = record.timestamp ? new Date(record.timestamp).getTime() : NaN;
       if (!Number.isFinite(ts)) continue;
       at = ts;

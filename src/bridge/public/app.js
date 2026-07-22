@@ -41,7 +41,12 @@ const sessions = signal([]);
 const selectedId = signal(null);
 const transcript = signal(null);
 const error = signal("");
-const showArchived = signal(false);
+const showHistory = signal(false); // History screen (the windowless archive) open
+const history = signal(null); // /history payload {rows, before, repos} | null = loading
+const historyQuery = signal(""); // search box text (debounced into refreshHistory)
+const historyRepo = signal(""); // active repo chip ("" = all)
+const historyMore = signal(false); // a page-append fetch is in flight
+const historySession = signal(null); // session-shaped stand-in for a History row absent from sessions.value (>24h)
 const flash = signal(""); // transient FAILURE feedback in the detail view (successes stay silent)
 const copied = signal(false); // transient "✓ copied" pill (clipboard success needs visible feedback)
 const pendingSends = signal([]); // optimistic user bubbles awaiting transcript catch-up
@@ -604,11 +609,76 @@ function markRead(id) {
 function back() {
   selectedId.value = null;
   transcript.value = null;
+  historySession.value = null; // the stand-in belongs to the closed detail only
   pendingSends.value = [];
   rewindFloor.value = null;
   composerPrefill.value = null;
   closeAgents();
   clearAttachments();
+}
+
+// --- history (the windowless archive: browse by day, search everything) ---
+// Fetch-on-open by design (no SSE): an archive doesn't change while you look at it,
+// and the actions that DO change it (archive/restore) already refetch.
+let historySeq = 0; // supersede stale responses while typing
+async function refreshHistory(opts = {}) {
+  const seq = ++historySeq;
+  const params = new URLSearchParams();
+  const q = historyQuery.value.trim();
+  if (q) params.set("q", q);
+  if (historyRepo.value) params.set("repo", historyRepo.value);
+  if (opts.before) params.set("before", String(opts.before));
+  try {
+    const r = await fetch(`/history?${params}`);
+    if (!r.ok) return;
+    const data = await r.json();
+    if (seq !== historySeq) return; // a newer query/page fetch superseded this one
+    history.value = opts.before && history.value ? { ...data, rows: [...history.value.rows, ...data.rows] } : data;
+  } catch {
+    /* keep whatever page we already show; the offline banner covers connectivity */
+  }
+}
+
+let historyDebounce;
+function setHistoryQuery(q) {
+  historyQuery.value = q;
+  clearTimeout(historyDebounce);
+  historyDebounce = setTimeout(() => refreshHistory(), 250);
+}
+
+function setHistoryRepo(repo) {
+  historyRepo.value = repo;
+  refreshHistory();
+}
+
+function openHistory() {
+  showHistory.value = true;
+  history.value = null;
+  historyQuery.value = "";
+  historyRepo.value = "";
+  refreshHistory();
+}
+
+// Tap a History row. Live rows just open their session. Archived rows may be older
+// than discovery's 24h sweep and thus absent from sessions.value — stash a
+// session-shaped stand-in so Detail can render the header + restore bar; the
+// transcript itself is fetched by id and needs no discovery entry.
+function openHistoryRow(row) {
+  historySession.value = row.isActive
+    ? null
+    : {
+        id: row.id,
+        repo: row.repo,
+        branch: row.branch,
+        name: row.name,
+        label: row.name || row.summary || row.branch,
+        status: "archived",
+        restorable: row.restorable,
+        summary: row.summary,
+        modified: row.modified,
+        lastTurn: row.modified,
+      };
+  open(row.id);
 }
 
 // --- new session (repo picker → launch claude in a new tmux window) ---
@@ -932,11 +1002,12 @@ function compareSessions(a, b) {
   );
 }
 function orderedSessions() {
+  // Live sessions plus safeguard rows only. Archived stays visible when pending/unread
+  // (discovery can mislabel a live blocked session as archived — answering it is what
+  // the phone is for) or when it's the open session. Browsing the archive is History's
+  // job, one tap from the header.
   return sessions.value
-    .filter(
-      (s) =>
-        showArchived.value || s.status !== "archived" || s.unread || s.pending || s.id === selectedId.value,
-    )
+    .filter((s) => s.status !== "archived" || s.unread || s.pending || s.id === selectedId.value)
     .sort(compareSessions);
 }
 
@@ -1016,10 +1087,6 @@ function Login() {
 
 function List() {
   const all = sessions.value;
-  // A session blocked on a question/tool stays visible even when archived-filtered —
-  // discovery can mislabel a live, blocked session as archived, and answering it is
-  // exactly what the phone is for.
-  const archivedCount = all.filter((s) => s.status === "archived" && !s.pending).length;
   const list = orderedSessions();
   // Blocked-ON-YOU sessions surface in a pinned section ABOVE the repo groups — fixed
   // group order otherwise buries them in a low-priority repo. "Act now" = a real pending
@@ -1092,6 +1159,13 @@ function List() {
             </button>`}
             ${runningCount > 0 && html`<span class="runchip">🔄 ${runningCount}</span>`}
           </h1>
+          <button class="histbtn" onClick=${openHistory} aria-label="Session history">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+              stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="12" cy="12" r="9" />
+              <path d="M12 7v5l3 3" />
+            </svg>
+          </button>
           <button class="newbtn" onClick=${openNewSession} aria-label="New session">+</button>
         </div>
         ${error.value && error.value !== "bridge unreachable" && html`<div class="err">${error.value}</div>`}
@@ -1109,12 +1183,6 @@ function List() {
             </div>
           `,
         )}
-        ${archivedCount > 0 &&
-        html`<div class="btns" style="margin-top:14px">
-          <button onClick=${() => (showArchived.value = !showArchived.value)}>
-            ${showArchived.value ? "Hide" : "Show"} ${archivedCount} archived
-          </button>
-        </div>`}
       </div>
     </div>
   `;
@@ -1156,6 +1224,137 @@ function NewSession() {
             </button>
           `;
         })}
+      </div>
+    </div>
+  `;
+}
+
+// Day bucket label for History browse mode: today / yesterday / "fri 18 jul".
+function dayLabel(iso, now) {
+  const d = new Date(iso);
+  const startOf = (x) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
+  const diff = Math.round((startOf(new Date(now)) - startOf(d)) / 86400000);
+  if (diff <= 0) return "today";
+  if (diff === 1) return "yesterday";
+  return d
+    .toLocaleDateString("en-GB", { weekday: "short", day: "numeric", month: "short" })
+    .toLowerCase()
+    .replace(/,/g, "");
+}
+
+// Snippet text with the first query word that appears in it wrapped for highlight —
+// the "why did this row match" cue. Built as elements, never raw HTML.
+function highlightSnippet(snippet, query) {
+  const words = (query || "").toLowerCase().split(/\s+/).filter(Boolean);
+  const lower = snippet.toLowerCase();
+  for (const w of words) {
+    const i = lower.indexOf(w);
+    if (i === -1) continue;
+    return html`${snippet.slice(0, i)}<span class="hl">${snippet.slice(i, i + w.length)}</span>${snippet.slice(i + w.length)}`;
+  }
+  return snippet;
+}
+
+// History: the windowless archive. Browse = day-grouped by recency with infinite
+// scroll; search = one flat relevance-ranked page with match snippets. Repo chips
+// narrow either mode. Rows open the (read-only) thread; restore lives in its dock.
+function History() {
+  const h = history.value;
+  const q = historyQuery.value.trim();
+  const { rootRef, onTouchStart, onTouchEnd } = useSwipeBack(() => (showHistory.value = false));
+  const rows = h ? h.rows : [];
+
+  // Chips: pinned repos first (same order the list uses), then by match count.
+  const chips = h
+    ? [...h.repos].sort((a, b) => repoRank(a.repo) - repoRank(b.repo) || b.count - a.count || a.repo.localeCompare(b.repo))
+    : [];
+
+  const loadMore = async () => {
+    if (!h || !h.before || historyMore.value) return;
+    historyMore.value = true;
+    await refreshHistory({ before: h.before });
+    historyMore.value = false;
+  };
+  const onScroll = (e) => {
+    const el = e.target;
+    if (el.scrollHeight - el.scrollTop - el.clientHeight < 600) loadMore();
+  };
+
+  const renderRow = (row) => {
+    const title = row.name || row.summary || row.branch || row.id.slice(0, 8);
+    // Search shows WHY it matched; browse shows how the session ended (or its summary).
+    // Never echo the title as the sub-line.
+    const rawSub = q && row.matchSnippet ? row.matchSnippet : row.lastAssistant || row.summary || "";
+    const sub = rawSub && rawSub !== title ? rawSub : "";
+    return html`
+      <button type="button" class="row" key=${row.id} onClick=${() => openHistoryRow(row)}>
+        <span
+          class="dot"
+          style=${`background:${row.isActive ? "var(--mint)" : "transparent"};box-shadow:inset 0 0 0 1.5px ${
+            row.isActive ? "var(--mint)" : "rgba(180,180,180,0.55)"
+          }`}
+        ></span>
+        <span class="grow">
+          <span class="name">${title}<span class="repotag">${row.repo === "~" ? "home" : row.repo}</span></span>
+          ${sub && html`<span class="sub">${q && row.matchSnippet ? highlightSnippet(sub, q) : sub}</span>`}
+        </span>
+        <span class="age">${formatAge(row.modified)}</span>
+      </button>`;
+  };
+
+  // Browse mode groups by day (counts are of loaded rows; they fill in as you scroll).
+  // Search results stay flat: relevance order isn't chronological.
+  const groups = [];
+  if (!q) {
+    for (const row of rows) {
+      const label = dayLabel(row.modified, tick.value);
+      let g = groups[groups.length - 1];
+      if (!g || g.label !== label) groups.push((g = { label, rows: [] }));
+      g.rows.push(row);
+    }
+  }
+
+  return html`
+    <div class="screen" ref=${rootRef} onTouchStart=${onTouchStart} onTouchEnd=${onTouchEnd}>
+      <div class="listhead">
+        <button class="iconbtn" onClick=${() => (showHistory.value = false)} aria-label="Back">‹</button>
+        <h1 style="margin:0">history</h1>
+      </div>
+      <div class="histsearch">
+        <input
+          type="search"
+          placeholder="search sessions…"
+          value=${historyQuery.value}
+          onInput=${(e) => setHistoryQuery(e.target.value)}
+        />
+      </div>
+      ${chips.length > 1 &&
+      html`<div class="chips">
+        <button class=${historyRepo.value === "" ? "chip on" : "chip"} onClick=${() => setHistoryRepo("")}>all</button>
+        ${chips.map(
+          (c) => html`<button
+            key=${c.repo}
+            class=${historyRepo.value === c.repo ? "chip on" : "chip"}
+            onClick=${() => setHistoryRepo(historyRepo.value === c.repo ? "" : c.repo)}
+          >
+            ${c.repo === "~" ? "home" : c.repo}<span class="chipcount">${c.count}</span>
+          </button>`,
+        )}
+      </div>`}
+      <div class="scroll" onScroll=${onScroll}>
+        ${h === null && html`<div class="sub" style="padding:8px">loading history…</div>`}
+        ${h !== null && rows.length === 0 && html`<div class="sub" style="padding:8px">${q ? "no matches in titles, prompts or transcript ends" : "no sessions"}</div>`}
+        ${q
+          ? rows.map(renderRow)
+          : groups.map(
+              (g) => html`
+                <div class="group" key=${g.label}>
+                  <div class="repo">${g.label}<span class="daycount">${g.rows.length}</span></div>
+                  ${g.rows.map(renderRow)}
+                </div>
+              `,
+            )}
+        ${historyMore.value && html`<div class="sub" style="padding:8px">loading…</div>`}
       </div>
     </div>
   `;
@@ -1942,7 +2141,11 @@ function useSwipeBack(onBack, deps = []) {
 
 function Detail() {
   const t = transcript.value;
-  const session = sessions.value.find((s) => s.id === selectedId.value);
+  // A History row older than discovery's 24h sweep has no sessions.value entry — the
+  // stand-in from openHistoryRow carries its header metadata + restore state instead.
+  const session =
+    sessions.value.find((s) => s.id === selectedId.value) ||
+    (historySession.value && historySession.value.id === selectedId.value ? historySession.value : null);
   const status = session ? session.status : "";
   const turns = t ? t.turns : []; // full active branch — upCount/canCode compute over THIS
   // Optimistic rewind: show only the turns before the rewound message until the resend lands
@@ -2191,18 +2394,27 @@ function Detail() {
         </div>
         <div class="dock-inner">
           ${archived
-            ? session && session.restorable
+            ? session && (session.restorable === "yes" || session.restorable === "relocated")
               ? html`<div class="flash archived restore-row">
                   <button
                     class="primary restore-btn"
                     disabled=${restoring.value}
                     onClick=${restoreSession}
                   >
-                    ${restoring.value ? "Restoring…" : "Restore session"}
+                    ${restoring.value
+                      ? "Restoring…"
+                      : session.restorable === "relocated"
+                        ? `⟲ Restore in ${session.repo}`
+                        : "⟲ Restore session"}
                   </button>
+                  ${session.restorable === "relocated" &&
+                  !flash.value &&
+                  html`<span class="restore-note">worktree gone — resumes in the base repo</span>`}
                   ${flash.value && html`<span class="restore-err">${flash.value}</span>`}
                 </div>`
-              : html`<div class="flash archived">Archived — resume from your Mac to continue this session.</div>`
+              : session && session.restorable === "no"
+                ? html`<div class="flash archived">Repo folder is gone — readable, but nowhere to restore.</div>`
+                : html`<div class="flash archived">Archived — resume from your Mac to continue this session.</div>`
             : flash.value && html`<div class="flash">${flash.value}</div>`}
           <div class="navbar">
             <button class="iconbtn" onClick=${back} aria-label="Back to sessions">‹</button>
@@ -2818,7 +3030,9 @@ function App() {
     ? html`<${NewSession} />`
     : selectedId.value
       ? html`<${Detail} />`
-      : html`<${List} />`;
+      : showHistory.value
+        ? html`<${History} />`
+        : html`<${List} />`;
   // Bottom connectivity banner: a failed fetch ("bridge unreachable") is the persistent
   // state (stays until a refresh succeeds); a dropped SSE socket is the transient one.
   const banner = error.value === "bridge unreachable" ? "bridge unreachable" : !connected.value ? "reconnecting…" : null;

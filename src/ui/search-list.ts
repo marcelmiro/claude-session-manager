@@ -45,8 +45,14 @@ export function renderSearchResults(
     // Worktree warning
     const wtWarning = entry.isDeletedWorktree ? "\u26A0 " : "";
 
-    // Label: name · summary, or summary, or firstPrompt
-    const description = entry.summary || entry.firstPrompt || "(no description)";
+    // Label: name · summary, or summary, or firstPrompt. When the query hit lives in
+    // conversation content or the first prompt, the summary alone doesn't show WHY the
+    // row matched — the engine's snippet does, so it takes the description slot.
+    const description =
+      ((entry.matchField === "content" || entry.matchField === "firstPrompt") && entry.matchSnippet) ||
+      entry.summary ||
+      entry.firstPrompt ||
+      "(no description)";
     const label = entry.name
       ? `${entry.name} \u00b7 ${description}`
       : description;
