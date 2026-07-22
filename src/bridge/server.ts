@@ -1087,7 +1087,7 @@ async function route(req: Request): Promise<Response> {
   const clarify = path.match(/^\/sessions\/([^/]+)\/clarify$/);
   if (method === "POST" && clarify) {
     const id = decodeURIComponent(clarify[1]!);
-    const r = clarifySessionQuestion(id);
+    const r = await clarifySessionQuestion(id);
     if (r.ok) markPortkeySource(id, { deviceId: deviceOf(req) }); // no text ⇒ anchors the current turn's prompt_id
     return sendResult(r);
   }

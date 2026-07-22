@@ -22,6 +22,7 @@ import {
   sendTextAndEnter,
   answerQuestion,
   isQuestionPickerOpen,
+  clarifyQuestion,
   getMainSession,
   launchClaudeWindow,
   launchResumeWindow,
@@ -1259,16 +1260,22 @@ export async function answerSessionQuestion(
 }
 
 /**
- * Decline a held AskUserQuestion (the phone's "Chat about this"): the hook denies the
- * tool so the agent yields the turn and waits for the user's next message. Only works
- * when the question is hook-held; a native-widget question (not intercepted) returns
- * `not-held`, since there's no decline-via-file path for it.
+ * Decline an open AskUserQuestion (the phone's "Chat about this") so the agent yields
+ * the turn and waits for the user's next message. Hook-held → the clarify decision
+ * file (the hook denies the tool). Un-intercepted (native picker on screen, e.g. the
+ * question fired at the desk or the hold released/expired) → drive the picker's own
+ * "Chat about this" row via `clarifyQuestion`, which pre-flights the capture and
+ * refuses (`not-presented`) rather than fire a key at a permission prompt, a focused
+ * free-text row, or a pane that isn't showing the picker.
  */
-export function clarifySessionQuestion(sessionId: string): SendResult {
+export async function clarifySessionQuestion(sessionId: string): Promise<SendResult> {
   const pending = pendingToolCall(sessionId);
   if (!hasOpenQuestion(pending)) return { ok: false, reason: "no-question" };
   if (declineQuestion(sessionId, pending!.toolUseId)) return { ok: true };
-  return { ok: false, reason: "not-held" };
+  const paneId = await resolveSessionPane(sessionId);
+  if (!paneId) return { ok: false, reason: "no-pane" };
+  if (!(await clarifyQuestion(paneId))) return { ok: false, reason: "not-presented" };
+  return { ok: true };
 }
 
 /**

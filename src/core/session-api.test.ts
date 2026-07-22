@@ -617,7 +617,7 @@ test("answerSessionQuestion: abandoned hold (hook process gone) → send-keys fa
   expect(existsSync(join(DECISIONS_DIR, `${id}.json`))).toBe(false);
 });
 
-test("clarifySessionQuestion: abandoned hold → not-held (no keystroke equivalent to decline)", async () => {
+test("clarifySessionQuestion: abandoned hold → pane path (no decision written into the void)", async () => {
   const id = "q-clarify-abandoned";
   seedQuestionEvent(id, "tuq_1");
   mkdirSync(PENDING_DIR, { recursive: true });
@@ -625,22 +625,25 @@ test("clarifySessionQuestion: abandoned hold → not-held (no keystroke equivale
     join(PENDING_DIR, `${id}.json`),
     JSON.stringify({ sessionId: id, kind: "question", tool_use_id: "tuq_1", ts: Date.now(), pid: await deadPid() }),
   );
-  expect(clarifySessionQuestion(id)).toEqual({ ok: false, reason: "not-held" });
+  // The hook died, so the question fell through to the on-screen picker: clarify must
+  // drive the pane (no mapping here → no-pane), never write a decision nobody reads.
+  expect(await clarifySessionQuestion(id)).toEqual({ ok: false, reason: "no-pane" });
   expect(existsSync(join(DECISIONS_DIR, `${id}.json`))).toBe(false);
 });
 
-test("clarifySessionQuestion: no open question → no-question", () => {
-  expect(clarifySessionQuestion("ghost-session")).toEqual({ ok: false, reason: "no-question" });
+test("clarifySessionQuestion: no open question → no-question", async () => {
+  expect(await clarifySessionQuestion("ghost-session")).toEqual({ ok: false, reason: "no-question" });
 });
 
-test("clarifySessionQuestion: open question but no hook holding → not-held (native widget)", () => {
+test("clarifySessionQuestion: open question but no hook holding → pane path (native widget)", async () => {
   const id = "q-clarify-native";
   seedQuestionEvent(id, "tuq_1");
-  // No pending file → declineQuestion returns false → not-held.
-  expect(clarifySessionQuestion(id)).toEqual({ ok: false, reason: "not-held" });
+  // No pending file → declineQuestion returns false → drive the native picker's own
+  // chat row instead (no mapping in this fixture → no-pane).
+  expect(await clarifySessionQuestion(id)).toEqual({ ok: false, reason: "no-pane" });
 });
 
-test("clarifySessionQuestion: hook holding → writes a clarify decision, no pane needed", () => {
+test("clarifySessionQuestion: hook holding → writes a clarify decision, no pane needed", async () => {
   const id = "q-clarify";
   seedQuestionEvent(id, "tuq_1");
   mkdirSync(PENDING_DIR, { recursive: true });
@@ -648,7 +651,7 @@ test("clarifySessionQuestion: hook holding → writes a clarify decision, no pan
     join(PENDING_DIR, `${id}.json`),
     JSON.stringify({ sessionId: id, kind: "question", tool_use_id: "tuq_1" }),
   );
-  expect(clarifySessionQuestion(id)).toEqual({ ok: true });
+  expect(await clarifySessionQuestion(id)).toEqual({ ok: true });
   const dec = JSON.parse(readFileSync(join(DECISIONS_DIR, `${id}.json`), "utf8"));
   expect(dec.kind).toBe("question");
   expect(dec.tool_use_id).toBe("tuq_1");

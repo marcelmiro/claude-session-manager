@@ -22,11 +22,20 @@ export const PENDING_DIR = `${PATHS.dir}/pending`;
 export const DECISIONS_DIR = `${PATHS.dir}/decisions`;
 
 /**
- * How long a blocking hook holds a tool call while polling for a decision. The single
- * source of truth for that window: both poll loops in `cli.ts` (the generated
- * `pretooluse.sh` and `questionHook`) run to this deadline.
+ * How long the blocking APPROVAL hook holds a tool call while polling for a decision:
+ * the poll loop in the generated `pretooluse.sh` runs to this deadline. Deliberately
+ * short — a hung approval hook blocks the whole session, so Claude's kill must stay
+ * close.
  */
 export const HOLD_WINDOW_MS = 600_000;
+
+/**
+ * How long `questionHook` holds an AskUserQuestion. Much longer than approvals: the
+ * hold releases early the moment the user is back at the Mac (focus-release poll), so
+ * the window only bounds the away-and-never-answered case — where expiry just drops
+ * the question to the native picker, which no longer times out on its own.
+ */
+export const QUESTION_HOLD_MS = 14_400_000;
 
 /**
  * Extra time CSM registers on top of `HOLD_WINDOW_MS` for Claude Code's own PreToolUse
@@ -43,6 +52,9 @@ export const HOOK_KILL_GRACE_MS = 15_000;
 /** Upper bound on a hold: the full poll window, plus slack for a slow write. */
 const MAX_HOLD_MS = HOLD_WINDOW_MS + 10_000;
 
+/** Same bound for question holds, whose poll window is hours, not minutes. */
+const QUESTION_MAX_HOLD_MS = QUESTION_HOLD_MS + 10_000;
+
 /**
  * Is the hold recorded in a `pending/*.json` marker still being polled? The hook stamps
  * its own pid; when that process is gone the marker was orphaned (hook killed or crashed
@@ -54,7 +66,10 @@ const MAX_HOLD_MS = HOLD_WINDOW_MS + 10_000;
  */
 function holdIsLive(raw: PendingHold): boolean {
   if (typeof raw.pid !== "number") return true;
-  if (typeof raw.ts === "number" && Date.now() - raw.ts > MAX_HOLD_MS) return false;
+  // Question holds poll for hours; the ts bound must match their window or every
+  // reader would reap a perfectly live question hold ten minutes in.
+  const maxMs = raw.kind === "question" ? QUESTION_MAX_HOLD_MS : MAX_HOLD_MS;
+  if (typeof raw.ts === "number" && Date.now() - raw.ts > maxMs) return false;
   try {
     process.kill(raw.pid, 0); // signal 0 = liveness probe, delivers nothing
     return true;

@@ -11,7 +11,7 @@
 
 import { homedir } from "os";
 import { loadState, saveState, loadPaneSessions, migratePaneMap } from "./core/state";
-import { switchToPane, listPanes, renameWindow, capturePane, displayMessage } from "./core/tmux";
+import { switchToPane, listPanes, renameWindow, capturePane, displayMessage, atMacFocus } from "./core/tmux";
 import { syncWindowPrefix, stripAllPrefixes, ATTENTION_PREFIX } from "./core/notifications";
 import { findClaudeProcesses } from "./core/process";
 import { detectStatus } from "./core/status";
@@ -23,7 +23,7 @@ import { pickSavedCwd, resolveRestoreTarget } from "./core/resurrect";
 import { pickRepoPath } from "./core/sessions";
 import { resolveTranscriptPath, latestTranscriptCwd } from "./core/last-turn";
 import { shellQuote } from "./core/launch-command";
-import { PENDING_DIR, DECISIONS_DIR, HOLD_WINDOW_MS, HOOK_KILL_GRACE_MS } from "./core/approval";
+import { PENDING_DIR, DECISIONS_DIR, HOLD_WINDOW_MS, QUESTION_HOLD_MS, HOOK_KILL_GRACE_MS } from "./core/approval";
 import { mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 
 const home = homedir();
@@ -465,7 +465,7 @@ function isSubsequence(sub: string, str: string): boolean {
 // csm setup
 // ---------------------------------------------------------------------------
 
-const HOOK_VERSION = 12;
+const HOOK_VERSION = 13;
 
 // SessionStart pane→session mapper. Writes one file per pane (panes/<paneId> → sessionId)
 // atomically (temp+rename) — the hook OWNS the map, so there's no shared-file write race and
@@ -524,8 +524,8 @@ ${LOG_EVENT_SNIPPET}
 // full tool_input is recovered by listPendingApprovals from the logged event.
 const PRETOOLUSE_HOOK_SCRIPT = `#!/bin/bash
 # CSM_HOOK_VERSION=${HOOK_VERSION}
-# CSM PreToolUse handler — log, then focus-aware AskUserQuestion intercept, then
-# attach-aware blocking approval.
+# CSM PreToolUse handler — log, then attach-aware blocking approval
+# (AskUserQuestion is delegated to question-pretooluse.sh).
 ${LOG_EVENT_SNIPPET}
 
 # Derive the session from \$TMUX_PANE (A6). Outside tmux → neutral, never block.
@@ -534,43 +534,16 @@ SESS=$(tmux display-message -p -t "\$TMUX_PANE" '#{session_name}' 2>/dev/null)
 [ -z "\$SESS" ] && exit 0
 [ -z "\$SESSION_ID" ] && exit 0
 
-# Tool + tool_use_id, derived once — shared by the question intercept and the
-# approval block-poll below.
+# Tool + tool_use_id, derived once for the approval block-poll below.
 TOOL=$(printf '%s' "\$INPUT" | grep -oE '"tool_name"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | cut -d'"' -f4)
 TUID=$(printf '%s' "\$INPUT" | grep -oE '"tool_use_id"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | cut -d'"' -f4)
 
-# AskUserQuestion → focus-aware intercept. Checks run cheap→expensive; ANY miss or
-# ambiguity exits 0 (native 60s widget) — never hold a session hostage when unsure.
-# The one spawn (lsappinfo ~8ms) runs ONLY on this path, and only inside the
-# possibly-focused sub-branch after the cheap file/tmux checks already say intercept.
-# No claude-version gate: updatedInput.answers is assumed forward-compatible; if a
-# future claude breaks it the phone-answer just won't take (visibly degraded) rather
-# than silently reverting the feature on every routine patch bump.
-if [ "\$TOOL" = "AskUserQuestion" ]; then
-  # 1. CSM-tracked pane (rules out an ad-hoc bare-terminal claude).
-  [ -f "\$HOME/.config/csm/panes/\$TMUX_PANE" ] || exit 0
-  # 2. Live bridge consumer: marker mtime <=40s (tolerates one missed 15s heartbeat).
-  #    Stale/absent → nobody can answer → native widget, no 600s stall.
-  M="\$HOME/.config/csm/bridge-consumer"
-  MT=$(stat -f %m "\$M" 2>/dev/null || echo 0)
-  if [ "\$MT" = 0 ] || [ $(( $(date +%s) - MT )) -ge 40 ]; then exit 0; fi
-  # 3. Focus (three-part): active window + attached client (cheap tmux), and only then
-  #    the frontmost app (lsappinfo — no TCC prompt, unlike osascript). All three true
-  #    ⇒ you're looking ⇒ let the native widget render (the reverted-plan regression).
-  WA=$(tmux display-message -p -t "\$TMUX_PANE" '#{window_active}' 2>/dev/null)
-  CL=$(tmux list-clients -t "\$SESS" 2>/dev/null)
-  if [ "\$WA" = "1" ] && [ -n "\$CL" ]; then
-    FRONT=$(lsappinfo info -only name "$(lsappinfo front)" 2>/dev/null)
-    # Fail toward native: unreadable/empty frontmost ⇒ treat as focused (exit 0). Only a
-    # positively-identified OTHER app frontmost (you're on your phone) is NOT focused.
-    case "\$FRONT" in
-      ''|*'"Ghostty"'*) exit 0 ;;
-    esac
-  fi
-  # All gates passed → hold (600s) and answer via the file channel.
-  printf '%s' "\$INPUT" | csm question-hook
-  exit \$?
-fi
+# AskUserQuestion is handled by question-pretooluse.sh — a separate, matcher-scoped
+# registration whose kill timeout matches the hours-long question hold. This script's
+# short timeout must keep applying to every ordinary tool call (a hung approval hook
+# blocks the whole session), so the question path exits here — AFTER the log above,
+# which is the event line portkey mirrors, written exactly once.
+[ "\$TOOL" = "AskUserQuestion" ] && exit 0
 
 # Attached client → fall through to the instant desk TUI prompt (no lag).
 if [ -n "$(tmux list-clients -t "\$SESS" 2>/dev/null)" ]; then
@@ -627,29 +600,81 @@ rm -f "\$PDIR/\$SESSION_ID".json
 exit 0
 `;
 
+// AskUserQuestion intercept, split from pretooluse.sh so its registration can carry the
+// hours-long question-hold timeout without also letting a hung approval hook block a
+// session for hours. Registered with matcher "AskUserQuestion" (pretooluse.sh logs the
+// event and exits for this tool, so the gates below run exactly once per question).
+// Checks run cheap→expensive; ANY miss or ambiguity exits 0 (native widget) — never hold
+// a session hostage when unsure. No claude-version gate: updatedInput.answers is assumed
+// forward-compatible; if a future claude breaks it the phone-answer just won't take
+// (visibly degraded) rather than silently reverting the feature on every patch bump.
+const QUESTION_PRETOOLUSE_HOOK_SCRIPT = `#!/bin/bash
+# CSM_HOOK_VERSION=${HOOK_VERSION}
+# CSM AskUserQuestion handler — focus-aware intercept (event logging stays in pretooluse.sh).
+INPUT=$(cat)
+[ -z "\$TMUX_PANE" ] && exit 0
+SESS=$(tmux display-message -p -t "\$TMUX_PANE" '#{session_name}' 2>/dev/null)
+[ -z "\$SESS" ] && exit 0
+
+# 1. CSM-tracked pane (rules out an ad-hoc bare-terminal claude).
+[ -f "\$HOME/.config/csm/panes/\$TMUX_PANE" ] || exit 0
+# 2. Live bridge consumer: marker mtime <=40s (tolerates one missed 15s heartbeat).
+#    Stale/absent → nobody can answer → native widget, no long stall.
+M="\$HOME/.config/csm/bridge-consumer"
+MT=$(stat -f %m "\$M" 2>/dev/null || echo 0)
+if [ "\$MT" = 0 ] || [ $(( $(date +%s) - MT )) -ge 40 ]; then exit 0; fi
+# 3. Focus (three-part): active window + attached client (cheap tmux), and only then
+#    the frontmost app (lsappinfo — no TCC prompt, unlike osascript). All three true
+#    ⇒ you're looking ⇒ let the native widget render. Same probes as atMacFocus() in
+#    core/tmux.ts (the hold's release check) — keep the two in sync, but note the
+#    OPPOSITE failure polarity: here ambiguity means "don't intercept".
+WA=$(tmux display-message -p -t "\$TMUX_PANE" '#{window_active}' 2>/dev/null)
+CL=$(tmux list-clients -t "\$SESS" 2>/dev/null)
+if [ "\$WA" = "1" ] && [ -n "\$CL" ]; then
+  FRONT=$(lsappinfo info -only name "$(lsappinfo front)" 2>/dev/null)
+  # Fail toward native: unreadable/empty frontmost ⇒ treat as focused (exit 0). Only a
+  # positively-identified OTHER app frontmost (you're on your phone) is NOT focused.
+  case "\$FRONT" in
+    ''|*'"Ghostty"'*) exit 0 ;;
+  esac
+fi
+# All gates passed → hold and answer via the file channel (releases early on refocus).
+printf '%s' "\$INPUT" | csm question-hook
+exit \$?
+`;
+
 /** Hook scripts CSM installs under ~/.config/csm/hooks. */
 const HOOK_SCRIPTS = [
   { name: "session-start.sh", content: HOOK_SCRIPT },
   { name: "event.sh", content: EVENT_HOOK_SCRIPT },
   { name: "pretooluse.sh", content: PRETOOLUSE_HOOK_SCRIPT },
+  { name: "question-pretooluse.sh", content: QUESTION_PRETOOLUSE_HOOK_SCRIPT },
 ] as const;
 
 /** Which hook script handles each Claude Code event. PreToolUse blocks (Inc6). */
-const HOOK_REGISTRATIONS: { event: string; script: string; timeout?: number }[] = [
+const HOOK_REGISTRATIONS: { event: string; script: string; matcher?: string; timeout?: number }[] = [
   { event: "SessionStart", script: "session-start.sh" },
   { event: "UserPromptSubmit", script: "event.sh" },
   { event: "PostToolUse", script: "event.sh" },
   { event: "Notification", script: "event.sh" },
   { event: "Stop", script: "event.sh" },
   { event: "SubagentStop", script: "event.sh" },
-  // Claude Code's own timeout — the SIGKILL both hook poll loops race. Deliberately the
+  // Claude Code's own timeout — the SIGKILL each hook poll loop races. Deliberately the
   // poll window PLUS a grace: Claude counts from spawn and a loop can't start its clock
   // until the process is up, so registering the bare window would make the kill land first
-  // and strand the marker the loop's cleanup would have removed.
+  // and strand the marker the loop's cleanup would have removed. Two entries on purpose:
+  // the matcher-scoped question hold may run for hours, while every other tool call must
+  // stay killable at ~10 min.
   {
     event: "PreToolUse",
     script: "pretooluse.sh",
     timeout: (HOLD_WINDOW_MS + HOOK_KILL_GRACE_MS) / 1000,
+  },
+  {
+    event: "PreToolUse",
+    script: "question-pretooluse.sh",
+    matcher: "AskUserQuestion",
+    timeout: (QUESTION_HOLD_MS + HOOK_KILL_GRACE_MS) / 1000,
   },
 ];
 
@@ -711,7 +736,7 @@ export async function setup(): Promise<void> {
   // Ensure each event has exactly one CSM registration. Match on the full script
   // path (a stable idempotency key) so a re-run never duplicates an entry.
   let settingsChanged = false;
-  for (const { event, script, timeout } of HOOK_REGISTRATIONS) {
+  for (const { event, script, matcher, timeout } of HOOK_REGISTRATIONS) {
     const path = scriptPath(script);
     if (!Array.isArray(settings.hooks[event])) settings.hooks[event] = [];
     const existing = settings.hooks[event]
@@ -720,7 +745,9 @@ export async function setup(): Promise<void> {
     if (!existing) {
       const hook: Record<string, unknown> = { type: "command", command: path };
       if (timeout !== undefined) hook.timeout = timeout;
-      settings.hooks[event].push({ hooks: [hook] }); // omit matcher → all events/tools
+      const entry: Record<string, unknown> = { hooks: [hook] };
+      if (matcher !== undefined) entry.matcher = matcher; // omit matcher → all events/tools
+      settings.hooks[event].push(entry);
       settingsChanged = true;
     } else if (timeout !== undefined && existing.timeout !== timeout) {
       // Reconcile, don't just add: the registration is matched on command path, so an
@@ -742,7 +769,7 @@ export async function setup(): Promise<void> {
   }
 
   console.log(scriptsUpdated ? "CSM hooks updated." : "CSM hooks installed.");
-  console.log(`  Hook scripts: ${hookDir}/{session-start,event,pretooluse}.sh`);
+  console.log(`  Hook scripts: ${hookDir}/{session-start,event,pretooluse,question-pretooluse}.sh`);
   console.log(`  Settings: ${settingsPath}`);
   console.log("\nNew Claude Code sessions will now emit status/transcript events.");
 }
@@ -941,12 +968,15 @@ export async function restoreSessions(): Promise<void> {
  * Reads the hook stdin, registers a `pending/<session_id>.json` (kind:"question")
  * marker so both surfaces know a question is held, then block-polls
  * `decisions/<session_id>.json` for a matching decision (every 500ms, to the end of the
- * hook window). Three outcomes: an answer emits `updatedInput.answers` (keyed by question
- * text) so Claude resolves the tool with no native 60s widget; a `clarify` decision
+ * question window). Four outcomes: an answer emits `updatedInput.answers` (keyed by
+ * question text) so Claude resolves the tool with no native widget; a `clarify` decision
  * ("Chat about this") denies the tool so the agent yields the turn and waits for a typed
- * message; expiry exits 0 neutral (the native widget's own timer becomes the floor).
- * stdin is parsed with JSON.parse, not shell greps — arbitrary question/label text needs
- * real JSON escaping.
+ * message; the user returning to the Mac releases the hold (exit 0 neutral → the native
+ * picker renders in front of them); expiry exits 0 neutral the same way. The native
+ * picker no longer times out on its own (verified on Claude Code 2.1.217 — see ADR 8),
+ * so a fallen-through question waits indefinitely and stays answerable from both
+ * surfaces. stdin is parsed with JSON.parse, not shell greps — arbitrary question/label
+ * text needs real JSON escaping.
  */
 export async function questionHook(): Promise<void> {
   let input: any;
@@ -985,8 +1015,22 @@ export async function questionHook(): Promise<void> {
   // Poll to a DEADLINE, not an iteration count: per-pass IO makes a counted loop overrun
   // the window, so it'd still be polling when the hook timeout kills it — and the cleanup
   // below, which un-registers the hold, would never run.
-  const deadline = Date.now() + HOLD_WINDOW_MS;
+  const paneId = process.env.TMUX_PANE ?? "";
+  let lastFocusCheck = 0;
+  const deadline = Date.now() + QUESTION_HOLD_MS;
   while (Date.now() < deadline) {
+    // Focus-release: the moment the user is back at the Mac, stop holding and exit
+    // neutral so the native picker renders in front of them (~1s). Checked AFTER the
+    // decision read below on the previous iteration, so an answer that raced the
+    // user's return has already won. Throttled to ~1s — atMacFocus shells out to
+    // tmux + lsappinfo. Probe ambiguity keeps holding (see atMacFocus polarity).
+    if (paneId && Date.now() - lastFocusCheck >= 1_000) {
+      lastFocusCheck = Date.now();
+      if (await atMacFocus(paneId)) {
+        rmSync(pendingFile, { force: true });
+        process.exit(0);
+      }
+    }
     try {
       const raw = JSON.parse(readFileSync(decisionFile, "utf8"));
       if (raw.kind === "question" && raw.tool_use_id === toolUseId) {

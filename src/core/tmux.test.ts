@@ -5,7 +5,7 @@
  */
 
 import { test, expect } from "bun:test";
-import { questionAnswerKeys, multiQuestionKeys, answerKeys, questionPickerVisible } from "./tmux";
+import { questionAnswerKeys, multiQuestionKeys, answerKeys, questionPickerVisible, chatRowKey, freeTextRowFocused } from "./tmux";
 
 test("single-select presses the option's 1-based digit, then Enter to submit", () => {
   expect(questionAnswerKeys(0)).toEqual(["1", "Enter"]);
@@ -151,4 +151,46 @@ test("questionPickerVisible: widget above a short pane's trailing blank rows →
   // top with dozens of empty rows below it (caught live: not-presented on a real picker).
   const cap = WIDGET_SINGLE + "\n" + Array(50).fill("   ").join("\n");
   expect(questionPickerVisible(cap)).toBe(true);
+});
+
+// --- chatRowKey / freeTextRowFocused (clarify-on-native-picker pre-flight) ---
+
+test("chatRowKey: single-question widget → the rendered chat-row digit", () => {
+  expect(chatRowKey(WIDGET_SINGLE)).toBe("4");
+});
+
+test("chatRowKey: multiSelect widget (3 options) → chat row shifts to 5", () => {
+  expect(chatRowKey(WIDGET_MULTISELECT)).toBe("5");
+});
+
+test("chatRowKey: permission prompt / plain pane → null", () => {
+  expect(chatRowKey(PERMISSION_PROMPT)).toBeNull();
+  expect(chatRowKey(SPINNER_WITH_TASKS)).toBeNull();
+});
+
+test("chatRowKey: chat row scrolled out of the bottom sample → null", () => {
+  const cap = WIDGET_SINGLE + "\n" + Array(25).fill("output line").join("\n");
+  expect(chatRowKey(cap)).toBeNull();
+});
+
+// Live tell (2026-07-22 adversarial run): focusing "Type something." turns the row into
+// an inline input — digits type characters — and the footer gains the ctrl+g hint.
+const WIDGET_FREETEXT_FOCUSED = ` ☐ Repro
+Test question 1: pick one
+  1. Alpha
+     First test option
+  2. Bravo
+     Second test option
+❯ 3. Type something.
+──────────────────────
+  4. Chat about this
+Enter to select · ↑/↓ to navigate · Esc to cancel · ctrl+g to edit in Nvim`;
+
+test("freeTextRowFocused: ctrl+g footer hint → focused (no key is safe)", () => {
+  expect(freeTextRowFocused(WIDGET_FREETEXT_FOCUSED)).toBe(true);
+});
+
+test("freeTextRowFocused: ordinary option-select widget → not focused", () => {
+  expect(freeTextRowFocused(WIDGET_SINGLE)).toBe(false);
+  expect(freeTextRowFocused(WIDGET_MULTISELECT)).toBe(false);
 });

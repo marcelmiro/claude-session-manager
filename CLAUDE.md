@@ -150,7 +150,7 @@ Neovim which-key style popup at bottom-left. Press a key to select an action:
 - **Tool approval** (Edit/Bash/etc.): `y` yes, `a` yes don't ask again, `n` no
 - **AskUserQuestion**: Shows numbered options from JSONL, `t` to type custom answer
 
-**Chat about this** (phone only): declines a held AskUserQuestion instead of picking an option — the hook denies the tool so the agent yields the turn and waits for a typed message. Only works while the question is hook-held; once the hold is gone the question belongs to the on-screen picker, which has no decline key, so the phone gets a 409 (`not-held`) and must pick an option instead.
+**Chat about this** (phone only): declines an open AskUserQuestion instead of picking an option, so the agent yields the turn and waits for a typed message. Held → the hook denies the tool via the decision file. Un-held (question fired at the desk, or the hold released/expired) → drives the native picker's own "Chat about this" row with one digit, pre-flighted from a fresh capture (`clarifyQuestion` in `core/tmux.ts` refuses when the picker isn't on screen, a permission prompt is up, or the free-text row has focus; unparseable chat row falls back to Escape). The question hold itself lasts up to 4h (`QUESTION_HOLD_MS`, its own matcher-scoped hook registration — approvals keep the 600s window) and releases early the moment the user is back at the Mac, so the native picker renders in front of them. Why hold-plus-release instead of pure send-keys: [ADR 8](docs/adr/0008-question-hold-not-send-keys.md).
 
 **Send message**: Opens inline text input. Enter sends text + newline to the pane. Useful for approving tool calls or sending instructions without switching.
 

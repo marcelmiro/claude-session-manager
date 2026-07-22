@@ -152,18 +152,34 @@ test("a live hold near the end of its poll window is still honoured, not reaped"
 });
 
 test("a live pid older than the hook's poll window is dead (recycled pid)", () => {
-  const id = "q-recycled";
+  // Question holds poll for hours: 700s old is well inside their window and must be
+  // honoured (the shared pre-split bound would have reaped it at 610s).
+  const live = "q-recycled-live";
   writeFileSync(
-    `${PENDING_DIR}/${id}.json`,
+    `${PENDING_DIR}/${live}.json`,
     JSON.stringify({
-      sessionId: id,
+      sessionId: live,
       kind: "question",
       tool_use_id: "tu_q",
-      ts: Date.now() - 700_000, // past the 600s hook window
+      ts: Date.now() - 700_000,
+      pid: process.pid,
+    }),
+  );
+  expect(decideQuestion(live, "tu_q", { Pick: "B" })).toBe(true);
+
+  // Past the question window itself, the same live pid can only be recycled.
+  const dead = "q-recycled-dead";
+  writeFileSync(
+    `${PENDING_DIR}/${dead}.json`,
+    JSON.stringify({
+      sessionId: dead,
+      kind: "question",
+      tool_use_id: "tu_q",
+      ts: Date.now() - 14_500_000, // past the 4h question window + slack
       pid: process.pid, // alive, but cannot be the original holder
     }),
   );
-  expect(decideQuestion(id, "tu_q", { Pick: "B" })).toBe(false);
+  expect(decideQuestion(dead, "tu_q", { Pick: "B" })).toBe(false);
 });
 
 test("listPendingApprovals skips and reaps an approval whose hook process is gone", async () => {

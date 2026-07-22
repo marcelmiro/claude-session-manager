@@ -1,4 +1,5 @@
 import type { PaneInfo } from "../types.ts";
+import { isPermissionPrompt } from "./status";
 
 /**
  * Get the "main" tmux session name (i.e. not the popup session).
@@ -360,6 +361,72 @@ export function questionPickerVisible(capturedOutput: string): boolean {
 export async function isQuestionPickerOpen(paneId: string): Promise<boolean> {
   await Bun.sleep(400);
   return questionPickerVisible(await capturePane(paneId));
+}
+
+/**
+ * Whether the user is demonstrably AT the Mac looking at this pane: active tmux
+ * window + attached client + Ghostty frontmost. TS port of the three probes in
+ * `question-pretooluse.sh`'s focus gate (cli.ts) — keep the two in sync. Polarity is
+ * the OPPOSITE of the gate's: this feeds the hold's release check, so any probe
+ * error/ambiguity returns false (keep holding), whereas the gate fails toward the
+ * native widget (don't intercept). Only a positively-confirmed presence releases.
+ */
+export async function atMacFocus(paneId: string): Promise<boolean> {
+  try {
+    const wa = (await Bun.$`tmux display-message -p -t ${paneId} '#{window_active}'`.quiet().text()).trim();
+    if (wa !== "1") return false;
+    const session = (await Bun.$`tmux display-message -p -t ${paneId} '#{session_name}'`.quiet().text()).trim();
+    if (!session) return false;
+    const clients = (await Bun.$`tmux list-clients -t ${session}`.quiet().text()).trim();
+    if (!clients) return false;
+    const front = (await Bun.$`lsappinfo front`.quiet().text()).trim();
+    if (!front) return false;
+    const name = (await Bun.$`lsappinfo info -only name ${front}`.quiet().text()).trim();
+    return name.includes('"Ghostty"');
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Whether the picker's "Type something." inline input has focus. In that state digits
+ * type characters instead of selecting an option — no key is safe to send. The tell is
+ * the `ctrl+g to edit` footer hint, which only renders while that row is focused.
+ * Pure classifier, exported for tests.
+ */
+export function freeTextRowFocused(capturedOutput: string): boolean {
+  const bottom = capturedOutput.trimEnd().split("\n").slice(-20).join("\n");
+  return /ctrl\+g to edit/.test(bottom);
+}
+
+/**
+ * The keystroke for the native picker's own "Chat about this" row, read from the
+ * RENDERED capture — never computed from the question spec, so it survives layout
+ * differences (multi-question tabs, option-count changes). Null when the row isn't
+ * identifiable. Pure classifier, exported for tests.
+ */
+export function chatRowKey(capturedOutput: string): string | null {
+  const bottom = capturedOutput.trimEnd().split("\n").slice(-20).join("\n");
+  const m = bottom.match(/(\d)\.\s+Chat about this/);
+  return m ? m[1]! : null;
+}
+
+/**
+ * Drive the on-screen picker's "Chat about this" row — the un-held equivalent of the
+ * hook's clarify decision (the tool resolves as decline-and-wait, then the phone's
+ * typed message continues the conversation). Pre-flights from a fresh capture: no
+ * picker, or a permission prompt (also digit-actionable — a digit here would answer
+ * it), or a focused free-text row → false, nothing sent. A visible picker whose chat
+ * row can't be parsed (future copy change) falls back to Escape, which declines the
+ * question the blunter way but still yields the turn for the follow-up message.
+ */
+export async function clarifyQuestion(paneId: string): Promise<boolean> {
+  await Bun.sleep(400); // settle, matching isQuestionPickerOpen's repaint discipline
+  const captured = await capturePane(paneId);
+  if (!questionPickerVisible(captured) || isPermissionPrompt(captured)) return false;
+  if (freeTextRowFocused(captured)) return false;
+  await sendKey(paneId, chatRowKey(captured) ?? "Escape");
+  return true;
 }
 
 /**
