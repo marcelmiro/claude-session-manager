@@ -2,7 +2,9 @@
  * Input-source attribution (portkey push gating). Pins the truncation-safe
  * anchor logic: text-match on the current turn's UserPromptSubmit, prompt_id-match
  * for approvals/answers, and the fail-to-"tui" direction when the anchor turn has
- * scrolled out of the 200-line log tail.
+ * scrolled out of the 200-line log tail. Markers carry the originating deviceId —
+ * the per-device push target — and clearSource() drops the marker entirely
+ * (Mac-takeover: focusing the pane in the terminal silences later pushes).
  *
  * `home` helper first — freezes SOURCE_DIR/EVENTS_DIR under a temp HOME.
  */
@@ -10,7 +12,7 @@
 import "../../test/helpers/home";
 import { test, expect, beforeEach } from "bun:test";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
-import { markPortkeySource, sourceForSession, SOURCE_DIR } from "./input-source";
+import { markPortkeySource, sourceForSession, clearSource, SOURCE_DIR } from "./input-source";
 import { EVENTS_DIR, eventLogPath } from "./hook-events";
 import type { HookEvent } from "../types";
 
@@ -28,13 +30,13 @@ function writeLog(id: string, events: Partial<HookEvent>[]): void {
 
 test('"tui" when no marker exists', () => {
   writeLog("s1", [{ hook_event_name: "UserPromptSubmit", prompt: "hi", prompt_id: "p1" }]);
-  expect(sourceForSession("s1")).toBe("tui");
+  expect(sourceForSession("s1")).toEqual({ source: "tui" });
 });
 
-test('"portkey" when marker text equals the last UserPromptSubmit.prompt', () => {
+test('"portkey" with deviceId when marker text equals the last UserPromptSubmit.prompt', () => {
   writeLog("s2", [{ hook_event_name: "UserPromptSubmit", prompt: "fix the bug", prompt_id: "p1" }]);
-  markPortkeySource("s2", "fix the bug");
-  expect(sourceForSession("s2")).toBe("portkey");
+  markPortkeySource("s2", { deviceId: "iphone-1", text: "fix the bug" });
+  expect(sourceForSession("s2")).toEqual({ source: "portkey", deviceId: "iphone-1" });
 });
 
 test('"portkey" when marker turnPromptId equals the last UserPromptSubmit.prompt_id (approval-after-TUI-prompt)', () => {
@@ -43,20 +45,20 @@ test('"portkey" when marker turnPromptId equals the last UserPromptSubmit.prompt
     { hook_event_name: "UserPromptSubmit", prompt: "typed at desk", prompt_id: "turn-9" },
     { hook_event_name: "PreToolUse", tool_name: "Bash", tool_use_id: "t1" },
   ]);
-  markPortkeySource("s3"); // no text ⇒ anchors turn-9
-  expect(sourceForSession("s3")).toBe("portkey");
+  markPortkeySource("s3", { deviceId: "ipad-1" }); // no text ⇒ anchors turn-9
+  expect(sourceForSession("s3")).toEqual({ source: "portkey", deviceId: "ipad-1" });
 });
 
 test('"tui" when a newer UserPromptSubmit follows the anchor turn', () => {
   // Portkey message (marked at send time, when its own UPS is the newest), then a
   // desk-typed prompt starts a new turn — both anchors are shadowed.
   writeLog("s4", [{ hook_event_name: "UserPromptSubmit", prompt: "from phone", prompt_id: "p1" }]);
-  markPortkeySource("s4", "from phone");
+  markPortkeySource("s4", { deviceId: "iphone-1", text: "from phone" });
   writeLog("s4", [
     { hook_event_name: "UserPromptSubmit", prompt: "from phone", prompt_id: "p1" },
     { hook_event_name: "UserPromptSubmit", prompt: "typed at desk", prompt_id: "p2" },
   ]);
-  expect(sourceForSession("s4")).toBe("tui");
+  expect(sourceForSession("s4")).toEqual({ source: "tui" });
 });
 
 test('"portkey" for a message queued mid-turn (no UPS of its own — prompt_id anchor)', () => {
@@ -67,22 +69,42 @@ test('"portkey" for a message queued mid-turn (no UPS of its own — prompt_id a
     { hook_event_name: "UserPromptSubmit", prompt: "typed at desk", prompt_id: "turn-4" },
     { hook_event_name: "PreToolUse", tool_name: "Bash", tool_use_id: "t1" },
   ]);
-  markPortkeySource("s7", "queued from phone");
-  expect(sourceForSession("s7")).toBe("portkey");
+  markPortkeySource("s7", { deviceId: "iphone-1", text: "queued from phone" });
+  expect(sourceForSession("s7")).toEqual({ source: "portkey", deviceId: "iphone-1" });
 });
 
 test('truncation: anchor UserPromptSubmit trimmed out of the tail ⇒ "tui", never a stuck "portkey"', () => {
-  markPortkeySource("s5", "the original message");
+  markPortkeySource("s5", { deviceId: "iphone-1", text: "the original message" });
   // The 200-line trim scrolled the anchor turn out; only later events remain.
   writeLog("s5", [
     { hook_event_name: "PostToolUse", tool_name: "Bash", tool_use_id: "t1" },
     { hook_event_name: "Stop" },
   ]);
-  expect(sourceForSession("s5")).toBe("tui");
+  expect(sourceForSession("s5")).toEqual({ source: "tui" });
 });
 
-test("markPortkeySource(id) with no UserPromptSubmit writes an empty marker ⇒ stays \"tui\"", () => {
+test('markPortkeySource(id) with no UserPromptSubmit writes an empty marker ⇒ stays "tui"', () => {
   writeLog("s6", [{ hook_event_name: "SessionStart" }]);
   markPortkeySource("s6");
-  expect(sourceForSession("s6")).toBe("tui");
+  expect(sourceForSession("s6")).toEqual({ source: "tui" });
+});
+
+test('pre-web-push marker (no deviceId) still attributes "portkey" with deviceId undefined', () => {
+  writeLog("s8", [{ hook_event_name: "UserPromptSubmit", prompt: "old marker", prompt_id: "p1" }]);
+  markPortkeySource("s8", { text: "old marker" });
+  const src = sourceForSession("s8");
+  expect(src.source).toBe("portkey");
+  expect((src as { deviceId?: string }).deviceId).toBeUndefined();
+});
+
+test('clearSource drops the marker ⇒ "tui" (Mac takeover mid-turn)', () => {
+  writeLog("s9", [
+    { hook_event_name: "UserPromptSubmit", prompt: "from phone", prompt_id: "p1" },
+    { hook_event_name: "PreToolUse", tool_name: "Bash", tool_use_id: "t1" },
+  ]);
+  markPortkeySource("s9", { deviceId: "iphone-1", text: "from phone" });
+  expect(sourceForSession("s9")).toEqual({ source: "portkey", deviceId: "iphone-1" });
+  clearSource("s9");
+  expect(sourceForSession("s9")).toEqual({ source: "tui" });
+  clearSource("s9"); // idempotent — already gone
 });

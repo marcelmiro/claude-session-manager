@@ -102,10 +102,6 @@ export interface NotificationConfig {
   windowPrefix: boolean;
   /** Enable macOS native notifications (Tier 3) */
   nativeNotification: boolean;
-  /** ntfy.sh topic for phone push (Tier 4). Unset ⇒ push disabled. */
-  ntfyTopic?: string;
-  /** Explicit bridge origin for deep links; else auto-detected via `tailscale serve status`. */
-  bridgeUrl?: string;
 }
 
 export interface SessionNotificationState {
@@ -139,6 +135,30 @@ export interface TransitionEvent {
   currentStatus: string;
   classification: "blocked" | "turnComplete" | "none";
   session: Session;
+}
+
+// --- Web Push (Tier 4) types ---
+
+/** Where the most recent input on a session came from — the push-routing decision. */
+export type InputSource = { source: "tui" } | { source: "portkey"; deviceId?: string };
+
+/** A device's push subscription as persisted in push-subscriptions.json. */
+export interface StoredSubscription {
+  endpoint: string;
+  keys: { p256dh: string; auth: string };
+}
+
+/** What the service worker renders — non-sensitive label + state only. */
+export interface PushPayload {
+  title: string;
+  body: string;
+  sessionId: string;
+}
+
+/** Test seam for RFC 8291 encryption: the §5 vector fixes salt + sender keypair. */
+export interface EncryptSeams {
+  salt?: Uint8Array; // 16 bytes
+  senderKeys?: CryptoKeyPair; // ECDH P-256 — the "ephemeral" application-server pair
 }
 
 // --- New Session Wizard types ---
@@ -220,8 +240,6 @@ export interface CsmConfig {
   nativeNotification: boolean;
   repoPaths?: string[];       // dirs to scan 1-level deep for git repos
   priorityRepos?: string[];   // repo names pinned at top of list (lowercase)
-  ntfyTopic?: string;         // ntfy.sh topic for phone push (Tier 4); unset ⇒ disabled
-  bridgeUrl?: string;         // explicit bridge origin for deep links; else auto-detected
 }
 
 // --- Hook event log + transcript types (Impl #2 — Camp 1) ---

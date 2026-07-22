@@ -13,6 +13,32 @@ import { parseDiffLines, narrowIndent } from "/diff-lines.js";
 
 const html = htm.bind(h);
 
+// --- Device identity (per-device Web Push routing) ---------------------------
+// A stable per-device id: the bridge records which device drove each action and
+// pushes only to that device (and only while it isn't watching live via SSE).
+const DEVICE_ID = (() => {
+  try {
+    let id = localStorage.getItem("csm-device");
+    if (!id) {
+      id = crypto.randomUUID();
+      localStorage.setItem("csm-device", id);
+    }
+    return id;
+  } catch {
+    return crypto.randomUUID(); // private mode — a per-load id still routes correctly
+  }
+})();
+// Every request carries the device header — patched once here rather than
+// threading a wrapper through every call site. Headers() normalizes whatever
+// shape the call site passed (plain object, Headers, or none). The SSE URL uses
+// a query param instead (EventSource can't set headers).
+const rawFetch = window.fetch.bind(window);
+window.fetch = (input, init = {}) => {
+  const headers = new Headers(init.headers || {});
+  headers.set("x-csm-device", DEVICE_ID);
+  return rawFetch(input, { ...init, headers });
+};
+
 // Render assistant markdown the way the native terminal does: real paragraphs, list
 // spacing, and soft line breaks (`breaks: true` turns single newlines into <br>).
 // marked has no sanitizer, so neutralize raw HTML by escaping any html token (code
@@ -354,7 +380,7 @@ const refreshTranscriptSoon = coalesce(refreshTranscript);
 
 function connectStream() {
   if (es) es.close();
-  es = new EventSource("/stream");
+  es = new EventSource(`/stream?device=${encodeURIComponent(DEVICE_ID)}`);
   // Re-snapshot on every (re)connect. EventSource reconnects on its own but never resends
   // state, so without this the list stays stale after a dropped socket reconnects.
   es.onopen = () => {
@@ -384,6 +410,76 @@ function connectStream() {
   };
 }
 
+// --- Web Push (installed-PWA only: iOS allows push solely for home-screen apps) ---
+// The bell shows only in the true first-run case (permission not yet asked); once
+// granted, a lost/pruned subscription silently self-heals on every launch.
+const pushEligible = signal(false);
+const IS_STANDALONE =
+  (window.matchMedia && window.matchMedia("(display-mode: standalone)").matches) ||
+  window.navigator.standalone === true;
+
+function b64urlToBytes(s) {
+  const pad = "=".repeat((4 - (s.length % 4)) % 4);
+  const raw = atob((s + pad).replace(/-/g, "+").replace(/_/g, "/"));
+  return Uint8Array.from(raw, (c) => c.charCodeAt(0));
+}
+
+async function subscribePush(reg) {
+  const { key } = await (await fetch("/push/vapid-key")).json();
+  const sub = await reg.pushManager.subscribe({
+    userVisibleOnly: true,
+    applicationServerKey: b64urlToBytes(key),
+  });
+  const keys = sub.toJSON().keys;
+  await fetch("/push/subscribe", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      deviceId: DEVICE_ID,
+      subscription: { endpoint: sub.endpoint, keys },
+    }),
+  });
+}
+
+// Runs after auth. Registers the SW (also wiring the notification-tap deep link),
+// then: permission granted → verify against SERVER truth (`/push/subscribed` — a
+// pruned subscription is invisible to pushManager.getSubscription) and resubscribe
+// silently; permission never asked → surface the bell; denied → nothing to offer.
+async function initPush() {
+  if (!IS_STANDALONE || !("Notification" in window) || !("serviceWorker" in navigator)) return;
+  try {
+    const reg = await navigator.serviceWorker.register("/sw.js");
+    navigator.serviceWorker.addEventListener("message", (e) => {
+      const msg = e.data || {};
+      if (msg.type === "open-session" && msg.sessionId) open(msg.sessionId);
+    });
+    if (!reg.pushManager) return;
+    if (Notification.permission === "granted") {
+      const r = await fetch(`/push/subscribed?device=${encodeURIComponent(DEVICE_ID)}`);
+      const { subscribed } = await r.json();
+      const local = await reg.pushManager.getSubscription();
+      if (!subscribed || !local) await subscribePush(reg);
+    } else if (Notification.permission === "default") {
+      pushEligible.value = true;
+    }
+  } catch {
+    /* push is best-effort — the app works without it */
+  }
+}
+
+// Bell tap — the one place that needs a user gesture (iOS requirement).
+async function enablePush() {
+  try {
+    const perm = await Notification.requestPermission();
+    pushEligible.value = false;
+    if (perm !== "granted") return;
+    const reg = await navigator.serviceWorker.ready;
+    await subscribePush(reg);
+  } catch {
+    flashError("✗ push setup failed");
+  }
+}
+
 async function login(token) {
   error.value = "";
   loadingAuth.value = true;
@@ -395,7 +491,10 @@ async function login(token) {
     });
     if (!r.ok) return (error.value = "wrong token");
     await refreshSessions();
-    if (authed.value) connectStream();
+    if (authed.value) {
+      connectStream();
+      initPush();
+    }
   } catch {
     error.value = "bridge unreachable";
   } finally {
@@ -1159,6 +1258,14 @@ function List() {
             </button>`}
             ${runningCount > 0 && html`<span class="runchip">🔄 ${runningCount}</span>`}
           </h1>
+          ${pushEligible.value &&
+          html`<button class="bellbtn" onClick=${enablePush} aria-label="Enable notifications">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+              stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9" />
+              <path d="M13.7 21a2 2 0 0 1-3.4 0" />
+            </svg>
+          </button>`}
           <button class="histbtn" onClick=${openHistory} aria-label="Session history">
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor"
               stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -1520,10 +1627,11 @@ function QuestionCard({ questions, toolUseId }) {
     })
       .then((r) => r.json().catch(() => ({})))
       .then((d) => {
-        // not-held = the hook holding the prompt is gone, so it's now the on-screen
-        // picker, which has no "chat instead" key — say so rather than echo the code.
+        // not-presented = the question isn't answerable right now (picker not on
+        // screen, a permission prompt is up, or someone's typing in it at the desk) —
+        // say so rather than echo the code.
         if (d && d.ok === false)
-          revert(d.reason === "not-held" ? "prompt moved to the desk — pick an option" : d.reason || "clarify failed");
+          revert(d.reason === "not-presented" ? "question is busy on the desk — try again" : d.reason || "clarify failed");
       })
       .catch(() => revert("bridge unreachable"));
     // Safety: never leave the card hidden if the question somehow stays open.
@@ -3112,6 +3220,7 @@ function CopiedToast() {
 // `pageshow` (persisted) covers iOS's bfcache-style restore. Cold relaunch is handled by boot.
 function resync() {
   if (!authed.value) return;
+  if (navigator.clearAppBadge) navigator.clearAppBadge().catch(() => {}); // you're looking now
   tick.value = Date.now(); // ages froze while the tab was hidden — catch them up first
   refreshSessions();
   if (selectedId.value) refreshTranscript();
@@ -3137,17 +3246,36 @@ function stopTick() {
 }
 startTick();
 
+// Backgrounded/evicted: close the stream FIRST so the server's heartbeat stops
+// touching this device's consumer marker on the lingering socket (iOS keeps it
+// alive ~30s), then tell the bridge we're gone — pushes resume immediately
+// instead of after the 40s staleness window. `resync` on return reopens the
+// stream (re-touching the marker).
+function sendGoodbye() {
+  if (es) {
+    es.close();
+    es = null;
+  }
+  try {
+    navigator.sendBeacon("/push/goodbye", DEVICE_ID);
+  } catch {
+    /* staleness fallback covers it */
+  }
+}
 document.addEventListener("visibilitychange", () => {
   if (document.visibilityState === "visible") {
     startTick();
     resync();
   } else {
     stopTick();
+    sendGoodbye();
   }
 });
 window.addEventListener("pageshow", (e) => {
   if (e.persisted) resync();
 });
+// iOS sometimes evicts without a visibilitychange — pagehide is the backstop.
+window.addEventListener("pagehide", sendGoodbye);
 
 // --- boot: probe auth; the cookie (if present from a prior visit) authenticates ---
 // The static boot spinner in index.html owns the screen during this probe. We delay
@@ -3194,6 +3322,8 @@ refreshSessions()
     if (authed.value) {
       applyDeepLink();
       connectStream();
+      initPush();
+      if (navigator.clearAppBadge) navigator.clearAppBadge().catch(() => {});
     }
   })
   .finally(boot);

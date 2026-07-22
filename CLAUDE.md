@@ -172,13 +172,17 @@ Session rows display "TICKET · name" labels extracted from branch names (Linear
 
 ### Attention & notifications
 
-2-tier system on status transitions (running→waiting = "blocked", running→ready = "turnComplete"):
+4-tier system on status transitions (running→waiting = "blocked", running→ready = "turnComplete"):
 1. Status monitor update (tmux status-right)
 2. Window prefix: ⚡ added to tmux window name
+3. macOS native notification (terminal-notifier/osascript; sound-only while Ghostty is frontmost)
+4. Web Push to the portkey device that drove the turn (see below)
 
 Window prefix priority: ⚡ (needs attention) > 🔄 (running) > none. Monitor syncs prefixes on each cycle. `stripAllPrefixes()` and `desiredPrefix()` in `notifications.ts` centralize prefix logic.
 
 Auto-clears when user focuses the attention pane. Config in `~/.config/csm/config.json`.
+
+**Tier 4 — per-device Web Push** (`core/web-push.ts`, no dependency — VAPID + RFC 8291 aes128gcm on Bun WebCrypto, pinned by the RFC's own test vector). Each portkey client mints a `deviceId` (localStorage), sends it as `x-csm-device` on every request (`?device=` on SSE), and registers a push subscription via `sw.js` — installed-PWA only; the navbar bell appears once (permission grant needs a gesture on iOS), after which a lost/pruned subscription silently resubscribes on launch. The source marker (`source/<id>.json`) records which device drove the turn; the monitor pushes only to that device, and only when its SSE liveness marker (`consumers/<deviceId>`, touched on connect/heartbeat, unlinked by the `sendBeacon` goodbye on backgrounding — the client closes its EventSource first so the heartbeat can't re-touch) is stale. Focusing the session's pane at the Mac clears the marker entirely (takeover). Pushes carry only the non-sensitive label + tool category; `tag = sessionId` keeps one notification per session (latest state wins); taps deep-link into the PWA (`notificationclick` → focus + `open-session` message, or `openWindow`). Prune on 401/403/404/410. Decision record: [ADR 6](docs/adr/0006-web-push-replaces-ntfy.md).
 
 ### Monitor (`bun run status`)
 
@@ -321,4 +325,5 @@ Restore: `resurrect-sessions.json` (coordinate→{sessionId, cwd}) + `tmux list-
 - Hook events: `~/.config/csm/hook-events` (SessionStart hook writes pane→session mappings)
 - Hook script: `~/.config/csm/hooks/session-start.sh` (installed by `csm setup`)
 - Resurrect map: `~/.config/csm/resurrect-sessions.json` (coordinate→sessionId, written by save-sessions)
+- Web Push state: `~/.config/csm/push-vapid.json` (VAPID keypair), `push-subscriptions.json` (deviceId→subscription), `consumers/<deviceId>` (per-device SSE liveness), `source/<sessionId>.json` (which device drove the turn)
 - Debug log: `~/.config/csm/debug.log` (monitor debug, create file to enable)

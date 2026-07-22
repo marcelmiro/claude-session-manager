@@ -16,6 +16,7 @@ import { loadConfig } from "./core/config";
 import { debugLog } from "./core/debug";
 import { loadState, saveState, computeAggregate, buildSessionStates, loadPaneSessions, savePaneSessions, processHookEvents } from "./core/state";
 import { detectTransitions, dispatchNotifications, syncWindowPrefix, ATTENTION_PREFIX, stripAllPrefixes, desiredPrefix, buildBaseName, NAME_SEPARATOR } from "./core/notifications";
+import { clearSource } from "./core/input-source";
 import { getBaseRepoPath } from "./core/git";
 import { repoNameFromPath } from "./core/sessions";
 import { loadNameCache, saveNameCache, generateAIName, getSessionName, slugify, acquireNamingLock, releaseNamingLock, type NameCache } from "./core/names";
@@ -295,6 +296,13 @@ async function main(): Promise<void> {
   if (activePaneId && terminalFocused) {
     needsAttention.delete(activePaneId);
     attentionTypes.delete(activePaneId);
+    // Mac takeover: the user is looking at this pane, so the session is theirs at
+    // the desk now — drop any portkey source marker so later transitions don't
+    // push to a phone. paneSessionMap is the authoritative pane→id source here
+    // (hook events processed + fork-corrected above; a session object's own id
+    // can lag it).
+    const takenOver = paneSessionMap[activePaneId];
+    if (takenOver) clearSource(takenOver);
   }
 
   // Dispatch notifications only for sessions that still have attention

@@ -17,15 +17,18 @@
  * with no regex change.
  */
 
-import { writeFileSync, readFileSync, renameSync, mkdirSync } from "node:fs";
-import { PATHS } from "./config";
+import { readFileSync, mkdirSync, unlinkSync } from "node:fs";
+import { PATHS, writeAtomic } from "./config";
 import { readEvents } from "./hook-events";
+import type { InputSource } from "../types";
 
 export const SOURCE_DIR = `${PATHS.dir}/source`;
 
 interface SourceMarker {
   turnPromptId?: string;
   text?: string;
+  /** Which portkey device drove the action — the push target for this turn. */
+  deviceId?: string;
 }
 
 function markerPath(sessionId: string): string {
@@ -42,11 +45,15 @@ function markerPath(sessionId: string): string {
  * prompt whose text is ours). Atomic (`.tmp`→rename) so a concurrent reader never sees
  * a half-written file. Non-fatal on error.
  */
-export function markPortkeySource(sessionId: string, text?: string): void {
+export function markPortkeySource(
+  sessionId: string,
+  opts: { deviceId?: string; text?: string } = {},
+): void {
   try {
     mkdirSync(SOURCE_DIR, { recursive: true });
     const marker: SourceMarker = {};
-    if (text != null) marker.text = text;
+    if (opts.deviceId != null) marker.deviceId = opts.deviceId;
+    if (opts.text != null) marker.text = opts.text;
     const events = readEvents(sessionId);
     for (let i = events.length - 1; i >= 0; i--) {
       if (events[i]!.hook_event_name === "UserPromptSubmit" && events[i]!.prompt_id) {
@@ -54,27 +61,25 @@ export function markPortkeySource(sessionId: string, text?: string): void {
         break;
       }
     }
-    const tmp = `${markerPath(sessionId)}.tmp`;
-    writeFileSync(tmp, JSON.stringify(marker));
-    renameSync(tmp, markerPath(sessionId));
+    writeAtomic(markerPath(sessionId), JSON.stringify(marker));
   } catch {
     // Non-fatal — a missed marker just means no push for this action.
   }
 }
 
 /**
- * Whether the most recent input on this session came from portkey. No marker ⇒
- * `"tui"`. Matches when the current turn's `UserPromptSubmit` was the portkey
- * message (text-match) OR portkey acted inside that still-current turn
- * (`prompt_id`-match). A newer turn (different prompt/prompt_id) shadows the
- * marker ⇒ `"tui"`.
+ * Whether the most recent input on this session came from portkey — and if so,
+ * from which device (the push target). No marker ⇒ `"tui"`. Matches when the
+ * current turn's `UserPromptSubmit` was the portkey message (text-match) OR
+ * portkey acted inside that still-current turn (`prompt_id`-match). A newer turn
+ * (different prompt/prompt_id) shadows the marker ⇒ `"tui"`.
  */
-export function sourceForSession(sessionId: string): "portkey" | "tui" {
+export function sourceForSession(sessionId: string): InputSource {
   let marker: SourceMarker;
   try {
     marker = JSON.parse(readFileSync(markerPath(sessionId), "utf8")) as SourceMarker;
   } catch {
-    return "tui"; // no marker (fresh / TUI-only session)
+    return { source: "tui" }; // no marker (fresh / TUI-only session)
   }
 
   const events = readEvents(sessionId);
@@ -86,7 +91,20 @@ export function sourceForSession(sessionId: string): "portkey" | "tui" {
     }
   }
 
-  if (marker.text != null && lastUps?.prompt?.trim() === marker.text.trim()) return "portkey";
-  if (marker.turnPromptId != null && lastUps?.prompt_id === marker.turnPromptId) return "portkey";
-  return "tui";
+  const portkey: InputSource = { source: "portkey", deviceId: marker.deviceId };
+  if (marker.text != null && lastUps?.prompt?.trim() === marker.text.trim()) return portkey;
+  if (marker.turnPromptId != null && lastUps?.prompt_id === marker.turnPromptId) return portkey;
+  return { source: "tui" };
+}
+
+/**
+ * Drop the portkey marker — the user took the session over at the Mac (focused
+ * its pane in the terminal), so later transitions must not push to a phone.
+ */
+export function clearSource(sessionId: string): void {
+  try {
+    unlinkSync(markerPath(sessionId));
+  } catch {
+    // Already gone / never marked — fine.
+  }
 }

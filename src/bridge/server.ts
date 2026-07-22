@@ -13,7 +13,7 @@
  */
 
 import { createHash, timingSafeEqual, randomUUID } from "node:crypto";
-import { existsSync, readdirSync, statSync, rmSync, openSync, closeSync, unlinkSync } from "node:fs";
+import { existsSync, readdirSync, statSync, rmSync, openSync, closeSync, unlinkSync, mkdirSync } from "node:fs";
 import { relative } from "node:path";
 import { discoverSessions } from "../core/sessions";
 import {
@@ -51,6 +51,13 @@ import { recoverWorktreeTranscript } from "../core/recover";
 import { loadConfig, PATHS } from "../core/config";
 import { listPendingApprovals, decideApproval } from "../core/approval";
 import { markPortkeySource } from "../core/input-source";
+import {
+  CONSUMERS_DIR,
+  isValidDeviceId,
+  getVapidPublicKey,
+  saveSubscription,
+  getSubscription,
+} from "../core/web-push";
 import { watchEvents } from "../core/watch";
 import { EVENTS_DIR, pendingToolCall } from "../core/hook-events";
 import { capturePane, listPanes } from "../core/tmux";
@@ -81,6 +88,7 @@ const FIXTURES = !!process.env.CSM_BRIDGE_FIXTURES;
 const STATIC: Record<string, string> = {
   "/": "index.html",
   "/app.js": "app.js",
+  "/sw.js": "sw.js",
   // Shared with the TUI (core/status.ts imports the same file) — served unbuilt.
   "/time-ago.js": "../../shared/time-ago.js",
   // Unified-patch parser, shared with its test suite — served unbuilt.
@@ -663,7 +671,9 @@ function maybeGenerateNames(sessions: Session[], cache: NameCache): void {
 // out to all. Heartbeat every 15s (iOS drops idle background sockets ~30s).
 // ---------------------------------------------------------------------------
 
-const clients = new Set<ReadableStreamDefaultController>();
+// controller → deviceId of the client behind it (undefined for pre-deviceId clients);
+// the heartbeat keeps each connected device's consumer marker fresh.
+const clients = new Map<ReadableStreamDefaultController, string | undefined>();
 const encoder = new TextEncoder();
 
 // Liveness marker for the focus-aware question-intercept hook: its mtime is the only
@@ -671,23 +681,44 @@ const encoder = new TextEncoder();
 // The hook holds an AskUserQuestion for 600s ONLY when this marker is fresh (≤40s old),
 // so nobody's-phone-connected never causes a 600s stall. Never crash the bridge.
 const BRIDGE_CONSUMER = `${PATHS.dir}/bridge-consumer`;
-function touchBridgeConsumer(): void {
+function touchMarker(path: string): void {
   try {
-    closeSync(openSync(BRIDGE_CONSUMER, "w")); // create/truncate → bumps mtime to now
+    closeSync(openSync(path, "w")); // create/truncate → bumps mtime to now
   } catch {
     /* marker is best-effort */
   }
 }
-function clearBridgeConsumer(): void {
+function clearMarker(path: string): void {
   try {
-    unlinkSync(BRIDGE_CONSUMER);
+    unlinkSync(path);
   } catch {
     /* already gone */
   }
 }
 
+// Per-device liveness markers (consumers/<deviceId>) — the push-suppression signal.
+// Additive to the aggregate BRIDGE_CONSUMER above, which the question-intercept
+// hook reads and which must keep its exact semantics.
+function touchDeviceConsumer(deviceId: string): void {
+  try {
+    mkdirSync(CONSUMERS_DIR, { recursive: true });
+  } catch {
+    /* marker is best-effort */
+  }
+  touchMarker(`${CONSUMERS_DIR}/${deviceId}`);
+}
+function clearDeviceConsumer(deviceId: string): void {
+  clearMarker(`${CONSUMERS_DIR}/${deviceId}`);
+}
+
+/** The validated device identity a portkey client sends on every request. */
+function deviceOf(req: Request): string | undefined {
+  const d = req.headers.get("x-csm-device");
+  return isValidDeviceId(d) ? d : undefined;
+}
+
 function pushAll(frame: Uint8Array): void {
-  for (const c of clients) {
+  for (const c of clients.keys()) {
     try {
       c.enqueue(frame);
     } catch {
@@ -719,18 +750,19 @@ function reconcileAfterInterrupt(id: string): void {
   })();
 }
 
-function streamResponse(): Response {
+function streamResponse(deviceId?: string): Response {
   let self: ReadableStreamDefaultController;
   const stream = new ReadableStream({
     start(controller) {
       self = controller;
-      clients.add(controller);
-      touchBridgeConsumer(); // a phone is now connected — mark it fresh
+      clients.set(controller, deviceId);
+      touchMarker(BRIDGE_CONSUMER); // a phone is now connected — mark it fresh
+      if (deviceId) touchDeviceConsumer(deviceId); // this device is watching live
       controller.enqueue(encoder.encode(": connected\n\n"));
     },
     cancel() {
       clients.delete(self);
-      if (clients.size === 0) clearBridgeConsumer(); // last phone gone — go stale now
+      if (clients.size === 0) clearMarker(BRIDGE_CONSUMER); // last phone gone — go stale now
     },
   });
   return new Response(stream, {
@@ -774,7 +806,57 @@ async function route(req: Request): Promise<Response> {
 
   if (method === "GET" && path === "/sessions") return json(await sessionsPayload());
   if (method === "GET" && path === "/pending") return json(listPendingApprovals());
-  if (method === "GET" && path === "/stream") return streamResponse();
+  // EventSource can't set headers, so the deviceId rides a query param here.
+  if (method === "GET" && path === "/stream") {
+    const d = url.searchParams.get("device");
+    return streamResponse(isValidDeviceId(d) ? d : undefined);
+  }
+
+  // --- Web Push: per-device subscriptions (see core/web-push.ts) ---
+  if (method === "GET" && path === "/push/vapid-key") {
+    try {
+      return json({ key: await getVapidPublicKey() });
+    } catch {
+      // Keypair generation/persist failed — refuse rather than hand out a key
+      // that won't survive the process (the client retries on next launch).
+      return json({ ok: false, reason: "vapid-unavailable" }, 500);
+    }
+  }
+  if (method === "POST" && path === "/push/subscribe") {
+    const body = (await req.json().catch(() => ({}))) as {
+      deviceId?: unknown;
+      subscription?: { endpoint?: unknown; keys?: { p256dh?: unknown; auth?: unknown } };
+    };
+    const sub = body.subscription;
+    if (
+      !isValidDeviceId(body.deviceId) ||
+      typeof sub?.endpoint !== "string" ||
+      !sub.endpoint.startsWith("https://") ||
+      typeof sub.keys?.p256dh !== "string" ||
+      typeof sub.keys?.auth !== "string"
+    ) {
+      return json({ ok: false, reason: "bad-args" }, 400);
+    }
+    saveSubscription(body.deviceId, {
+      endpoint: sub.endpoint,
+      keys: { p256dh: sub.keys.p256dh, auth: sub.keys.auth },
+    });
+    return json({ ok: true });
+  }
+  // Server-truth for the client's launch check — pushManager.getSubscription()
+  // can't see a server-side prune (404/410/VAPID-mismatch), so the client asks.
+  if (method === "GET" && path === "/push/subscribed") {
+    const d = url.searchParams.get("device");
+    return json({ subscribed: isValidDeviceId(d) && getSubscription(d) !== null });
+  }
+  // sendBeacon target fired on visibilitychange→hidden: the client closes its
+  // EventSource FIRST (so no heartbeat re-touches the marker on a lingering
+  // socket), then beacons. Body is text/plain (sendBeacon can't set headers).
+  if (method === "POST" && path === "/push/goodbye") {
+    const d = (await req.text().catch(() => "")).trim();
+    if (isValidDeviceId(d)) clearDeviceConsumer(d);
+    return json({ ok: true });
+  }
   if (method === "GET" && path === "/repos") return json(await cachedRepos(""));
   if (method === "GET" && path === "/history") return json(await historyPayload(url.searchParams));
 
@@ -925,11 +1007,11 @@ async function route(req: Request): Promise<Response> {
     const blocked = listPendingApprovals().find((a) => a.sessionId === id);
     if (blocked) {
       decideApproval(id, body.decision, { reason, toolUseId: blocked.tool_use_id });
-      markPortkeySource(id);
+      markPortkeySource(id, { deviceId: deviceOf(req) });
       return json({ ok: true });
     }
     const r = await decideAttachedApproval(id, body.decision);
-    if (r.ok) markPortkeySource(id);
+    if (r.ok) markPortkeySource(id, { deviceId: deviceOf(req) });
     return sendResult(r);
   }
 
@@ -949,7 +1031,7 @@ async function route(req: Request): Promise<Response> {
     }
     const id = decodeURIComponent(rewind[1]!);
     const r = await rewindSession(id, body.upCount, body.text, body.mode);
-    if (r.ok) markPortkeySource(id, body.text); // rewind re-sends text → attributes by text-match
+    if (r.ok) markPortkeySource(id, { deviceId: deviceOf(req), text: body.text }); // rewind re-sends text → attributes by text-match
     return sendResult(r);
   }
 
@@ -968,13 +1050,13 @@ async function route(req: Request): Promise<Response> {
       pruneOldUploads();
       const r = await sendMessage(id, text, saved.paths);
       // Image-only (empty text) can't text-match; fall back to the turn's prompt_id anchor.
-      if (r.ok) markPortkeySource(id, text.trim() ? text : undefined);
+      if (r.ok) markPortkeySource(id, { deviceId: deviceOf(req), text: text.trim() ? text : undefined });
       return sendResult(r);
     }
     const body = (await req.json().catch(() => ({}))) as { text?: unknown };
     if (typeof body.text !== "string") return json({ ok: false, reason: "bad-text" }, 400);
     const r = await sendMessage(id, body.text);
-    if (r.ok) markPortkeySource(id, body.text);
+    if (r.ok) markPortkeySource(id, { deviceId: deviceOf(req), text: body.text });
     return sendResult(r);
   }
 
@@ -995,17 +1077,18 @@ async function route(req: Request): Promise<Response> {
     if (!valid) return json({ ok: false, reason: "bad-selection" }, 400);
     const id = decodeURIComponent(answer[1]!);
     const r = await answerSessionQuestion(id, sels as (number | number[])[], toolUseId);
-    if (r.ok) markPortkeySource(id); // no text ⇒ anchors the current turn's prompt_id
+    if (r.ok) markPortkeySource(id, { deviceId: deviceOf(req) }); // no text ⇒ anchors the current turn's prompt_id
     return sendResult(r);
   }
 
-  // "Chat about this": decline the held question so the agent yields and waits for the
-  // user's next message (the composer takes over on the phone).
+  // "Chat about this": decline the open question so the agent yields and waits for the
+  // user's next message (the composer takes over on the phone). Works held (decision
+  // file) and un-held (drives the native picker's own chat row).
   const clarify = path.match(/^\/sessions\/([^/]+)\/clarify$/);
   if (method === "POST" && clarify) {
     const id = decodeURIComponent(clarify[1]!);
     const r = clarifySessionQuestion(id);
-    if (r.ok) markPortkeySource(id); // no text ⇒ anchors the current turn's prompt_id
+    if (r.ok) markPortkeySource(id, { deviceId: deviceOf(req) }); // no text ⇒ anchors the current turn's prompt_id
     return sendResult(r);
   }
 
@@ -1106,7 +1189,8 @@ function isAllowedHost(host: string): boolean {
   return false;
 }
 
-export function startBridge(): void {
+/** Returns the server so tests can bind port 0 and stop it; `csm bridge` ignores it. */
+export function startBridge(): ReturnType<typeof Bun.serve> {
   const host = process.env.CSM_BRIDGE_HOST ?? "127.0.0.1";
   const port = Number(process.env.CSM_BRIDGE_PORT ?? "8473");
   rawToken = process.env.CSM_BRIDGE_TOKEN ?? "";
@@ -1126,7 +1210,10 @@ export function startBridge(): void {
   }
   watchEvents((id) => broadcast({ type: "session-changed", id }));
   setInterval(() => {
-    if (clients.size > 0) touchBridgeConsumer(); // keep the marker fresh while a phone is live
+    if (clients.size > 0) touchMarker(BRIDGE_CONSUMER); // keep the marker fresh while a phone is live
+    for (const deviceId of new Set(clients.values())) {
+      if (deviceId) touchDeviceConsumer(deviceId);
+    }
     pushAll(encoder.encode(":\n\n"));
   }, 15_000);
 
@@ -1156,7 +1243,7 @@ export function startBridge(): void {
     }
   }, 3000);
 
-  Bun.serve({
+  const server = Bun.serve({
     hostname: host,
     port,
     maxRequestBodySize: 32 * 1024 * 1024, // backstop for image uploads (client downscales first)
@@ -1169,9 +1256,10 @@ export function startBridge(): void {
       }
     },
   });
-  console.error(`csm bridge listening on http://${host}:${port}${FIXTURES ? " (fixtures mode — canned data)" : ""}`);
+  console.error(`csm bridge listening on http://${host}:${server.port}${FIXTURES ? " (fixtures mode — canned data)" : ""}`);
 
   // Pre-warm the /sessions projection so the phone's first request after a bridge
   // (re)start hits the served-from-cache path instead of paying the discovery sweep.
   if (!FIXTURES) void computeSessionsPayload().catch(() => {});
+  return server;
 }

@@ -1,8 +1,8 @@
 /**
- * Tier-4 push path (portkey ntfy). Covers the whole path short of APNs delivery:
- * the non-sensitive label, the tool→category map, deep-link origin resolution,
- * and the exact ntfy Request (ASCII Title header, emoji via Tags, Unicode in the
- * UTF-8 body). No phone needed.
+ * Tier-4 push path (portkey Web Push). Covers the non-sensitive label, the
+ * tool→category map, per-device SSE liveness, and the exact push payload the
+ * service worker renders. Delivery itself (encryption + POST) is pinned in
+ * web-push.test.ts. No phone needed.
  *
  * `home` helper first — freezes EVENTS_DIR under a temp HOME (pushAction reads it).
  */
@@ -10,20 +10,16 @@
 import "../../test/helpers/home";
 import { test, expect, beforeEach, afterEach } from "bun:test";
 import { mkdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
-import {
-  pushLabel,
-  pushAction,
-  bridgeOrigin,
-  portkeyConnected,
-  sendPushNotification,
-} from "./notifications";
-import { PATHS } from "./config";
+import { pushLabel, pushAction, deviceConnected, pushPayloadFor } from "./notifications";
+import { CONSUMERS_DIR } from "./web-push";
 import { EVENTS_DIR, eventLogPath } from "./hook-events";
-import type { HookEvent, NotificationConfig, Session, TransitionEvent } from "../types";
+import type { HookEvent, Session, TransitionEvent } from "../types";
 
 beforeEach(() => {
-  rmSync(EVENTS_DIR, { recursive: true, force: true });
-  mkdirSync(EVENTS_DIR, { recursive: true });
+  for (const dir of [EVENTS_DIR, CONSUMERS_DIR]) {
+    rmSync(dir, { recursive: true, force: true });
+    mkdirSync(dir, { recursive: true });
+  }
 });
 
 function mkSession(over: Partial<Session> = {}): Session {
@@ -55,14 +51,6 @@ function writePreToolUse(id: string, tool: string): void {
   writeFileSync(eventLogPath(id), JSON.stringify(e) + "\n");
 }
 
-const baseConfig: NotificationConfig = {
-  statusMonitor: true,
-  windowPrefix: true,
-  nativeNotification: true,
-  ntfyTopic: "mytopic",
-  bridgeUrl: "https://host.ts.net",
-};
-
 // --- pushLabel ---------------------------------------------------------------
 
 test('pushLabel humanizes the ai-name → "csm · Fix Auth"', () => {
@@ -89,104 +77,51 @@ test("pushAction maps the pending tool NAME to a non-sensitive category", () => 
   expect(pushAction("no-log")).toBe("needs permission"); // no pending tool
 });
 
-// --- portkeyConnected (bridge-consumer marker freshness) ----------------------
+// --- deviceConnected (per-device consumer marker freshness) -------------------
 
-const MARKER = `${PATHS.dir}/bridge-consumer`;
+test("deviceConnected: fresh marker → true, stale (>40s) → false, missing → false", () => {
+  const marker = `${CONSUMERS_DIR}/dev-a`;
+  expect(deviceConnected("dev-a")).toBe(false); // missing
 
-test("portkeyConnected: fresh marker → true, stale (>40s) → false, missing → false", () => {
-  rmSync(MARKER, { force: true });
-  expect(portkeyConnected()).toBe(false); // missing
-
-  writeFileSync(MARKER, "");
-  expect(portkeyConnected()).toBe(true); // fresh
+  writeFileSync(marker, "");
+  expect(deviceConnected("dev-a")).toBe(true); // fresh
+  expect(deviceConnected("dev-b")).toBe(false); // other devices unaffected
 
   const stale = (Date.now() - 41_000) / 1000;
-  utimesSync(MARKER, stale, stale);
-  expect(portkeyConnected()).toBe(false); // stale
-
-  rmSync(MARKER, { force: true });
+  utimesSync(marker, stale, stale);
+  expect(deviceConnected("dev-a")).toBe(false); // stale
 });
 
-// --- bridgeOrigin ------------------------------------------------------------
+// --- pushPayloadFor (exact payload the service worker renders) ----------------
 
-test("bridgeOrigin returns config.bridgeUrl when set (no detection)", () => {
-  expect(bridgeOrigin({ ...baseConfig, bridgeUrl: "https://explicit.ts.net" })).toBe(
-    "https://explicit.ts.net",
-  );
-});
-
-test("bridgeOrigin parses the https origin from `tailscale serve status` line 1", () => {
-  const orig = Bun.spawnSync;
-  Bun.spawnSync = ((): unknown => ({
-    exitCode: 0,
-    stdout: Buffer.from("https://host.ts.net (tailnet only)\n/ proxy http://127.0.0.1:8473\n"),
-  })) as typeof Bun.spawnSync;
-  try {
-    expect(bridgeOrigin({ ...baseConfig, bridgeUrl: undefined })).toBe("https://host.ts.net");
-  } finally {
-    Bun.spawnSync = orig;
-  }
-});
-
-// --- sendPushNotification (exact Request shape) ------------------------------
-
-test("blocked push: ASCII Title header, Tags: zap, category body, deep-link Click", async () => {
+test("blocked payload: label + category body, sessionId deep link, no capture text", () => {
   writePreToolUse("sess-1", "Bash");
-  const captured: { url?: string; init?: RequestInit } = {};
-  const origFetch = globalThis.fetch;
-  globalThis.fetch = (async (url: string, init: RequestInit) => {
-    captured.url = url;
-    captured.init = init;
-    return new Response("ok");
-  }) as typeof fetch;
-  try {
-    const event: TransitionEvent = {
-      sessionKey: "%1",
-      previousStatus: "running",
-      currentStatus: "waiting",
-      classification: "blocked",
-      session: mkSession(),
-    };
-    await sendPushNotification(event, event.session, baseConfig);
-  } finally {
-    globalThis.fetch = origFetch;
-  }
-
-  expect(captured.url).toBe("https://ntfy.sh/mytopic");
-  const headers = captured.init!.headers as Record<string, string>;
-  expect(headers.Title).toBe("Needs your input");
-  expect(/^[\x00-\x7F]*$/.test(headers.Title)).toBe(true); // header stays ASCII
-  expect(headers.Tags).toBe("zap");
-  expect(headers.Priority).toBe("high");
-  expect(headers.Click).toBe("https://host.ts.net/?s=sess-1");
-  expect(captured.init!.body).toBe("csm · Fix Auth — run a command");
+  const event: TransitionEvent = {
+    sessionKey: "%1",
+    previousStatus: "running",
+    currentStatus: "waiting",
+    classification: "blocked",
+    session: mkSession({ lastCapture: "SECRET pane contents" }),
+  };
+  const p = pushPayloadFor(event, event.session);
+  expect(p.title).toBe("⚡ csm · Fix Auth");
+  expect(p.body).toBe("needs your input — run a command");
+  expect(p.sessionId).toBe("sess-1");
+  expect(JSON.stringify(p)).not.toContain("SECRET"); // never leaks pane capture
 });
 
-test("turnComplete push: Title `Turn complete`, Tags: white_check_mark, label-only body", async () => {
-  const captured: { url?: string; init?: RequestInit } = {};
-  const origFetch = globalThis.fetch;
-  globalThis.fetch = (async (url: string, init: RequestInit) => {
-    captured.url = url;
-    captured.init = init;
-    return new Response("ok");
-  }) as typeof fetch;
-  try {
-    const event: TransitionEvent = {
-      sessionKey: "%1",
-      previousStatus: "running",
-      currentStatus: "ready",
-      classification: "turnComplete",
-      session: mkSession({ status: "ready" }),
-    };
-    await sendPushNotification(event, event.session, baseConfig);
-  } finally {
-    globalThis.fetch = origFetch;
-  }
-
-  const headers = captured.init!.headers as Record<string, string>;
-  expect(headers.Title).toBe("Turn complete");
-  expect(headers.Tags).toBe("white_check_mark");
-  expect(captured.init!.body).toBe("csm · Fix Auth");
+test("turnComplete payload: label title, state body", () => {
+  const event: TransitionEvent = {
+    sessionKey: "%1",
+    previousStatus: "running",
+    currentStatus: "ready",
+    classification: "turnComplete",
+    session: mkSession({ status: "ready" }),
+  };
+  const p = pushPayloadFor(event, event.session);
+  expect(p.title).toBe("✅ csm · Fix Auth");
+  expect(p.body).toBe("turn complete");
+  expect(p.sessionId).toBe("sess-1");
 });
 
 afterEach(() => {

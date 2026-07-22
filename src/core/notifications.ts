@@ -1,11 +1,12 @@
 import { statSync } from "node:fs";
 import type { NotificationConfig, Session, TransitionEvent } from "../types";
 import type { SessionStatus } from "./status";
-import { PATHS } from "./config";
 import { getAbovePrompt } from "./status";
 import { renameWindow, getWindowName } from "./tmux";
 import { sourceForSession } from "./input-source";
 import { pendingToolCall } from "./hook-events";
+import { CONSUMERS_DIR, sendWebPush } from "./web-push";
+import type { PushPayload } from "../types";
 
 export const ATTENTION_PREFIX = "⚡";
 export const RUNNING_PREFIX = "🔄";
@@ -216,17 +217,16 @@ export async function dispatchNotifications(
       }
     }
 
-    // Tier 4: phone push via ntfy — only when portkey drove the most recent input
-    // AND no portkey client is currently connected (an open phone already shows the
-    // change live via SSE; a push would just duplicate it).
-    // Skip unresolved sessions (no id ⇒ can't attribute).
-    if (
-      config.ntfyTopic &&
-      session.id &&
-      sourceForSession(session.id) === "portkey" &&
-      !portkeyConnected()
-    ) {
-      await sendPushNotification(event, session, config);
+    // Tier 4: Web Push — only to the device that drove the most recent input, and
+    // only when that device isn't watching live via SSE (an open portkey already
+    // shows the change; a push would just duplicate it). Skip unresolved sessions
+    // (no id ⇒ can't attribute) and markers without a device (pre-web-push format —
+    // self-heals on the next portkey action). No subscription ⇒ sendWebPush no-ops.
+    if (session.id) {
+      const src = sourceForSession(session.id);
+      if (src.source === "portkey" && src.deviceId && !deviceConnected(src.deviceId)) {
+        await sendWebPush(src.deviceId, pushPayloadFor(event, session));
+      }
     }
   }
 }
@@ -265,92 +265,37 @@ export function pushAction(sessionId: string): string {
 }
 
 /**
- * True when a portkey client is connected right now. The bridge touches
- * `~/.config/csm/bridge-consumer` on SSE connect and every 15s heartbeat while a
- * client is live, and unlinks it when the last client disconnects (iOS tears the
- * SSE socket down when portkey is backgrounded). ≤40s tolerates one missed
- * heartbeat — the same threshold the question-intercept hook uses.
+ * True when `deviceId` is watching live: the bridge touches `consumers/<deviceId>`
+ * on SSE connect + every 15s heartbeat and unlinks it on the goodbye beacon (sent
+ * when portkey is backgrounded). ≤40s tolerates one missed heartbeat — the crash/
+ * network fallback when the beacon never arrived.
  */
-export function portkeyConnected(): boolean {
+export function deviceConnected(deviceId: string): boolean {
   try {
-    return Date.now() - statSync(`${PATHS.dir}/bridge-consumer`).mtimeMs < 40_000;
+    return Date.now() - statSync(`${CONSUMERS_DIR}/${deviceId}`).mtimeMs < 40_000;
   } catch {
-    return false; // marker missing — no phone connected
+    return false; // marker missing — device not connected
   }
 }
 
-/** Cached bridge origin + when it was resolved (10-min TTL). */
-let _originCache: { value: string | null; at: number } | undefined;
-
 /**
- * Deep-link origin for the push `Click`: `config.bridgeUrl` if set, else the first
- * `https://…` token on line 1 of `tailscale serve status`
- * (`https://<host>.ts.net (tailnet only)`). Cached 10 min so a re-serve self-heals.
+ * Tier-4 payload. The service worker renders it verbatim and deep-links via the
+ * sessionId. NEVER includes `lastCapture` or any tool input/diff/command/question
+ * text — only the non-sensitive label + tool-name category (same policy as the
+ * ntfy era, even though Web Push is end-to-end encrypted).
  */
-export function bridgeOrigin(config: NotificationConfig): string | null {
-  if (config.bridgeUrl) return config.bridgeUrl;
-  const now = Date.now();
-  if (_originCache && now - _originCache.at < 10 * 60 * 1000) return _originCache.value;
-  let value: string | null = null;
-  try {
-    const res = Bun.spawnSync(["tailscale", "serve", "status"]);
-    if (res.exitCode === 0) {
-      const firstLine = new TextDecoder().decode(res.stdout).split("\n")[0] ?? "";
-      const m = firstLine.match(/https:\/\/\S+/);
-      if (m) value = m[0];
-    }
-  } catch {
-    value = null;
-  }
-  _originCache = { value, at: now };
-  return value;
-}
-
-/**
- * Tier 4: POST a phone notification to ntfy.sh. HTTP headers are ASCII/latin-1
- * only, so emoji ride the `Tags` header (ntfy prepends them to the title) and all
- * Unicode text (`·`, `—`) lives in the UTF-8 body. NEVER sends `lastCapture` or any
- * tool input/diff/command/question text — only the non-sensitive label + category.
- * 3s abort so a slow/offline ntfy can't stall the monitor's poll; failures swallowed.
- */
-export async function sendPushNotification(
-  event: TransitionEvent,
-  session: Session,
-  config: NotificationConfig,
-): Promise<void> {
-  const topic = config.ntfyTopic;
-  if (!topic) return;
-
+export function pushPayloadFor(event: TransitionEvent, session: Session): PushPayload {
+  // Title = session label (the scannable line — with one notification per session,
+  // a stack of pushes differs by title); body = state + category detail.
   const label = pushLabel(session);
-  let title: string, tags: string, body: string;
   if (event.classification === "blocked") {
-    title = "Needs your input";
-    tags = "zap";
-    body = `${label} — ${pushAction(session.id)}`;
-  } else {
-    title = "Turn complete";
-    tags = "white_check_mark";
-    body = label;
+    return {
+      title: `⚡ ${label}`,
+      body: `needs your input — ${pushAction(session.id)}`,
+      sessionId: session.id,
+    };
   }
-
-  const headers: Record<string, string> = { Title: title, Tags: tags, Priority: "high" };
-  const origin = bridgeOrigin(config);
-  if (origin) headers.Click = `${origin}/?s=${session.id}`;
-
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 3000);
-  try {
-    await fetch(`https://ntfy.sh/${encodeURIComponent(topic)}`, {
-      method: "POST",
-      headers,
-      body,
-      signal: controller.signal,
-    });
-  } catch {
-    // Non-fatal — Tiers 1–3 already delivered.
-  } finally {
-    clearTimeout(timer);
-  }
+  return { title: `✅ ${label}`, body: "turn complete", sessionId: session.id };
 }
 
 /**
