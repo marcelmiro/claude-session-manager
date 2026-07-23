@@ -335,10 +335,10 @@ const FIXTURE_HISTORY = {
     },
   ],
   before: null,
+  // cortex lives outside repoPaths in this fixture → no chip (rows still list).
   repos: [
     { repo: "csm", count: 4 },
     { repo: "throxy", count: 1 },
-    { repo: "cortex", count: 1 },
   ],
 };
 

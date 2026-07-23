@@ -293,17 +293,19 @@ export function deviceConnected(deviceId: string): boolean {
  * ntfy era, even though Web Push is end-to-end encrypted).
  */
 export function pushPayloadFor(event: TransitionEvent, session: Session): PushPayload {
-  // Title = session label (the scannable line — with one notification per session,
-  // a stack of pushes differs by title); body = state + category detail.
+  // Compact on purpose: iOS appends its own "from portkey" attribution line, so the
+  // title (state emoji + session label) is the whole message. Only blocked adds a
+  // body — the pending-tool category is the one detail worth a second line.
   const label = pushLabel(session);
   if (event.classification === "blocked") {
+    const action = pushAction(session.id);
     return {
       title: `⚡ ${label}`,
-      body: `needs your input — ${pushAction(session.id)}`,
+      body: action === "needs permission" ? action : `${action}?`,
       sessionId: session.id,
     };
   }
-  return { title: `✅ ${label}`, body: "turn complete", sessionId: session.id };
+  return { title: `✅ ${label}`, body: "", sessionId: session.id };
 }
 
 /**

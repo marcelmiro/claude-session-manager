@@ -1371,7 +1371,8 @@ function History() {
   const { rootRef, onTouchStart, onTouchEnd } = useSwipeBack(() => (showHistory.value = false));
   const rows = h ? h.rows : [];
 
-  // Chips: pinned repos first (same order the list uses), then by match count.
+  // Chips: pinned repos first (same order the list uses), then by match count. The
+  // server only facets repos under repoPaths — temp/scratch clones get no chip.
   const chips = h
     ? [...h.repos].sort((a, b) => repoRank(a.repo) - repoRank(b.repo) || b.count - a.count || a.repo.localeCompare(b.repo))
     : [];

@@ -105,12 +105,12 @@ test("blocked payload: label + category body, sessionId deep link, no capture te
   };
   const p = pushPayloadFor(event, event.session);
   expect(p.title).toBe("⚡ csm · Fix Auth");
-  expect(p.body).toBe("needs your input — run a command");
+  expect(p.body).toBe("run a command?");
   expect(p.sessionId).toBe("sess-1");
   expect(JSON.stringify(p)).not.toContain("SECRET"); // never leaks pane capture
 });
 
-test("turnComplete payload: label title, state body", () => {
+test("turnComplete payload: title only — iOS adds its own attribution line", () => {
   const event: TransitionEvent = {
     sessionKey: "%1",
     previousStatus: "running",
@@ -120,7 +120,7 @@ test("turnComplete payload: label title, state body", () => {
   };
   const p = pushPayloadFor(event, event.session);
   expect(p.title).toBe("✅ csm · Fix Auth");
-  expect(p.body).toBe("turn complete");
+  expect(p.body).toBe("");
   expect(p.sessionId).toBe("sess-1");
 });
 

@@ -502,6 +502,20 @@ async function historyPayload(params: URLSearchParams): Promise<unknown> {
   const repoCounts = new Map<string, number>();
   for (const e of matched) repoCounts.set(e.repo, (repoCounts.get(e.repo) ?? 0) + 1);
 
+  // Chips are for YOUR repos: base repo a direct child of a configured repoPaths dir
+  // (or $HOME itself, where general sessions live). Months of history accumulate
+  // temp/scratch clones Claude spawned — those get no chip (their rows still list
+  // under "all" and in search).
+  const home = homedir();
+  const roots = ((await loadConfig()).repoPaths ?? ["~/Documents"]).map((p) => p.replace(/^~/, home).replace(/\/+$/, ""));
+  const primary = new Set<string>();
+  for (const e of matched) {
+    const base = (e.baseRepoPath || "").replace(/\/+$/, "");
+    if (base === home || roots.some((r) => base.startsWith(`${r}/`) && !base.slice(r.length + 1).includes("/"))) {
+      primary.add(e.repo);
+    }
+  }
+
   let rows = repo ? matched.filter((e) => e.repo === repo) : matched;
   if (!q && Number.isFinite(before)) rows = rows.filter((e) => e.modified.getTime() < before);
   rows = rows.slice(0, HISTORY_PAGE);
@@ -528,7 +542,9 @@ async function historyPayload(params: URLSearchParams): Promise<unknown> {
     rows: payload,
     // Cursor only while browsing, and only when the page filled (more may exist).
     before: !q && rows.length === HISTORY_PAGE ? rows[rows.length - 1]!.modified.getTime() : null,
-    repos: [...repoCounts.entries()].map(([r, count]) => ({ repo: r, count })),
+    repos: [...repoCounts.entries()]
+      .filter(([r]) => primary.has(r))
+      .map(([r, count]) => ({ repo: r, count })),
   };
 }
 

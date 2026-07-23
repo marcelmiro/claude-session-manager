@@ -179,7 +179,10 @@ const ALIVE_TTL_MS = 15_000;
  */
 export async function runnerAlive(outputPath: string): Promise<boolean> {
   try {
-    const proc = Bun.spawn(["lsof", "-t", outputPath], { stdout: "ignore", stderr: "ignore" });
+    // Absolute path: the monitor runs under tmux's status-command environment,
+    // whose PATH lacks /usr/sbin — a bare "lsof" throws ENOENT there, which the
+    // catch below would misreport as a dead runner.
+    const proc = Bun.spawn(["/usr/sbin/lsof", "-t", outputPath], { stdout: "ignore", stderr: "ignore" });
     return (await proc.exited) === 0;
   } catch {
     return false; // lsof unavailable/failed — treat as dead rather than badge forever
