@@ -130,6 +130,54 @@ describe("worktree step: Enter forwards mode + text to the launch action", () =>
   });
 });
 
+describe("^O (C-o) launches without Claude wherever ⏎ would launch", () => {
+  test("worktree step: ^O launches with shellOnly, ⏎ without", () => {
+    const state = baseState({
+      step: "worktree",
+      worktreeMode: "reuse",
+      worktreeName: "ev-4-x",
+      selectedBranch: fb("cursor/ev-4-x"),
+    });
+    expect(handleWizardKey(state, "C-o", "")).toMatchObject({ type: "launch", mode: "reuse", shellOnly: true });
+    expect(handleWizardKey(state, "return", "")).toMatchObject({ type: "launch", shellOnly: false });
+  });
+
+  test("branch step: ^O on the current branch launches shell-only; elsewhere it's a no-op", () => {
+    const current = baseState({ filteredBranches: [fb("feature", false, true)], branchIndex: 0 });
+    expect(handleWizardKey(current, "C-o", "")).toMatchObject({ type: "launch", mode: "current", shellOnly: true });
+
+    const other = baseState({ filteredBranches: [fb("feature")], branchIndex: 0 });
+    expect(handleWizardKey(other, "C-o", "").type).toBe("noop");
+    expect(other.step).toBe("branch"); // did not advance to the chooser
+  });
+
+  test("worktree-choice step: ^O launches only from 'checkout in place'", () => {
+    const checkout = baseState({ step: "worktree-choice", selectedBranch: fb("feature"), worktreeChoiceIndex: 2 });
+    expect(handleWizardKey(checkout, "C-o", "")).toMatchObject({ type: "launch", mode: "checkout", shellOnly: true });
+
+    const reuse = baseState({ step: "worktree-choice", selectedBranch: fb("feature"), worktreeChoiceIndex: 1 });
+    expect(handleWizardKey(reuse, "C-o", "").type).toBe("noop");
+    expect(reuse.step).toBe("worktree-choice"); // did not advance to the name step
+  });
+
+  test("repo step: ^O on a worktree row launches shell-only; on a base it's a no-op", () => {
+    const state = baseState({ step: "repo", repos: REPOS, selectedRepo: null, repoFilter: "tf-90" });
+    applyRepoFilter(state);
+    expect(handleWizardKey(state, "C-o", "")).toMatchObject({ type: "launch", mode: "current", shellOnly: true });
+
+    const onBase = baseState({ step: "repo", repos: REPOS, selectedRepo: null });
+    applyRepoFilter(onBase);
+    expect(handleWizardKey(onBase, "C-o", "").type).toBe("noop");
+    expect(onBase.step).toBe("repo"); // did not advance to the branch step
+  });
+
+  test("⏎ launch actions carry shellOnly: false", () => {
+    const state = baseState({ step: "repo", repos: REPOS, selectedRepo: null, repoFilter: "tf-90" });
+    applyRepoFilter(state);
+    expect(handleWizardKey(state, "return", "")).toMatchObject({ type: "launch", shellOnly: false });
+  });
+});
+
 // Repo-step fixtures: two bases, throxy has two worktrees nested after it.
 const REPOS: WizardRepo[] = [
   { name: "throxy", path: "/d/throxy", currentBranch: "main", hasSession: true, worktreeCount: 2 },

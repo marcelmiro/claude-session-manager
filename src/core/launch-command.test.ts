@@ -70,3 +70,26 @@ describe("buildLaunchCommand", () => {
     expect(cmd).toContain("git checkout -b feature --track origin/feature 2>/dev/null || git checkout --end-of-options feature");
   });
 });
+
+describe("buildLaunchCommand shell-only (withClaude=false)", () => {
+  test("current mode returns empty — plain window, no command", () => {
+    expect(buildLaunchCommand("current", repo, { name: "main", isRemote: false, isCurrent: true }, "", false)).toBe("");
+  });
+
+  test("reuse keeps the git setup + cd, drops the claude tail", () => {
+    const cmd = buildLaunchCommand("reuse", repo, local("feature"), "feature", false);
+    expect(cmd).toBe("git worktree add /tmp/proj/csm-feature feature && cd /tmp/proj/csm-feature");
+  });
+
+  test("new-branch keeps the cd into the worktree, drops the claude tail", () => {
+    const cmd = buildLaunchCommand("new-branch", repo, local("main"), "my-feature", false);
+    expect(cmd.endsWith("&& cd /tmp/proj/csm-my-feature")).toBe(true);
+    expect(cmd).not.toContain("claude");
+  });
+
+  test("checkout drops the claude tail", () => {
+    expect(buildLaunchCommand("checkout", repo, local("feature"), "", false)).toBe(
+      "git checkout --end-of-options feature",
+    );
+  });
+});

@@ -400,7 +400,8 @@ export async function renderWizardPreview(previewBox: Widgets.BoxElement, state:
         `{${C.muted}-fg}  Worktree{/${C.muted}-fg}\n\n` +
         `  {${C.dim}-fg}Branch:{/${C.dim}-fg} {${C.fg}-fg}${label}{/${C.fg}-fg}\n` +
         `  {${C.dim}-fg}Path:{/${C.dim}-fg}   {${C.fg}-fg}${abbreviatePath(sel.path)}{/${C.fg}-fg}\n\n` +
-        `  {${C.dim}-fg}⏎ launches Claude here directly{/${C.dim}-fg}`,
+        `  {${C.dim}-fg}⏎ launches Claude here directly{/${C.dim}-fg}\n` +
+        `  {${C.dim}-fg}^O opens a shell here (no Claude){/${C.dim}-fg}`,
       );
       return;
     }
@@ -530,31 +531,38 @@ export async function renderWizardPreview(previewBox: Widgets.BoxElement, state:
  */
 export function renderWizardStatusBar(statusBar: Widgets.BoxElement, state: WizardState): void {
   let content = "";
+  // ^O = launch without Claude; hinted only where \u23CE would launch.
+  const shellHint = (label: string) => `  {${C.peach}-fg}^O{/${C.peach}-fg} {${C.dim}-fg}${label}{/${C.dim}-fg}`;
 
   if (state.step === "repo") {
+    const onWorktree = state.filteredRepos[state.repoIndex]?.isWorktree;
     content =
       `{${C.peach}-fg}type{/${C.peach}-fg} {${C.dim}-fg}filter{/${C.dim}-fg}` +
       `  {${C.peach}-fg}\u2191/\u2193{/${C.peach}-fg} {${C.dim}-fg}move{/${C.dim}-fg}` +
       `  {${C.peach}-fg}\u2192{/${C.peach}-fg} {${C.dim}-fg}worktrees{/${C.dim}-fg}` +
       `  {${C.peach}-fg}\u23CE{/${C.peach}-fg} {${C.dim}-fg}select{/${C.dim}-fg}` +
+      (onWorktree ? shellHint("shell only") : "") +
       `  {${C.peach}-fg}Esc{/${C.peach}-fg} {${C.dim}-fg}cancel{/${C.dim}-fg}`;
   } else if (state.step === "branch") {
     content =
       `{${C.peach}-fg}↑/↓{/${C.peach}-fg} {${C.dim}-fg}move{/${C.dim}-fg}` +
       `  {${C.peach}-fg}type{/${C.peach}-fg} {${C.dim}-fg}to filter{/${C.dim}-fg}` +
       `  {${C.peach}-fg}\u23CE{/${C.peach}-fg} {${C.dim}-fg}select{/${C.dim}-fg}` +
+      (state.filteredBranches[state.branchIndex]?.isCurrent ? shellHint("shell only") : "") +
       `  {${C.peach}-fg}^R{/${C.peach}-fg} {${C.dim}-fg}fetch{/${C.dim}-fg}` +
       `  {${C.peach}-fg}Esc{/${C.peach}-fg} {${C.dim}-fg}back{/${C.dim}-fg}`;
   } else if (state.step === "worktree-choice") {
     content =
       `{${C.peach}-fg}j/k{/${C.peach}-fg} {${C.dim}-fg}move{/${C.dim}-fg}` +
       `  {${C.peach}-fg}\u23CE{/${C.peach}-fg} {${C.dim}-fg}select{/${C.dim}-fg}` +
+      (state.worktreeChoiceIndex === 2 ? shellHint("shell only") : "") +
       `  {${C.peach}-fg}Esc{/${C.peach}-fg} {${C.dim}-fg}back{/${C.dim}-fg}`;
   } else if (state.step === "worktree") {
     const label = state.worktreeMode === "reuse" ? "directory name" : "branch name";
     content =
       `{${C.peach}-fg}type{/${C.peach}-fg} {${C.dim}-fg}${label}{/${C.dim}-fg}` +
-      `  {${C.peach}-fg}\u23CE{/${C.peach}-fg} {${C.dim}-fg}launch{/${C.dim}-fg}` +
+      `  {${C.peach}-fg}\u23CE{/${C.peach}-fg} {${C.dim}-fg}launch Claude{/${C.dim}-fg}` +
+      shellHint("worktree only") +
       `  {${C.peach}-fg}Esc{/${C.peach}-fg} {${C.dim}-fg}back{/${C.dim}-fg}`;
   }
 
@@ -636,16 +644,20 @@ function handleRepoKey(state: WizardState, keyName: string, ch: string): WizardA
       return { type: "noop" };
     }
     case "enter":
-    case "return": {
+    case "return":
+    case "C-o": {
       if (state.filteredRepos.length === 0) return { type: "noop" };
       const sel = state.filteredRepos[state.repoIndex];
-      state.selectedRepo = sel;
       if (sel.isWorktree) {
-        // Existing worktree: launch Claude there directly on its current branch.
+        // Existing worktree: launch there directly on its current branch —
+        // with Claude (⏎), or as a plain shell (^O).
+        state.selectedRepo = sel;
         const branch: WizardBranch = { name: sel.currentBranch, isRemote: false, isCurrent: true, fullRef: sel.currentBranch };
         state.selectedBranch = branch;
-        return { type: "launch", repo: sel, branch, mode: "current", text: "" };
+        return { type: "launch", repo: sel, branch, mode: "current", text: "", shellOnly: keyName === "C-o" };
       }
+      if (keyName === "C-o") return { type: "noop" }; // ^O only launches; ⏎ advances
+      state.selectedRepo = sel;
       state.step = "branch";
       state.branchIndex = 0;
       state.branchFilter = "";
@@ -707,16 +719,19 @@ function handleBranchFilterKey(state: WizardState, keyName: string, ch: string):
       }
       return { type: "noop" };
     case "enter":
-    case "return": {
+    case "return":
+    case "C-o": {
       if (state.filteredBranches.length === 0) return { type: "noop" };
       const branch = state.filteredBranches[state.branchIndex];
-      state.selectedBranch = branch;
 
       if (branch.isCurrent) {
-        // Current branch: launch directly, no chooser needed
-        return { type: "launch", repo: state.selectedRepo!, branch, mode: "current", text: "" };
+        // Current branch: launch directly, no chooser needed. ^O skips Claude.
+        state.selectedBranch = branch;
+        return { type: "launch", repo: state.selectedRepo!, branch, mode: "current", text: "", shellOnly: keyName === "C-o" };
       }
+      if (keyName === "C-o") return { type: "noop" }; // ^O only launches; ⏎ advances
 
+      state.selectedBranch = branch;
       state.step = "worktree-choice";
       // Feature branch → default to "reuse" (option 1); trunk → "new branch" (option 0).
       state.worktreeChoiceIndex = isTrunk(branch, state.defaultBranch) ? 0 : 1;
@@ -796,15 +811,17 @@ function handleWorktreeChoiceKey(state: WizardState, keyName: string): WizardAct
       state.worktreeChoiceIndex = Math.max(state.worktreeChoiceIndex - 1, 0);
       return { type: "render" };
     case "enter":
-    case "return": {
+    case "return":
+    case "C-o": {
       if (Date.now() < state.enterDebounceUntil) return { type: "noop" };
       const branch = state.selectedBranch!;
       const repo = state.selectedRepo!;
 
       if (state.worktreeChoiceIndex === 2) {
         // Checkout in place → launch directly (isCurrent can't reach here, but guard anyway)
-        return { type: "launch", repo, branch, mode: branch.isCurrent ? "current" : "checkout", text: "" };
+        return { type: "launch", repo, branch, mode: branch.isCurrent ? "current" : "checkout", text: "", shellOnly: keyName === "C-o" };
       }
+      if (keyName === "C-o") return { type: "noop" }; // ^O only launches; ⏎ advances
 
       // New worktree (new-branch or reuse) → advance to name input
       state.step = "worktree";
@@ -840,12 +857,13 @@ function handleWorktreeKey(state: WizardState, keyName: string, ch: string): Wiz
   // Step-specific keys first
   switch (keyName) {
     case "enter":
-    case "return": {
+    case "return":
+    case "C-o": {
       if (Date.now() < state.enterDebounceUntil) return { type: "noop" };
       if (!state.worktreeName.trim()) return { type: "noop" };
       const repo = state.selectedRepo!;
       const branch = state.selectedBranch!;
-      return { type: "launch", repo, branch, mode: state.worktreeMode, text: state.worktreeName };
+      return { type: "launch", repo, branch, mode: state.worktreeMode, text: state.worktreeName, shellOnly: keyName === "C-o" };
     }
     case "escape":
       // Go back to worktree-choice step

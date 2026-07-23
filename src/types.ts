@@ -219,7 +219,7 @@ export type WizardAction =
   | { type: "cancel" }
   | { type: "loadBranches" }
   | { type: "fetch" }
-  | { type: "launch"; repo: WizardRepo; branch: WizardBranch; mode: WorktreeMode; text: string };
+  | { type: "launch"; repo: WizardRepo; branch: WizardBranch; mode: WorktreeMode; text: string; shellOnly: boolean };
 
 // --- Global search types ---
 

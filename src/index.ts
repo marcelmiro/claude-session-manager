@@ -1051,7 +1051,7 @@ screen.key(["S-n"], async () => {
   const branch = { name: currentBranch, isRemote: false, isCurrent: true };
 
   flashStatusMessage(`{${C.muted}-fg}Launching in ${repoName}…{/${C.muted}-fg}`);
-  const error = await handleWizardLaunch(repo, branch, "current", "");
+  const error = await handleWizardLaunch(repo, branch, "current", "", false);
   if (error) {
     flashStatusMessage(`{${C.red}-fg}${error}{/${C.red}-fg}`, 4000);
   }
@@ -1484,7 +1484,7 @@ screen.on("keypress", async (_ch: string, key: any) => {
       wizardLaunching = true;
       statusBar.setContent(`  {${C.muted}-fg}Launching…{/${C.muted}-fg}`);
       screen.render();
-      const error = await handleWizardLaunch(action.repo, action.branch, action.mode, action.text);
+      const error = await handleWizardLaunch(action.repo, action.branch, action.mode, action.text, action.shellOnly);
       wizardLaunching = false;
       if (error) {
         // Reachable when tmux session lookup fails, or when a "reuse branch"
@@ -1537,13 +1537,15 @@ function getUniqueRepos(displayRows: DisplayRow[]): Array<{ name: string; path: 
   return [...seen.values()];
 }
 
-/** Handle wizard launch: create tmux window immediately, run git + claude inside it.
+/** Handle wizard launch: create tmux window immediately, run git + claude inside it
+ *  (or git setup + a plain shell when shellOnly — worktree without a Claude session).
  *  Returns null on success (exits process), or error string on failure. */
 async function handleWizardLaunch(
   repo: WizardRepo,
   branch: { name: string; isRemote: boolean; isCurrent: boolean },
   mode: WorktreeMode,
   text: string,
+  shellOnly: boolean,
 ): Promise<string | null> {
   if (isExiting) return null;
 
@@ -1570,9 +1572,12 @@ async function handleWizardLaunch(
   cleanup();
   try {
     // Compound command: git setup (if any) then claude, run inside the new window.
-    const cmd = buildLaunchCommand(mode, repo, branch, text);
+    const cmd = buildLaunchCommand(mode, repo, branch, text, !shellOnly);
 
-    if (cmd === "claude") {
+    if (cmd === "") {
+      // Shell-only with no git setup: plain window on the default shell.
+      await Bun.$`tmux new-window -a -t ${targetSession} -n ${repo.name} -c ${repo.path}`.quiet();
+    } else if (cmd === "claude") {
       // Simple case: launch claude directly as the window command (no shell race)
       await Bun.$`tmux new-window -a -t ${targetSession} -n ${repo.name} -c ${repo.path} claude`.quiet();
     } else {
