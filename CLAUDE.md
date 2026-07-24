@@ -254,15 +254,15 @@ A changed-files strip at the end of the thread → full file list → per-file d
 - `/changes` has a 1s TTL cache; `/diff` reuses it to resolve a rename's old path, so a tool chip and a file-list row agree.
 - The file list's top row links out to the branch's GitHub PR (`core/pull-request.ts` → `GET /sessions/:id/pr`, 60s TTL since it shells out to `gh`). Depth lives in the PR, not here; a merged PR is a "this session is done" signal. Why this instead of an in-app reviewer, and the variants rejected: [ADR 5](docs/adr/0005-link-out-to-the-pull-request.md).
 
+### Portkey stop + restore-on-revert
+
+Double-tap Stop sends Escape. Claude Code then either **reverts** the prompt (pre-stream + empty input: text moves back into the Mac's input box; JSONL shows a childless bare-leaf prompt, no marker) or **keeps** it (an interrupt marker is written; occupied input or stream already started). Portkey mirrors the TUI: on a confirmed revert the client prefills the composer with the sent text (`interruptRestore` in `app.js`, keyboard raised gesture-time on the Stop tap), hides the dangling leaf from the thread (transient, self-heals at next send), and clears the pane's input copy via `POST /sessions/:id/clear-input` — otherwise the parked text flips every future stop into a keep. Kept interrupts stay in the thread with the interrupt line, no restore. The send path's draft guard kills the whole draft row-by-row into the kill-ring (`killInput` — one `C-u` only kills the cursor's display row; never send `Up`, it recalls history) and restores it with a single `C-y`. Lab-verified rules + rejected designs: [ADR 9](docs/adr/0009-interrupt-revert-mirroring.md).
+
 ### Portkey fork session
 
 The long-press session sheet (alongside Archive) offers **Fork session** — same mechanics as the TUI `f`: `POST /sessions/:id/fork` → `forkSession` (`core/session-api.ts`) mints a fork id, launches `claude --session-id <forkId> --resume=<parent> --fork-session` in a new unfocused window (`launchForkWindow`, `-a -d`), blocks until the prompt is live, then returns the fork id. The sheet uses a two-tap confirm (non-destructive → mint fill, not red); the client shows the new-session `launching …` hint and opens straight into the fork.
 
 - **Fork transcript seeding** (`seedForkTranscript`): Claude writes a fork's JSONL *lazily* — nothing lands on disk until the fork's first turn. On the phone that meant (a) an empty conversation and (b) the fork missing from Home (discovery blanks a live pane's id when no JSONL backs it — `buildActiveSession`). So after boot (before any turn — Claude hasn't created the file yet), `forkSession` copies the parent's transcript to the fork's path (`projects/<encode(effectivePath)>/<forkId>.jsonl`). Claude then treats it as the session history and *appends* the first turn (verified: no duplication) — so the fork is readable and discoverable immediately, and diverges cleanly on first message. Best-effort; a failed seed degrades to empty-until-first-turn.
-
-### Portkey /clear + /compact auto-follow
-
-`/clear` and `/compact` retire the open session's id and mint a NEW one on the SAME tmux pane, which would otherwise strand the phone on the now-archived old id (empty, restore-only). The link is the pane: `projectSession` exposes `paneId` on active sessions, and the client's `followClearedSession` (run after every sessions refresh) remembers the open session's pane while it's live, then — when that session flips to `archived` and a *different* live session now holds the same pane — `open()`s the successor. A real kill leaves the pane empty (no successor → the restore bar still shows). Stateless beyond the remembered pane; a server-side successor signal was rejected because the only old→new source (`changedPaneIds`) is one-shot and consumed by whichever `discoverSessions` call runs first (the `/restore` and `/fork` routes call it too).
 
 ## Conventions
 

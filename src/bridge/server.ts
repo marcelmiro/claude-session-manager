@@ -32,6 +32,7 @@ import {
   rewindSession,
   archiveSession,
   interruptSession,
+  clearPaneInput,
   resolveSessionPane,
   readPaneStatusline,
   decideAttachedApproval,
@@ -1195,6 +1196,16 @@ async function route(req: Request): Promise<Response> {
     const result = await interruptSession(id);
     if (result.ok) reconcileAfterInterrupt(id);
     return sendResult(result);
+  }
+
+  // Clear the pane's input box. Called by the phone after a confirmed interrupt-revert:
+  // Claude Code parked the interrupted prompt back in the pane's input, the composer has
+  // restored it phone-side, and the pane copy would otherwise flip future interrupts from
+  // revert to keep and pollute the draft guard (ADR 9). Recoverable at the Mac via C-y.
+  const clearInput = path.match(/^\/sessions\/([^/]+)\/clear-input$/);
+  if (method === "POST" && clearInput) {
+    const id = decodeURIComponent(clearInput[1]!);
+    return sendResult(await clearPaneInput(id));
   }
 
   // Switch model or reasoning effort. Body carries EXACTLY ONE of `model`/`effort`, each

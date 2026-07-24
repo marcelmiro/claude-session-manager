@@ -35,6 +35,7 @@ import {
   answerSessionQuestion,
   clarifySessionQuestion,
   interruptSession,
+  clearPaneInput,
   readContextUsage,
   pickerCursorText,
   cursorMatches,
@@ -661,6 +662,11 @@ test("clarifySessionQuestion: hook holding → writes a clarify decision, no pan
 
 test("interruptSession: no pane mapping → no-pane, sends nothing", async () => {
   const r = await interruptSession("ghost-session");
+  expect(r).toEqual({ ok: false, reason: "no-pane" });
+});
+
+test("clearPaneInput: no pane mapping → no-pane, sends nothing", async () => {
+  const r = await clearPaneInput("ghost-session");
   expect(r).toEqual({ ok: false, reason: "no-pane" });
 });
 

@@ -1075,6 +1075,21 @@ export async function interruptSession(sessionId: string): Promise<SendResult> {
   return { ok: true };
 }
 
+/**
+ * Clear the pane's input box — called by the phone after a confirmed interrupt-revert.
+ * A pre-stream interrupt on an empty input makes Claude Code move the prompt text back
+ * into its own input box (ADR 9). Once the phone composer has restored that text, the
+ * copy left in the pane is a trap: an occupied input flips every FUTURE pre-stream
+ * interrupt from revert to keep, and feeds the next send's draft guard a phantom draft.
+ * Killed, not erased — the text lands in Claude's kill-ring, so C-y at the Mac still
+ * recovers it. Fails on no-pane like the other send-keys ops.
+ */
+export async function clearPaneInput(sessionId: string): Promise<SendResult> {
+  const paneId = await resolveSessionPane(sessionId);
+  if (!paneId) return { ok: false, reason: "no-pane" };
+  return (await killInput(paneId)) ? { ok: true } : { ok: false, reason: "clear-failed" };
+}
+
 /** True when an AskUserQuestion is open (vs. a permission prompt or no pending tool). */
 export function hasOpenQuestion(pending: PendingToolCall | null): boolean {
   return pending?.name === "AskUserQuestion" && !!pending.question;
@@ -1103,7 +1118,7 @@ export function composeMessageSteps(text: string, imagePaths: string[] = []): Me
 
 /** One step in the full send plan — the message steps plus the draft stash/restore guard. */
 export type SendStep =
-  | { kind: "stash" } // cut a Mac-side draft into Claude's kill-ring (C-u) before sending
+  | { kind: "stash" } // cut a Mac-side draft into Claude's kill-ring (killInput) before sending
   | { kind: "text"; text: string } // text-only: the proven coalescing-safe literal+Enter
   | { kind: "paste"; text: string } // bracketed-paste an image path → [Image #N]
   | { kind: "literal"; text: string } // type caption text literally
@@ -1123,8 +1138,9 @@ export type SendStep =
  *
  * Draft guard: the Mac may be attached with a half-typed draft in the prompt. A bare send
  * types our message onto the END of that draft and submits BOTH as one turn. So when a
- * draft is present we wrap the body in `stash` (cut the draft into Claude's kill-ring with
- * C-u) … `restore` (once our message clears the prompt, yank the draft back with C-y) —
+ * draft is present we wrap the body in `stash` (kill the whole draft into Claude's
+ * kill-ring — see `killInput`) … `restore` (once our message clears the prompt, yank it
+ * back with C-y) —
  * leaving it waiting, unsubmitted, for when the user returns to the Mac. Gated on a real
  * draft so we never yank stale kill-ring content into an otherwise-empty prompt.
  */
@@ -1146,24 +1162,60 @@ export function buildSendPlan(
   ];
 }
 
-/** Execute one `SendStep` against the pane — the thin, effectful tmux wrapper. */
-async function runSendStep(paneId: string, step: SendStep): Promise<void> {
+/**
+ * Kill the pane's ENTIRE input into Claude's kill-ring, from any cursor position.
+ * Claude's input editor is display-row scoped: one C-u kills only from the cursor to the
+ * start of its row, and repeated C-u walks upward — rows BELOW the cursor and wrapped
+ * continuation rows survive a single C-u. A reverted prompt (see `clearPaneInput`) leaves
+ * the cursor mid-text, which is how sends used to splice the message into leftover draft
+ * rows. So: walk to the bottom first — Down is history-next, a no-op at the newest entry
+ * (Up must NEVER be sent here: at the top row it RECALLS history and replaces the input)
+ * — then C-e to the row end, then kill row by row until the input reads empty.
+ * Consecutive kills accumulate into ONE kill-ring chain, so a later single C-y restores
+ * the whole draft, newlines included — but ANY motion (or typing) between kills RESETS
+ * the chain (verified: the earlier chunk drops out of the yank). Hence the strict shape
+ * here: all motions first, then only kills — never retry with a second walk. The Downs
+ * are gapped (100ms — the input editor registered arrows reliably at 60-80ms in the same
+ * lab; the picker's 250ms KEY_GAP floor is a different widget) so a dropped Down can't
+ * strand rows below the cursor. Returns whether the input actually read empty; callers
+ * fail loud on false — proceeding would splice the message into the remnant.
+ * All verified against a live pane (ADR 9).
+ */
+async function killInput(paneId: string): Promise<boolean> {
+  for (let i = 0; i < 12; i++) {
+    await sendKey(paneId, "Down");
+    await Bun.sleep(100);
+  }
+  await sendKey(paneId, "C-e");
+  await Bun.sleep(KEY_GAP);
+  for (let i = 0; i < 12 && inputPending(await capturePane(paneId)); i++) {
+    await sendKey(paneId, "C-u");
+    await Bun.sleep(KEY_GAP);
+  }
+  return !inputPending(await capturePane(paneId));
+}
+
+/**
+ * Execute one `SendStep` against the pane — the thin, effectful tmux wrapper.
+ * Returns false to ABORT the remaining steps (only `stash` does, when the draft
+ * wouldn't fully clear — typing into the remnant would splice the message into it).
+ */
+async function runSendStep(paneId: string, step: SendStep): Promise<boolean> {
   switch (step.kind) {
     case "stash":
-      await sendKey(paneId, "C-u"); // Claude's kill-line: clears the input, holds it for C-y
-      await Bun.sleep(KEY_GAP);
-      return;
+      // Whole draft into the kill-ring; C-y (restore) yanks it back.
+      return killInput(paneId);
     case "text":
       await sendTextAndEnter(paneId, step.text);
-      return;
+      return true;
     case "paste":
       await sendBracketedPaste(paneId, step.text);
       await Bun.sleep(KEY_GAP);
-      return;
+      return true;
     case "literal":
       await sendLiteral(paneId, step.text);
       await Bun.sleep(KEY_GAP);
-      return;
+      return true;
     case "submit":
       // The Enter after an image paste is dropped if the TUI is still ingesting the pasted
       // image (base64-embedded at paste time) — reliably so on a session's first message
@@ -1174,7 +1226,7 @@ async function runSendStep(paneId: string, step: SendStep): Promise<void> {
         await Bun.sleep(450);
         if (!inputPending(await capturePane(paneId))) break;
       }
-      return;
+      return true;
     case "restore":
       // Yank ONLY after our message clears the prompt — a premature C-y would paste the
       // draft into the not-yet-submitted input and ride along with our message.
@@ -1182,8 +1234,8 @@ async function runSendStep(paneId: string, step: SendStep): Promise<void> {
         if (!inputPending(await capturePane(paneId))) break;
         await Bun.sleep(KEY_GAP);
       }
-      await sendKey(paneId, "C-y"); // Claude's yank: re-adds the draft cut by the stash C-u
-      return;
+      await sendKey(paneId, "C-y"); // Claude's yank: re-adds the draft cut by the stash kills
+      return true;
   }
 }
 
@@ -1205,7 +1257,10 @@ export async function sendMessage(
   if (!paneId) return { ok: false, reason: "no-pane" };
   const hadDraft = inputPending(await capturePane(paneId));
   for (const step of buildSendPlan(text, imagePaths, hadDraft)) {
-    await runSendStep(paneId, step);
+    // A failed stash aborts BEFORE the message is typed: proceeding would splice it into
+    // the remnant draft and submit both as one turn. The phone surfaces the failure and
+    // the partially-killed draft stays recoverable at the Mac (C-y).
+    if (!(await runSendStep(paneId, step))) return { ok: false, reason: "draft-stash-failed" };
   }
   return { ok: true };
 }
@@ -1253,7 +1308,8 @@ export async function setSessionModelEffort(
   if (!paneId) return { ok: false, reason: "no-pane" };
   const hadDraft = inputPending(await capturePane(paneId));
   for (const step of buildSendPlan(`/${kind} ${value}`, [], hadDraft)) {
-    await runSendStep(paneId, step);
+    // Same abort-on-failed-stash as sendMessage: never type into a remnant draft.
+    if (!(await runSendStep(paneId, step))) return { ok: false, reason: "draft-stash-failed" };
   }
   for (let i = 0; i < 12; i++) {
     const line = extractConfirmation(await captureAfter(paneId, 200));

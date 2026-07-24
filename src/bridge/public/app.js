@@ -74,6 +74,7 @@ const historyRepo = signal(""); // active repo chip ("" = all)
 const historyMore = signal(false); // a page-append fetch is in flight
 const historySession = signal(null); // session-shaped stand-in for a History row absent from sessions.value (>24h)
 const flash = signal(""); // transient FAILURE feedback in the detail view (successes stay silent)
+const flashKind = signal(""); // "" = error styling; "notice" = neutral (restore-on-interrupt)
 const copied = signal(false); // transient "✓ copied" pill (clipboard success needs visible feedback)
 const pendingSends = signal([]); // optimistic user bubbles awaiting transcript catch-up
 const showNewSession = signal(false); // repo picker for launching a new session
@@ -167,7 +168,28 @@ function upCountByIndex(turns) {
 const rewindFloor = signal(null);
 // One-shot composer autofill: {text, sessionId}. Set on a successful rewind to drop the
 // rewound message back into the box (TUI parity); the Composer consumes and clears it.
+// `keepDraft: true` makes the fill yield to text already in the box instead of clobbering it.
 const composerPrefill = signal(null);
+// Restore-on-interrupt: interrupting right after a send makes Claude Code hand the prompt
+// back to its own input box — the turn drops off the active branch, so the phone's thread
+// loses the message and the composer is empty, with the text stranded in the Mac pane.
+// After a Stop fires we watch the refetched transcript: if the last-sent text is no longer
+// a user turn (and not queued), it returns to the composer, mirroring the TUI. If it's
+// still in the thread (a mid-turn interrupt), the intent expires silently.
+const lastSentText = new Map(); // sid → text; read only inside event handlers, not reactive
+const interruptRestore = signal(null); // {sessionId, text, until} | null
+// Interrupted prompts hidden from the thread once their text was restored to the composer:
+// [{sessionId, index, text}]. Claude Code never deletes the turn from the JSONL — the
+// revert only materializes as branch abandonment at the NEXT send, and sometimes not even
+// then — so without this the thread keeps showing the very message the user is re-editing.
+// Entries are index+text guarded at render: if the branch changed and that index no longer
+// holds the exact prompt, the entry is inert (never hides an unrelated turn). This covers
+// ONLY the reverted bare-leaf shape (prompt dangling at the tip, no interrupt marker) —
+// indistinguishable from a just-sent message by structure alone, so it needs this
+// moment-of-interrupt knowledge. It self-heals: the next send forks the branch and the
+// turn drops out server-side. Marker-shaped interrupts are never hidden — the Mac TUI
+// keeps those messages in the conversation, and portkey mirrors the TUI.
+const hiddenInterrupts = signal([]);
 // Optimistic "Chat about this": holds the sessionId whose open question we just declined,
 // so the dock flips to the composer instantly (before the hook's deny resolves and the
 // transcript poll drops openQuestions). Cleared on reconcile (poll shows no question), on
@@ -320,6 +342,46 @@ async function refreshTranscript() {
     // Retire the optimistic "Chat about this" flip once the declined question is actually
     // gone from the transcript (the deny resolved → PostToolUse cleared openQuestions).
     if (clarifying.value === id && !(data.openQuestions || data.openQuestion)) clarifying.value = null;
+    // Resolve a pending restore-on-interrupt — mirroring the Mac TUI exactly (verified by
+    // driving a live claude pane through timed interrupts and reading both the pane and
+    // the JSONL). Claude Code REVERTS a prompt (moves the text back into its input box,
+    // never draws it) only when nothing of the reply was drawn yet, and that state has one
+    // JSONL signature: the prompt is the branch tip, childless — a bare leaf, NO interrupt
+    // marker. Every marker means Claude Code KEPT the message in the conversation (with an
+    // "Interrupted" line), so portkey keeps it too and restores nothing. The bare leaf
+    // stays the served branch tip until the next send forks past it, hence the transient
+    // hide; `gone` covers the post-fork state where the turn already fell off the branch.
+    const ir = interruptRestore.value;
+    if (ir && ir.sessionId === id) {
+      const txt = ir.text.trim();
+      const turns = transcript.value.turns || [];
+      const last = turns[turns.length - 1];
+      const reverted =
+        last &&
+        isPromptTurn(last) &&
+        (last.content || []).some((b) => b.type === "text" && (b.text || "").trim() === txt);
+      const gone =
+        !userTurnTexts(transcript.value).has(txt) &&
+        !(transcript.value.queuedPending || []).some((q) => q.trim() === txt);
+      if (reverted || gone) {
+        if (reverted) {
+          hiddenInterrupts.value = [...hiddenInterrupts.value, { sessionId: id, index: turns.length - 1, text: txt }];
+          // The revert parked the same text in the Mac pane's input box. Clear it (the
+          // text now lives in this composer): a lingering occupied input silently flips
+          // every future pre-stream interrupt from revert to keep, and feeds the next
+          // send's draft guard a phantom draft. Recoverable at the Mac via C-y.
+          fetch(`/sessions/${encodeURIComponent(id)}/clear-input`, { method: "POST" }).catch(() => {});
+        }
+        composerPrefill.value = { text: ir.text, sessionId: id, keepDraft: true };
+        pendingSends.value = pendingSends.value.filter((p) => p !== ir.text);
+        interruptRestore.value = null;
+        // iOS won't raise the keyboard from a programmatic focus this long after the Stop
+        // tap, so announce the restore where the user is looking.
+        flashNotice("interrupted — message returned to the input box");
+      } else if (Date.now() > ir.until) {
+        interruptRestore.value = null; // Claude kept the message (marker shape) — mirror it
+      }
+    }
     // Drop optimistic bubbles that have now materialized as real user turns — or as
     // server-confirmed queue entries (the dim queued bubble takes over from there).
     if (pendingSends.value.length) {
@@ -518,6 +580,17 @@ async function login(token) {
 // toast was just noise); only errors surface, so a silently-failed action isn't invisible.
 let flashTimer = null;
 function flashError(msg) {
+  flashKind.value = "";
+  flash.value = msg;
+  clearTimeout(flashTimer);
+  if (msg) flashTimer = setTimeout(() => (flash.value = ""), 5000);
+}
+
+// One exception to "successes are silent": restore-on-interrupt. The message silently
+// moving from the thread to the composer is easy to miss (iOS blocks the keyboard raise),
+// so it gets a neutral, non-error toast in the same slot above the input box.
+function flashNotice(msg) {
+  flashKind.value = "notice";
   flash.value = msg;
   clearTimeout(flashTimer);
   if (msg) flashTimer = setTimeout(() => (flash.value = ""), 5000);
@@ -1939,9 +2012,21 @@ function Composer({ disabled, status }) {
       }
     }, 5000);
     sessions.value = sessions.value.map((s) => (s.id === id ? { ...s, status: "ready" } : s));
+    // Arm restore-on-interrupt: if the refetched transcript shows the last-sent message
+    // fell off the active branch, it comes back into the composer (see interruptRestore).
+    const lastText = lastSentText.get(id);
+    if (lastText) {
+      interruptRestore.value = { sessionId: id, text: lastText, until: Date.now() + 8000 };
+      // Focus NOW, inside the tap gesture — iOS only raises the keyboard for a focus that
+      // is gesture-driven, and the restore resolves ~2s too late to qualify. The prefill
+      // then lands in an already-focused box. If the restore never fires (mid-turn stop),
+      // the raised keyboard is still where an interrupting user is headed next.
+      if (ref.current) ref.current.focus();
+    }
     const restore = (reason) => {
       flashError(`✗ ${reason}`);
       clearInterrupted(); // failed → don't keep Stop suppressed
+      interruptRestore.value = null; // the turn keeps running — nothing was handed back
       refreshSessions(); // revert optimism to the true status
     };
     fetch(`/sessions/${encodeURIComponent(id)}/interrupt`, {
@@ -2044,10 +2129,12 @@ function Composer({ disabled, status }) {
     el.blur(); // drop focus so the soft keyboard dismisses on submit
     if (items.length === 0) {
       pendingSends.value = [...pendingSends.value, text];
+      lastSentText.set(sid, text); // restore-on-interrupt candidate
       const ok = await action(`/sessions/${encodeURIComponent(sid)}/message`, { text });
       if (!ok) {
         const idx = pendingSends.value.lastIndexOf(text);
         if (idx >= 0) pendingSends.value = pendingSends.value.filter((_, i) => i !== idx);
+        lastSentText.delete(sid); // never reached the pane — an interrupt can't hand it back
       }
       return;
     }
@@ -2166,7 +2253,9 @@ function Composer({ disabled, status }) {
     const p = composerPrefill.value;
     if (!p || p.sessionId !== sid) return;
     const el = ref.current;
-    if (el) {
+    // keepDraft (restore-on-interrupt): the fill yields to anything already typed — the
+    // user may have started the replacement message before the restore resolved.
+    if (el && !(p.keepDraft && el.value.trim())) {
       el.value = p.text;
       grow();
       syncHasText();
@@ -2416,13 +2505,17 @@ function Detail() {
   // is a bare transcript append — so the SSE never wakes and the thread would sit on
   // the optimistic/queued bubble until the next unrelated event or a remount. Stops
   // the moment nothing is pending or queued.
+  // A pending restore-on-interrupt polls too: the post-interrupt branch rewrite (the turn
+  // dropping off) is a bare transcript change with no hook event, so SSE alone may never
+  // deliver the refetch that resolves it.
   const sendsInFlight = pendingSends.value.length + pendingImageSends.value.length;
   const queuedCount = (t && t.queuedPending && t.queuedPending.length) || 0;
+  const restorePending = !!(interruptRestore.value && interruptRestore.value.sessionId === selectedId.value);
   useEffect(() => {
-    if (sendsInFlight === 0 && queuedCount === 0) return;
+    if (sendsInFlight === 0 && queuedCount === 0 && !restorePending) return;
     const iv = setInterval(refreshTranscript, 2500);
     return () => clearInterval(iv);
-  }, [sendsInFlight > 0, queuedCount > 0]);
+  }, [sendsInFlight > 0, queuedCount > 0, restorePending]);
 
   // Track whether we're pinned to the bottom of the thread. The 80px slack keeps auto-follow
   // alive through small jitters; the floating controls (down button + prompt-nav pill) appear
@@ -2521,9 +2614,24 @@ function Detail() {
             }
           }
           const upByIndex = upCountByIndex(turns);
+          // Reverted prompts (bare-leaf interrupt — see the restore-on-interrupt block):
+          // entries recorded at interrupt time, index+text guarded — inert once the
+          // branch moves past that index. Marker-shaped interrupts are NOT hidden: the
+          // Mac TUI keeps those in the conversation, so portkey mirrors it.
+          const hiddenIdx = new Set();
+          for (const h of hiddenInterrupts.value) {
+            if (h.sessionId !== selectedId.value) continue;
+            const ht = turns[h.index];
+            const matches =
+              ht &&
+              isPromptTurn(ht) &&
+              (ht.content || []).some((b) => b.type === "text" && (b.text || "").trim() === h.text);
+            if (matches) hiddenIdx.add(h.index);
+          }
           return turns.map((turn, i) => {
             const up = upByIndex.get(i) || 0;
             if (i >= keepTurns) return null; // truncated by an optimistic rewind
+            if (hiddenIdx.has(i)) return null; // restored to the composer by an interrupt
             return html`<${Turn} key=${i} turn=${turn} upCount=${up} canCode=${editAfter[i]} />`;
           });
         })()}
@@ -2599,7 +2707,8 @@ function Detail() {
               : session && session.restorable === "no"
                 ? html`<div class="flash archived">Repo folder is gone — readable, but nowhere to restore.</div>`
                 : html`<div class="flash archived">Archived — resume from your Mac to continue this session.</div>`
-            : flash.value && html`<div class="flash">${flash.value}</div>`}
+            : flash.value &&
+              html`<div class=${"flash" + (flashKind.value ? ` ${flashKind.value}` : "")}>${flash.value}</div>`}
           <div class="navbar">
             <button class="iconbtn" onClick=${back} aria-label="Back to sessions">‹</button>
             <div class="navtitle">${session ? session.label || session.repo : "session"}</div>
