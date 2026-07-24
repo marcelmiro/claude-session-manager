@@ -1926,18 +1926,20 @@ function Composer({ disabled, status }) {
       return []; // fetch failed → menu simply never opens; composer keeps working
     }
   }
-  // Fires on every keystroke (post-mutation value). Opens the menu when the whole field is
-  // a leading "/" + command token; closes it otherwise.
+  // Fires on every keystroke (post-mutation value). This is an autocomplete aid, not a
+  // command gate: it opens whenever a "/" + token is being typed at the end of the field
+  // and the "/" sits at the start or right after whitespace (so paths like src/foo never
+  // trigger). Closes otherwise. Selecting a row only replaces that "/"-token (see selectSlash).
   async function onInput() {
     grow();
     syncHasText();
     disarmStop(); // typing cancels an armed Stop
     const el = ref.current;
     if (!el) return;
-    const m = el.value.match(/^\/(\S*)$/);
+    const m = el.value.match(/(?:^|\s)\/(\S*)$/);
     if (!m || !sid) return closeSlash();
     const items = await loadSlashItems(sid);
-    const m2 = el.value.match(/^\/(\S*)$/); // re-validate: value may have changed during the await
+    const m2 = el.value.match(/(?:^|\s)\/(\S*)$/); // re-validate: value may have changed during the await
     if (!m2) return closeSlash();
     const token = m2[1].toLowerCase();
     const filtered = items.filter((c) => c.name.toLowerCase().includes(token));
@@ -1947,10 +1949,12 @@ function Composer({ disabled, status }) {
   function selectSlash(cmd) {
     const el = ref.current;
     if (!el || !cmd) return;
+    // Autocomplete replaces only the "/"-token being typed (the trailing /\S* the menu
+    // matched on), leaving any text before it intact — e.g. "use /som" → "use /some-skill ".
     // /model and /effort are intercepted into a native selection sheet instead of being sent
     // as text — the sheet drives the arg-form change and reports Claude's confirmation.
     if (cmd.name === "model" || cmd.name === "effort") {
-      el.value = "";
+      el.value = el.value.replace(/\/\S*$/, "");
       grow();
       syncHasText();
       slash.current.open = false;
@@ -1958,7 +1962,7 @@ function Composer({ disabled, status }) {
       rerender();
       return;
     }
-    el.value = "/" + cmd.name + " "; // trailing space closes Claude's own native / menu in-pane
+    el.value = el.value.replace(/\/\S*$/, "/" + cmd.name + " "); // trailing space closes Claude's own native / menu in-pane
     grow();
     syncHasText();
     el.focus();
