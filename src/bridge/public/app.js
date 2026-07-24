@@ -3275,9 +3275,25 @@ function CopiedToast() {
 // socket. On return to foreground, immediately re-fetch (HTTP works even if the stream is
 // stale) and re-establish the stream if it isn't OPEN. Covers tab/PWA resume-from-memory;
 // `pageshow` (persisted) covers iOS's bfcache-style restore. Cold relaunch is handled by boot.
+// Opening/focusing the app means you're looking — dismiss any push notifications
+// still sitting in the shade and clear the badge. getNotifications() lives on the SW
+// registration; getRegistration() (not .ready, which hangs forever without a worker)
+// so a non-PWA tab that never registered resolves undefined instead of blocking.
+async function dismissNotifications() {
+  if (navigator.clearAppBadge) navigator.clearAppBadge().catch(() => {});
+  try {
+    const reg = navigator.serviceWorker && (await navigator.serviceWorker.getRegistration());
+    if (!reg) return;
+    for (const n of await reg.getNotifications()) n.close();
+  } catch {
+    /* best-effort — the badge is already cleared above */
+  }
+}
+
 function resync() {
   if (!authed.value) return;
-  if (navigator.clearAppBadge) navigator.clearAppBadge().catch(() => {}); // you're looking now
+  dismissNotifications(); // you're looking now
+  consumePendingNav(); // a tap that foregrounded us may have stashed a session to open
   tick.value = Date.now(); // ages froze while the tab was hidden — catch them up first
   refreshSessions();
   if (selectedId.value) refreshTranscript();
@@ -3357,6 +3373,26 @@ function applyDeepLink() {
   history.replaceState(null, "", location.pathname);
 }
 
+// Push-tap handoff via the SW's cache (see stashTarget in sw.js). This is the path
+// that survives an iOS cold launch, where the `?s=` URL is dropped. Consumed on boot
+// AND on foreground: the SW may write the target after boot already ran (the launch
+// races the notificationclick handler), so the visibilitychange backstop catches it.
+// Delete-on-read + a 2-min TTL keep a manual open from jumping to a stale tap.
+async function consumePendingNav() {
+  if (!("caches" in self)) return;
+  try {
+    const cache = await caches.open("csm-nav");
+    const res = await cache.match("pending");
+    if (!res) return;
+    await cache.delete("pending");
+    const { sessionId, at } = await res.json();
+    if (!sessionId || Date.now() - at > 120_000) return;
+    if (selectedId.value !== sessionId) open(sessionId); // warm path already switched → skip
+  } catch {
+    /* cache unavailable — postMessage/?s= paths still cover the warm case */
+  }
+}
+
 // Stale-while-revalidate boot: iOS evicts the backgrounded page constantly, so the most
 // common interaction — reopen after minutes — used to boot from a blank spinner. Paint
 // the last-persisted list immediately and let the auth probe below reconcile: a fresh
@@ -3378,9 +3414,10 @@ refreshSessions()
     clearTimeout(bootTimeout);
     if (authed.value) {
       applyDeepLink();
+      consumePendingNav();
       connectStream();
       initPush();
-      if (navigator.clearAppBadge) navigator.clearAppBadge().catch(() => {});
+      dismissNotifications();
     }
   })
   .finally(boot);

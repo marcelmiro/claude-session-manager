@@ -37,11 +37,26 @@ self.addEventListener("push", (event) => {
   );
 });
 
+// Hand the tapped session off through the Cache API — shared between this worker
+// and the page. iOS cold-launches an installed PWA at its start_url and routinely
+// drops the `?s=` on openWindow(), so the URL alone loses the deep link on the most
+// common (evicted) path; the app reads this on boot and on foreground instead.
+async function stashTarget(sessionId) {
+  if (!sessionId) return;
+  try {
+    const cache = await caches.open("csm-nav");
+    await cache.put("pending", new Response(JSON.stringify({ sessionId, at: Date.now() })));
+  } catch {
+    /* cache unavailable — the ?s= URL and postMessage paths still try */
+  }
+}
+
 self.addEventListener("notificationclick", (event) => {
   event.notification.close();
   const sessionId = (event.notification.data || {}).sessionId || "";
   event.waitUntil(
     (async () => {
+      await stashTarget(sessionId);
       const wins = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
       if (wins.length > 0) {
         // focus() alone doesn't navigate — the app listens for this message and
