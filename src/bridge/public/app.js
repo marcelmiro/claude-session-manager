@@ -1020,6 +1020,26 @@ async function archiveSession() {
   await action(`/sessions/${encodeURIComponent(s.id)}/archive`, {});
 }
 
+// Fork the session: close the sheet, show the same "launching …" hint the new-session flow
+// uses (the /fork request BLOCKS until the fork's prompt is live), then open straight into
+// the server-determined fork id. The original session is untouched.
+async function forkSession() {
+  const s = sessionMenu.value;
+  sessionMenu.value = null;
+  if (!s) return;
+  launching.value = listTitle(s);
+  try {
+    // actionJson flashes + returns null on failure; on success it carries the new fork id.
+    const data = await actionJson(`/sessions/${encodeURIComponent(s.id)}/fork`, {});
+    if (data && data.sessionId) {
+      await refreshSessions();
+      open(data.sessionId);
+    }
+  } finally {
+    launching.value = "";
+  }
+}
+
 // --- views --------------------------------------------------------------
 
 const DOT = { waiting: "⏸", running: "⦿", ready: "●", idle: "○", archived: "○" };
@@ -2634,10 +2654,10 @@ function ActionSheet() {
 // sheet to an explicit confirm — no accidental kills from a fat-fingered long-press.
 function SessionSheet() {
   const s = sessionMenu.value;
-  const [confirm, setConfirm] = useState(false);
+  const [confirm, setConfirm] = useState(null); // null | "archive" | "fork" — which action is awaiting its second tap
   // The sheet returns null when closed instead of unmounting, so `confirm` would
   // otherwise persist — reset it each time the target changes (open/close/switch).
-  useEffect(() => setConfirm(false), [s]);
+  useEffect(() => setConfirm(null), [s]);
   if (s == null) return null;
   const close = () => (sessionMenu.value = null);
   const sub = subLine(s);
@@ -2653,17 +2673,25 @@ function SessionSheet() {
             </span>
             <span class="age">${formatAge(activityAt(s))}</span>
           </div>
-          ${confirm
+          ${confirm === "archive"
             ? html`
                 <div class="sheethint">
                   This ends the live Claude session. Your conversation is saved — resume it from your Mac anytime.
                 </div>
                 <button class="danger-fill" onClick=${archiveSession}>Archive session</button>
-                <button class="sheetcancel" onClick=${() => setConfirm(false)}>Keep running</button>`
-            : html`
-                <button onClick=${() => (close(), open(s.id))}>Open</button>
-                <button class="danger" onClick=${() => setConfirm(true)}>Archive session</button>
-                <button class="sheetcancel" onClick=${close}>Cancel</button>`}
+                <button class="sheetcancel" onClick=${() => setConfirm(null)}>Keep running</button>`
+            : confirm === "fork"
+              ? html`
+                  <div class="sheethint">
+                    Forks this conversation into a new session on your Mac. The original keeps running untouched.
+                  </div>
+                  <button class="accent-fill" onClick=${forkSession}>Fork session</button>
+                  <button class="sheetcancel" onClick=${() => setConfirm(null)}>Cancel</button>`
+              : html`
+                  <button onClick=${() => (close(), open(s.id))}>Open</button>
+                  <button onClick=${() => setConfirm("fork")}>Fork session</button>
+                  <button class="danger" onClick=${() => setConfirm("archive")}>Archive session</button>
+                  <button class="sheetcancel" onClick=${close}>Cancel</button>`}
         </div>
       </div>
     </div>

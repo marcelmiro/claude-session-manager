@@ -265,6 +265,31 @@ export async function launchResumeWindow(
 }
 
 /**
+ * Fork an existing session into a NEW tmux window: `claude --session-id <forkId>
+ * --resume=<parentSessionId> --fork-session` in `repoPath`, inserted after the active
+ * window but not focused (`-a -d`). The fork mints its own id (`forkId`, minted by the
+ * caller like `launchClaudeWindow`) and copies the parent's history up to the fork point,
+ * diverging from there; the parent is untouched. Same `zsh -c '…; exec zsh -l'` convention
+ * so a failed fork leaves an inspectable shell. Returns the new window's pane id.
+ */
+export async function launchForkWindow(
+  targetSession: string,
+  repoPath: string,
+  name: string,
+  forkId: string,
+  parentSessionId: string,
+): Promise<string> {
+  const cmd = `claude --session-id ${forkId} --resume=${parentSessionId} --fork-session; exec zsh -l`;
+  // `-d`: don't make the new window active. Phone-driven (Portkey) fork, so the Mac's tmux
+  // client stays on the user's current window — no focus steal.
+  const out =
+    await Bun.$`tmux new-window -a -d -t ${targetSession} -n ${name} -c ${repoPath} -P -F ${"#{pane_id}"} zsh -c ${cmd}`
+      .quiet()
+      .text();
+  return out.trim();
+}
+
+/**
  * Send keys ONE AT A TIME with a small gap between them.
  *
  * tmux coalesces a multi-key `send-keys` into a single write, and Claude's TUI

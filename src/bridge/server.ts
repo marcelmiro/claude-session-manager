@@ -28,6 +28,7 @@ import {
   createSession,
   restoreState,
   restoreSession,
+  forkSession,
   rewindSession,
   archiveSession,
   interruptSession,
@@ -1153,6 +1154,29 @@ async function route(req: Request): Promise<Response> {
     sessionsCache = null; // drop the 1s projection cache so the refetch re-derives the now-live status
     historyCache = null; // the row's isActive/restorable just changed
     broadcast({ type: "session-changed", id });
+    return sendResult(result);
+  }
+
+  // Fork (mint a new session that resumes this one's history in a new tmux window; blocks
+  // until the fork's prompt is live so the phone can open straight into it). The parent is
+  // untouched. repoPath/name come from discovery, not the client, mirroring restore.
+  const fork = path.match(/^\/sessions\/([^/]+)\/fork$/);
+  if (method === "POST" && fork) {
+    const id = decodeURIComponent(fork[1]!);
+    const { sessions } = await discoverSessions({});
+    const s = sessions.find((x) => x.id === id);
+    let repoPath = s?.repoPath;
+    let basePath = s?.baseRepoPath;
+    if (!s) {
+      const entry = (await historyEntries()).find((e) => e.sessionId === id);
+      if (!entry) return json({ ok: false, reason: "not-found" }, 404);
+      repoPath = entry.projectPath;
+      basePath = entry.baseRepoPath;
+    }
+    const result = await forkSession(id, repoPath!, basePath!, s?.name);
+    sessionsCache = null; // the fork is a new session — surface it on the next list
+    historyCache = null;
+    if (result.ok && result.sessionId) broadcast({ type: "session-changed", id: result.sessionId });
     return sendResult(result);
   }
 

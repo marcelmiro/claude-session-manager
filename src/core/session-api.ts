@@ -12,6 +12,7 @@
  */
 
 import { Glob } from "bun";
+import { homedir } from "os";
 import { resolveTranscriptPath, readLastPromptAt } from "./last-turn";
 import { lastAssistantMessage, parseActiveBranch, parseTranscript } from "./transcript";
 import { pendingToolCall } from "./hook-events";
@@ -26,6 +27,7 @@ import {
   getMainSession,
   launchClaudeWindow,
   launchResumeWindow,
+  launchForkWindow,
   capturePane,
   sendKey,
   sendLiteral,
@@ -33,6 +35,9 @@ import {
   killPane,
 } from "./tmux";
 import { isPermissionPrompt } from "./status";
+import { recoverWorktreeTranscript } from "./recover";
+import { buildBaseName } from "./notifications";
+import { slugify } from "./names";
 import { parseBackgroundTasks, liveScripts, type BackgroundTask } from "./background-tasks";
 import { decideQuestion, declineQuestion, buildAnswersMap } from "./approval";
 import type { PendingQuestion, PendingToolCall } from "./jsonl-reader";
@@ -209,19 +214,84 @@ export async function createSession(repoPath: string, name: string): Promise<Sen
   // We minted the id, so the pane→session map is known now — write it ourselves so a phone
   // send resolves the pane immediately, without waiting on the SessionStart hook's write.
   await savePaneSessions({ [paneId]: sessionId });
+  await waitForPromptLive(paneId);
+  return { ok: true, sessionId };
+}
+
+/**
+ * Poll a freshly-launched pane until its statusline renders — the prompt is then live and
+ * sendable, so an instant phone message doesn't drop into the boot window. Clears the
+ * one-time "trust this folder?" gate once if it appears. ~12s cap; on timeout the session
+ * is still launched (statusline just slow to render), so callers that minted the id
+ * themselves return `ok` regardless. Used after `createSession`/`forkSession` write the
+ * pane→session map, where registration is a given and only the prompt's readiness gates.
+ */
+async function waitForPromptLive(paneId: string): Promise<void> {
   let trusted = false;
   for (let i = 0; i < 24; i++) {
     await Bun.sleep(500); // up to ~12s for claude to boot and render its prompt
-    // Statusline rendered = prompt live/sendable, so an instant phone message doesn't drop
-    // into the boot window (mirrors restoreSession's gate).
-    if ((await readPaneStatusline(paneId)).statusline) return { ok: true, sessionId };
-    // Accept the trust gate once if it's showing; then keep waiting for the prompt.
+    if ((await readPaneStatusline(paneId)).statusline) return;
     if (!trusted && (await capturePane(paneId)).includes(TRUST_PROMPT)) {
       await sendKey(paneId, "Enter");
       trusted = true;
     }
   }
-  return { ok: true, sessionId }; // launched; statusline slow to render (residual, matches restoreSession)
+}
+
+/**
+ * Fork a session from the phone: mint a new id, launch `claude --session-id <forkId>
+ * --resume=<sessionId> --fork-session` in a new (unfocused) tmux window, and BLOCK until
+ * the fork's prompt is live so the phone can open straight into it. The fork copies the
+ * parent's history up to the fork point and diverges from there; the parent is untouched.
+ * `repoPath`/`baseRepoPath`/`name` come from the caller (server discovery), mirroring
+ * `restoreSession`. Relocates to the base repo if the session's worktree was deleted so the
+ * resume lands. Returns the NEW fork's id (never the parent's).
+ */
+export async function forkSession(
+  sessionId: string,
+  repoPath: string,
+  baseRepoPath: string,
+  name?: string,
+): Promise<SendResult> {
+  const target = await getMainSession();
+  if (!target) return { ok: false, reason: "no-session" };
+  if ((await resolveTranscriptPath(sessionId)) === null) return { ok: false, reason: "no-transcript" };
+  const effectivePath = await recoverWorktreeTranscript(sessionId, repoPath, baseRepoPath);
+  const repoName = effectivePath.split("/").filter(Boolean).pop() ?? "claude";
+  const forkName = buildBaseName(repoName, name ? slugify(name) || undefined : undefined, true);
+  const forkId = crypto.randomUUID();
+  const paneId = await launchForkWindow(target, effectivePath, forkName, forkId, sessionId);
+  // We minted forkId and passed it via --session-id, so the fork's transcript lands under it;
+  // write the pane→session map ourselves (like createSession) rather than wait on the hook,
+  // which for a --fork-session pane records the PARENT id instead.
+  await savePaneSessions({ [paneId]: forkId });
+  await waitForPromptLive(paneId);
+  // Claude writes the fork's transcript LAZILY — nothing lands on disk until the fork's
+  // first turn. Until then the phone can neither read the conversation (empty) nor even see
+  // the session (discovery blanks a pane's id when no JSONL backs it — buildActiveSession).
+  // So seed the fork's file with a copy of the parent's transcript NOW (after boot, before any
+  // turn — Claude has not created the file yet). Claude then treats the existing file as the
+  // session history and APPENDS the first turn to it (verified: no duplication), which is
+  // exactly fork semantics. Best-effort: a failed seed just falls back to empty-until-first-turn.
+  await seedForkTranscript(sessionId, forkId, effectivePath);
+  return { ok: true, sessionId: forkId };
+}
+
+/**
+ * Copy the parent session's transcript to the fork's transcript path so the fork is readable
+ * and discoverable before it takes its first turn (see `forkSession`). The destination is the
+ * project dir for the fork's cwd (`effectivePath`) — where Claude, launched there, will append
+ * — keyed the same way Claude keys it (`/` → `-`). Never throws.
+ */
+async function seedForkTranscript(parentId: string, forkId: string, effectivePath: string): Promise<void> {
+  try {
+    const parentPath = await resolveTranscriptPath(parentId);
+    if (!parentPath) return;
+    const dest = `${homedir()}/.claude/projects/${effectivePath.replace(/\//g, "-")}/${forkId}.jsonl`;
+    await Bun.write(dest, Bun.file(parentPath));
+  } catch {
+    // Parent transcript unreadable / dest dir missing — leave the fork empty-until-first-turn.
+  }
 }
 
 /**

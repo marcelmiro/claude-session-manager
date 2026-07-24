@@ -254,6 +254,12 @@ A changed-files strip at the end of the thread → full file list → per-file d
 - `/changes` has a 1s TTL cache; `/diff` reuses it to resolve a rename's old path, so a tool chip and a file-list row agree.
 - The file list's top row links out to the branch's GitHub PR (`core/pull-request.ts` → `GET /sessions/:id/pr`, 60s TTL since it shells out to `gh`). Depth lives in the PR, not here; a merged PR is a "this session is done" signal. Why this instead of an in-app reviewer, and the variants rejected: [ADR 5](docs/adr/0005-link-out-to-the-pull-request.md).
 
+### Portkey fork session
+
+The long-press session sheet (alongside Archive) offers **Fork session** — same mechanics as the TUI `f`: `POST /sessions/:id/fork` → `forkSession` (`core/session-api.ts`) mints a fork id, launches `claude --session-id <forkId> --resume=<parent> --fork-session` in a new unfocused window (`launchForkWindow`, `-a -d`), blocks until the prompt is live, then returns the fork id. The sheet uses a two-tap confirm (non-destructive → mint fill, not red); the client shows the new-session `launching …` hint and opens straight into the fork.
+
+- **Fork transcript seeding** (`seedForkTranscript`): Claude writes a fork's JSONL *lazily* — nothing lands on disk until the fork's first turn. On the phone that meant (a) an empty conversation and (b) the fork missing from Home (discovery blanks a live pane's id when no JSONL backs it — `buildActiveSession`). So after boot (before any turn — Claude hasn't created the file yet), `forkSession` copies the parent's transcript to the fork's path (`projects/<encode(effectivePath)>/<forkId>.jsonl`). Claude then treats it as the session history and *appends* the first turn (verified: no duplication) — so the fork is readable and discoverable immediately, and diverges cleanly on first message. Best-effort; a failed seed degrades to empty-until-first-turn.
+
 ## Conventions
 
 - **Runtime**: Bun only — `Bun.$` for shell, `Bun.file()` for IO, `Bun.Glob` for scanning
