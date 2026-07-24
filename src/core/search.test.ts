@@ -1,7 +1,7 @@
 import { test, expect, beforeEach, afterEach } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
-import { readSearchArtifacts, scoreSearchEntry, filterAndRankEntries, searchEntries, type SearchEntry } from "./search";
+import { readSearchArtifacts, scoreSearchEntry, filterAndRankEntries, searchEntries, CHUNK_SIZE, type SearchEntry } from "./search";
 
 let dir: string;
 let n = 0;
@@ -41,6 +41,53 @@ test("tail content of a large transcript is searchable", async () => {
   const a = await readSearchArtifacts(path);
   expect(a.corpus).toContain("xylophone-widget");
   expect(a.corpus).toContain("login flow"); // head still covered
+});
+
+// Non-conversational byte padding: parseConversationRecords drops anything whose
+// `type` isn't "user"/"assistant", so this contributes exact, known-size bytes to
+// the file with zero effect on corpusFrom's text budget — lets a test position byte
+// offsets precisely without the padding itself competing for the corpus cap.
+const pad = (n: number) => ({ type: "filler", blob: "x".repeat(Math.max(0, n)) });
+const padOverhead = JSON.stringify(pad(0)).length + 1; // + newline
+
+test("a line straddling the tail-window's byte boundary is not silently dropped", async () => {
+  // Reproduces a real transcript (throxy/leadflow eaf062f2): the tail read is a raw
+  // byte slice, not line-aligned, so a boundary landing mid-line used to fail
+  // JSON.parse on the leading fragment and drop that whole record — even though most
+  // of its bytes were inside the window. Position a target line so the read window's
+  // start byte falls strictly inside it, with only padding (no target text) after.
+  const target = "boundary-marker-phrase";
+  const targetLine = turn("assistant", `the csv has a ${target} column`, "2026-07-01T12:00:00.000Z");
+  const targetLen = JSON.stringify(targetLine).length + 1; // + newline
+
+  // Trailing padding sized so the tail window's start lands ~halfway through
+  // targetLine: solving tailStart = preSize + targetLen + after - CHUNK_SIZE for
+  // `after`, constrained to (CHUNK_SIZE - targetLen, CHUNK_SIZE) puts the boundary
+  // inside [0, targetLen).
+  const after = CHUNK_SIZE - Math.ceil(targetLen / 2);
+
+  // Head padding pushes targetLine's start past CHUNK_SIZE so it's unreachable via
+  // the head read — isolating this to the tail path.
+  const path = transcript([pad(CHUNK_SIZE + 4096), targetLine, pad(after - padOverhead)]);
+  const a = await readSearchArtifacts(path);
+  expect(a.corpus).toContain(target);
+});
+
+test("a match a few turns before a long final message stays in the tail corpus", async () => {
+  // Same transcript (eaf062f2), a second failure mode: the tail's cap was only
+  // 3000 chars, and corpusFrom stops (`break`) the moment the running total reaches
+  // it — before ever looking at earlier records. The real session's last two
+  // messages (2770 + 461 chars) alone exceeded that cap, so the match three turns
+  // back never got evaluated, independent of any slicing. Mirror those proportions.
+  const target = "week-start-column-marker";
+  const path = transcript([
+    pad(CHUNK_SIZE + 4096), // unreachable via head
+    turn("assistant", `columns unchanged: ${target}, week_end`, "2026-07-01T11:00:00.000Z"),
+    turn("assistant", "z".repeat(450), "2026-07-01T11:05:00.000Z"),
+    turn("assistant", "y".repeat(2600), "2026-07-01T11:10:00.000Z"), // long wrap-up, no target text
+  ]);
+  const a = await readSearchArtifacts(path);
+  expect(a.corpus).toContain(target);
 });
 
 test("small transcript: corpus holds the text once, not head+tail duplicated", async () => {

@@ -318,8 +318,9 @@ function buildSnippet(source: string | undefined, word: string): string | undefi
   return (start > 0 ? "…" : "") + source.slice(start, end).trim() + (end < source.length ? "…" : "");
 }
 
-const CHUNK_SIZE = 32768; // head/tail read size per transcript
-const MAX_SEARCH_CONTENT = 3000; // corpus cap per chunk
+export const CHUNK_SIZE = 32768; // head/tail read size per transcript; exported for tests
+const TAIL_SLACK = 8192; // extra bytes read ahead of the tail window so trimming to a line boundary never empties it
+const MAX_SEARCH_CONTENT = 6000; // corpus cap per chunk — generous enough that the last few real turns near a session's end (not just the single last message) stay searchable; see corpusFrom
 
 /** One parsed conversational record: extracted display text + timestamp (ms, or null). */
 interface ConversationRecord {
@@ -364,7 +365,13 @@ function parseConversationRecords(chunk: string): ConversationRecord[] {
 /**
  * Concatenate record texts up to MAX_SEARCH_CONTENT chars. `fromEnd` keeps the LAST
  * records instead of the first — the tail chunk exists to capture how the session
- * ended, so its cap must trim from the front, not eat the ending.
+ * ended, so its cap must trim from the front, not eat the ending. The record that
+ * crosses the cap is kept whole rather than sliced: a mid-slice keeps only one edge
+ * of that record's text, silently losing a match that happened to live past the cut
+ * (real case: a hit near the end of a long message got dropped because an earlier
+ * slice took only its first ~200 of 789 chars). Bounded overflow past the nominal
+ * cap — at most one record's length — is an acceptable tradeoff for never losing a
+ * match inside an included record.
  */
 function corpusFrom(records: ConversationRecord[], fromEnd = false): string {
   const ordered = fromEnd ? [...records].reverse() : records;
@@ -373,8 +380,7 @@ function corpusFrom(records: ConversationRecord[], fromEnd = false): string {
   for (const r of ordered) {
     if (totalLen >= MAX_SEARCH_CONTENT) break;
     if (!r.text) continue;
-    const remaining = MAX_SEARCH_CONTENT - totalLen;
-    parts.push(r.text.length > remaining ? r.text.slice(0, remaining) : r.text);
+    parts.push(r.text);
     totalLen += r.text.length;
   }
   if (fromEnd) parts.reverse();
@@ -415,7 +421,17 @@ async function readSearchArtifactsInner(filePath: string): Promise<{
   let tailRecords = headRecords;
   let corpus = corpusFrom(headRecords);
   if (stat.size > CHUNK_SIZE) {
-    const tailChunk = await file.slice(stat.size - CHUNK_SIZE, stat.size).text();
+    // A byte-offset slice can start mid-line; without slack, that leading fragment
+    // fails JSON.parse and silently drops — including whichever record it belonged
+    // to, even if most of that record's bytes are actually inside the window. Read
+    // extra bytes ahead of the window and trim forward to the first newline so every
+    // parsed line is complete, the same guarantee the head chunk gets for free by
+    // starting at byte 0.
+    const tailReadSize = Math.min(stat.size, CHUNK_SIZE + TAIL_SLACK);
+    const tailStart = stat.size - tailReadSize;
+    const rawTail = await file.slice(tailStart, stat.size).text();
+    const firstNewline = rawTail.indexOf("\n");
+    const tailChunk = tailStart > 0 && firstNewline !== -1 ? rawTail.slice(firstNewline + 1) : rawTail;
     tailRecords = parseConversationRecords(tailChunk);
     const tailCorpus = corpusFrom(tailRecords, true);
     if (tailCorpus) corpus = corpus ? `${corpus} ${tailCorpus}` : tailCorpus;
