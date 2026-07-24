@@ -232,6 +232,7 @@ async function refreshSessions() {
     const list = await r.json();
     if (!Array.isArray(list)) return; // malformed payload — never poison the render with it
     sessions.value = list;
+    followClearedSession(); // /clear or /compact on the open session → follow to its successor
     authed.value = true;
     if (error.value === "bridge unreachable") error.value = ""; // recovered — drop the banner
     // Persist for the next cold open (iOS evicts the page constantly): boot hydrates
@@ -660,6 +661,32 @@ function open(id) {
   clearAttachments();
   refreshTranscript();
   markRead(id);
+}
+
+// Auto-follow /clear and /compact: both retire the open session's id and mint a NEW one on
+// the SAME tmux pane, so the phone would otherwise strand on the now-archived old id (empty,
+// restore-only). We track the open session's pane while it's live; when it flips to archived
+// (or drops from the active list) and a DIFFERENT live session now holds that pane, that's
+// the successor — open it. A real kill leaves the pane empty (no successor), so the restore
+// bar still shows. Called after every sessions refresh; stateless beyond the remembered pane.
+let openSessionPane = null; // { id, paneId } of the currently-open session while it was live
+function followClearedSession() {
+  const id = selectedId.value;
+  if (!id) {
+    openSessionPane = null;
+    return;
+  }
+  const cur = sessions.value.find((s) => s.id === id);
+  if (cur && cur.paneId && cur.status !== "archived") {
+    openSessionPane = { id, paneId: cur.paneId }; // still live — remember its pane
+    return;
+  }
+  // The open session is archived/gone. Follow to a live session on the same pane, if any.
+  if (!openSessionPane || openSessionPane.id !== id) return;
+  const succ = sessions.value.find(
+    (s) => s.paneId === openSessionPane.paneId && s.id !== id && s.status !== "archived",
+  );
+  if (succ) open(succ.id);
 }
 
 // Drill into one subagent: stash the row (+ siblings, for the footer prev/next nav),

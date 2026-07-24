@@ -273,6 +273,10 @@ function projectSession(
     // The age the phone renders: last conversational turn, falling back to the mtime in
     // `modified` when the transcript holds no timestamped turn.
     lastTurn: sessionActivityAt(s).toISOString(),
+    // The tmux pane this session lives on (active sessions only). The phone uses it to
+    // auto-follow /clear and /compact: both mint a NEW id on the SAME pane, so when the
+    // open session goes archived and a live session now holds its pane, that's the successor.
+    ...(s.tmuxPane ? { paneId: s.tmuxPane.paneId } : {}),
     // Present only for archived sessions: whether/where the phone can resume it
     // ("yes" | "relocated" | "no") — drives the restore bar's button and label.
     ...(restorable !== undefined ? { restorable } : {}),

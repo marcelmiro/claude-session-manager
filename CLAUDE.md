@@ -260,6 +260,10 @@ The long-press session sheet (alongside Archive) offers **Fork session** — sam
 
 - **Fork transcript seeding** (`seedForkTranscript`): Claude writes a fork's JSONL *lazily* — nothing lands on disk until the fork's first turn. On the phone that meant (a) an empty conversation and (b) the fork missing from Home (discovery blanks a live pane's id when no JSONL backs it — `buildActiveSession`). So after boot (before any turn — Claude hasn't created the file yet), `forkSession` copies the parent's transcript to the fork's path (`projects/<encode(effectivePath)>/<forkId>.jsonl`). Claude then treats it as the session history and *appends* the first turn (verified: no duplication) — so the fork is readable and discoverable immediately, and diverges cleanly on first message. Best-effort; a failed seed degrades to empty-until-first-turn.
 
+### Portkey /clear + /compact auto-follow
+
+`/clear` and `/compact` retire the open session's id and mint a NEW one on the SAME tmux pane, which would otherwise strand the phone on the now-archived old id (empty, restore-only). The link is the pane: `projectSession` exposes `paneId` on active sessions, and the client's `followClearedSession` (run after every sessions refresh) remembers the open session's pane while it's live, then — when that session flips to `archived` and a *different* live session now holds the same pane — `open()`s the successor. A real kill leaves the pane empty (no successor → the restore bar still shows). Stateless beyond the remembered pane; a server-side successor signal was rejected because the only old→new source (`changedPaneIds`) is one-shot and consumed by whichever `discoverSessions` call runs first (the `/restore` and `/fork` routes call it too).
+
 ## Conventions
 
 - **Runtime**: Bun only — `Bun.$` for shell, `Bun.file()` for IO, `Bun.Glob` for scanning
