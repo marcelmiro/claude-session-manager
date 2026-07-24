@@ -262,9 +262,18 @@ const VOLATILE_FIELDS = [
   "effort",
 ];
 
+// Responses can arrive out of order: refreshTranscript runs concurrently (SSE bursts,
+// polls, post-action refreshes) and a slow full response can land after — and would
+// silently overwrite — a fresher one. That overwrite is terminal once a turn ends (no
+// further hook event fires for the session, so nothing refetches), so order responses
+// by request sequence and never apply one older than the last applied.
+let txReqSeq = 0;
+let txAppliedSeq = 0;
+
 async function refreshTranscript() {
   const id = selectedId.value;
   if (!id) return;
+  const seq = ++txReqSeq;
   // Offer the held file revision so an unchanged transcript comes back as a tiny
   // volatile-fields-only response instead of the full turn list.
   const heldRev = transcript.value && transcript.value.rev;
@@ -284,6 +293,8 @@ async function refreshTranscript() {
       }
       data = merged;
     }
+    if (seq < txAppliedSeq) return; // a newer response already applied — never regress
+    txAppliedSeq = seq;
     // The server always returns the full active conversation branch (reconstructed
     // leaf→root), so we replace rather than append — a rewind can shrink the conversation.
     transcript.value = data;
@@ -2334,6 +2345,19 @@ function Detail() {
     }, 15000);
     return () => clearInterval(iv);
   }, [activeWork]);
+
+  // Self-heal on status change. The thread's last refresh for a turn rides on the single
+  // Stop-event broadcast — if that response is lost (dropped socket moment, failed fetch,
+  // out-of-order overwrite) nothing refetches and the thread freezes until remount. The
+  // session's list status keeps updating regardless (the id-less broadcasts refresh the
+  // list unconditionally), so a status flip is the one signal that always arrives: use it
+  // to refetch the open transcript.
+  const prevStatus = useRef(status);
+  useEffect(() => {
+    if (prevStatus.current === status) return;
+    prevStatus.current = status;
+    refreshTranscriptSoon();
+  }, [status]);
 
   // 2.5s poll while a send is in flight (optimistic bubble up) or a message sits in
   // Claude's queue. Both states advance WITHOUT any hook event — a mid-turn send fires
