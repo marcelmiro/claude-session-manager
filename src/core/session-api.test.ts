@@ -673,16 +673,24 @@ test("clearPaneInput: no pane mapping → no-pane, sends nothing", async () => {
 // --- model/effort switcher: pure parsers (statusline + confirmation + allowlists) ---
 
 test("parseStatusline: full line → 1M-Opus arg key + effort level", () => {
-  expect(parseStatusline("0/1000k (0%) • master • Opus 4.8 (1M context) • high")).toEqual({
+  expect(parseStatusline("0/1000k (0%) • master • Opus 5 (1M context) • high")).toEqual({
     model: "opus[1m]",
     effort: "high",
   });
 });
 
 test("parseStatusline: non-1M Opus → base 'opus' (not the menu's opus[1m])", () => {
-  // bare `/model opus` yields "Opus 4.8" with no "1M context"; not offered in the menu, so it
+  // bare `/model opus` yields "Opus 5" with no "1M context"; not offered in the menu, so it
   // simply won't pre-mark anything — but must NOT be mistaken for the 1M variant.
-  expect(parseStatusline("0/1000k (0%) • main • Opus 4.8 • medium").model).toBe("opus");
+  expect(parseStatusline("0/1000k (0%) • main • Opus 5 • medium").model).toBe("opus");
+});
+
+test("parseStatusline: previous Opus is its own arg key, not the current one", () => {
+  // "Opus 4.8" must not mark the Opus row — the `opus` alias now resolves to Opus 5.
+  expect(parseStatusline("0/1000k (0%) • main • Opus 4.8 (1M context) • high").model).toBe(
+    "claude-opus-4-8[1m]",
+  );
+  expect(parseStatusline("• b • Opus 4.8").model).toBe("claude-opus-4-8");
 });
 
 test("parseStatusline: missing effort segment → model only, no effort", () => {
@@ -690,15 +698,15 @@ test("parseStatusline: missing effort segment → model only, no effort", () => 
 });
 
 test("parseStatusline: every family maps to its arg key", () => {
-  expect(parseStatusline("• b • Opus 4.8 (1M context)").model).toBe("opus[1m]");
+  expect(parseStatusline("• b • Opus 5 (1M context)").model).toBe("opus[1m]");
   expect(parseStatusline("• b • Sonnet 5").model).toBe("sonnet");
   expect(parseStatusline("• b • Haiku 4.5").model).toBe("haiku");
   expect(parseStatusline("• b • Fable 5").model).toBe("fable");
 });
 
 test("parseStatusline: 'Default' renders as 1M Opus → resolves to opus[1m]", () => {
-  // Claude's statusline shows the resolved model; Default and Opus both render "Opus 4.8 (1M context)".
-  expect(parseStatusline("0/1000k (0%) • main • Opus 4.8 (1M context) • medium").model).toBe("opus[1m]");
+  // Claude's statusline shows the resolved model; Default and Opus both render "Opus 5 (1M context)".
+  expect(parseStatusline("0/1000k (0%) • main • Opus 5 (1M context) • medium").model).toBe("opus[1m]");
 });
 
 test("parseStatusline: garbled/foreign line → {} (no throw)", () => {

@@ -3345,8 +3345,9 @@ function App() {
 // value is read from the pane-scraped statusline (transcript.model / .effort, arg keys); note
 // "Default" reads as `opus` on the statusline, so Opus is marked when Default is active.
 const MODEL_OPTS = [
-  { key: "default", label: "Default", sub: "recommended · Opus 4.8 1M" },
-  { key: "opus[1m]", label: "Opus", sub: "Opus 4.8 · 1M context" },
+  { key: "default", label: "Default", sub: "recommended · Opus 5 1M" },
+  { key: "opus[1m]", label: "Opus", sub: "Opus 5 · 1M context" },
+  { key: "claude-opus-4-8[1m]", label: "Opus 4.8", sub: "previous Opus · 1M context" },
   { key: "fable", label: "Fable", sub: "Fable 5" },
   { key: "sonnet", label: "Sonnet", sub: "Sonnet 5" },
   { key: "haiku", label: "Haiku", sub: "Haiku 4.5" },

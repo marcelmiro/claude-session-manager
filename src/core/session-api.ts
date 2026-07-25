@@ -112,10 +112,18 @@ export interface PaneStatusline {
 }
 
 // The model/effort arg forms Claude accepts (`/model <x>`, `/effort <x>`) — the switcher's
-// allowlists. Note `opus[1m]`, NOT `opus`: the bare `opus` arg resolves to the non-1M base
-// model (`claude-opus-4-8`), whereas the picker's "Opus" and "Default" both select the 1M
-// variant (`claude-opus-4-8[1m]`). `opus[1m]` is the arg that reaches 1M.
-export const MODEL_ARGS = ["default", "opus[1m]", "fable", "sonnet", "haiku"] as const;
+// allowlists. Note the `[1m]` suffix, NOT the bare alias: `opus` resolves to the non-1M base
+// model, whereas the picker's "Opus" and "Default" both select the 1M variant. The `opus`
+// alias tracks the current Opus (Opus 5); the previous Opus has no alias and is reachable
+// only by its full model id.
+export const MODEL_ARGS = [
+  "default",
+  "opus[1m]",
+  "claude-opus-4-8[1m]",
+  "fable",
+  "sonnet",
+  "haiku",
+] as const;
 export const EFFORT_ARGS = ["low", "medium", "high", "xhigh", "max", "ultracode"] as const;
 export const isModelArg = (v: string): boolean => (MODEL_ARGS as readonly string[]).includes(v);
 export const isEffortArg = (v: string): boolean => (EFFORT_ARGS as readonly string[]).includes(v);
@@ -134,8 +142,9 @@ const MODEL_FAMILIES: Array<[RegExp, string]> = [
  * is absent for models without reasoning effort, and its position shifts. Returns only the
  * fields it can identify; a garbled/foreign statusline yields `{}` (never throws).
  *
- * Opus renders in two variants: "Opus 4.8 (1M context)" → `opus[1m]` (the menu's Opus option,
- * also how "Default" renders), and plain "Opus 4.8" → `opus` (the non-1M base, not in the menu
+ * Opus renders its version in the display name ("Opus 5", "Opus 4.8") plus a "(1M context)"
+ * suffix on the 1M variant — so "Opus 5 (1M context)" → `opus[1m]` (the menu's Opus option,
+ * also how "Default" renders), while plain "Opus 5" → `opus` (the non-1M base, not in the menu
  * so it simply marks nothing).
  */
 export function parseStatusline(line: string): { model?: string; effort?: string } {
@@ -144,8 +153,10 @@ export function parseStatusline(line: string): { model?: string; effort?: string
     const seg = raw.trim();
     if (isEffortArg(seg)) out.effort = seg; // effort is the trailing segment — last match wins
     if (!out.model) {
-      if (/opus/i.test(seg)) out.model = /1m/i.test(seg) ? "opus[1m]" : "opus";
-      else {
+      if (/opus/i.test(seg)) {
+        const base = /4\.8/.test(seg) ? "claude-opus-4-8" : "opus";
+        out.model = /1m/i.test(seg) ? `${base}[1m]` : base;
+      } else {
         const fam = MODEL_FAMILIES.find(([re]) => re.test(seg));
         if (fam) out.model = fam[1];
       }
