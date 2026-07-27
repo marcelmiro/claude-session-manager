@@ -10,6 +10,8 @@ import { Marked } from "marked";
 import { formatTimeAgo } from "/time-ago.js";
 // Unified-patch parser, served unbuilt and covered by shared/diff-lines.test.ts.
 import { parseDiffLines, narrowIndent } from "/diff-lines.js";
+// Notification-tap attribution, served unbuilt and covered by shared/tap-target.test.ts.
+import { tapTarget } from "/tap-target.js";
 
 const html = htm.bind(h);
 
@@ -523,6 +525,10 @@ async function initPush() {
   if (!IS_STANDALONE || !("Notification" in window) || !("serviceWorker" in navigator)) return;
   try {
     const reg = await navigator.serviceWorker.register("/sw.js");
+    // Force an update check every launch. register() alone can leave a months-old
+    // worker active on iOS, and a stale push handler is invisible until someone
+    // digs into why notifications stopped behaving.
+    reg.update().catch(() => {});
     navigator.serviceWorker.addEventListener("message", (e) => {
       const msg = e.data || {};
       if (msg.type === "open-session" && msg.sessionId) open(msg.sessionId);
@@ -3429,8 +3435,8 @@ async function dismissNotifications() {
 
 function resync() {
   if (!authed.value) return;
-  dismissNotifications(); // you're looking now
-  consumePendingNav(); // a tap that foregrounded us may have stashed a session to open
+  // Reads the shade, follows a notification tap into its session, then clears both.
+  followNotificationTap();
   tick.value = Date.now(); // ages froze while the tab was hidden — catch them up first
   refreshSessions();
   if (selectedId.value) refreshTranscript();
@@ -3510,24 +3516,66 @@ function applyDeepLink() {
   history.replaceState(null, "", location.pathname);
 }
 
-// Push-tap handoff via the SW's cache (see stashTarget in sw.js). This is the path
-// that survives an iOS cold launch, where the `?s=` URL is dropped. Consumed on boot
-// AND on foreground: the SW may write the target after boot already ran (the launch
-// races the notificationclick handler), so the visibilitychange backstop catches it.
+// Push-tap handoff via the SW's cache (see stashTarget in sw.js). Only the COLD launch
+// writes this — iOS never dispatches notificationclick to an already-running PWA — but it
+// is the exact signal when it exists, so it's checked before the shade heuristic below.
+// Consumed on boot AND on foreground: the SW may write the target after boot already ran
+// (the launch races the notificationclick handler), so visibilitychange catches it too.
 // Delete-on-read + a 2-min TTL keep a manual open from jumping to a stale tap.
-async function consumePendingNav() {
-  if (!("caches" in self)) return;
+async function takeStashedTap() {
+  if (!("caches" in self)) return null;
   try {
     const cache = await caches.open("csm-nav");
     const res = await cache.match("pending");
-    if (!res) return;
+    if (!res) return null;
     await cache.delete("pending");
     const { sessionId, at } = await res.json();
-    if (!sessionId || Date.now() - at > 120_000) return;
-    if (selectedId.value !== sessionId) open(sessionId); // warm path already switched → skip
+    return sessionId && Date.now() - at <= 120_000 ? sessionId : null;
   } catch {
-    /* cache unavailable — postMessage/?s= paths still cover the warm case */
+    return null; // cache unavailable — the shade diff still covers the warm case
   }
+}
+
+// Which sessions the bridge pushed to us lately (delete-on-read server-side).
+// Deliberately NOT read from the service worker: iOS hands a warm-resumed page a
+// stale CacheStorage snapshot, so a record the worker wrote seconds earlier reads
+// back empty — measured on-device at 2.8s and again at 9s. The sender knows what
+// it sent, and a network read has no cross-context storage semantics to go wrong.
+async function takePushedRecord() {
+  try {
+    const r = await fetch(`/push/recent?device=${encodeURIComponent(DEVICE_ID)}`);
+    if (!r.ok) return {};
+    const { pushes } = await r.json();
+    return pushes || {};
+  } catch {
+    return {}; // offline — nothing to attribute, so nothing moves
+  }
+}
+
+// Foreground/boot: decide whether a notification tap brought us here, then open that
+// session. Order is load-bearing — the tap signal IS the shade, so it must be read
+// before dismissNotifications() closes everything. Both signals are consumed every
+// time (even when the first one wins) so neither can go stale and fire later.
+async function followNotificationTap() {
+  const stashed = await takeStashedTap(); // cold launch: exact
+  const pushed = await takePushedRecord();
+  let tapped = null;
+  try {
+    const reg = navigator.serviceWorker && (await navigator.serviceWorker.getRegistration());
+    if (reg) {
+      const shown = await reg.getNotifications();
+      tapped = tapTarget(
+        pushed,
+        shown.map((n) => n.tag),
+        Date.now(),
+      );
+    }
+  } catch {
+    /* no registration (plain tab) — the stashed path may still have a target */
+  }
+  const id = stashed || tapped;
+  if (id && selectedId.value !== id) open(id);
+  dismissNotifications(); // you're looking now — clear the shade + badge
 }
 
 // Stale-while-revalidate boot: iOS evicts the backgrounded page constantly, so the most
@@ -3551,10 +3599,9 @@ refreshSessions()
     clearTimeout(bootTimeout);
     if (authed.value) {
       applyDeepLink();
-      consumePendingNav();
+      followNotificationTap(); // also clears the shade + badge
       connectStream();
       initPush();
-      dismissNotifications();
     }
   })
   .finally(boot);

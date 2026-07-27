@@ -17,7 +17,7 @@
  * them and get fresh randomness per push.
  */
 
-import { readFileSync, mkdirSync } from "node:fs";
+import { readFileSync, mkdirSync, rmSync } from "node:fs";
 import { PATHS, writeAtomic } from "./config";
 import type { StoredSubscription, PushPayload, EncryptSeams } from "../types";
 
@@ -100,6 +100,65 @@ export function removeSubscription(deviceId: string): void {
   } catch {
     // Non-fatal
   }
+}
+
+// ---------------------------------------------------------------------------
+// Recent-push ledger — what the phone reads to attribute a notification tap
+// ---------------------------------------------------------------------------
+
+/**
+ * Which sessions we pushed to a device lately, so the page can work out which
+ * notification was tapped (it diffs this against the shade — see
+ * shared/tap-target.js). The service worker cannot hand this over itself: iOS
+ * fires `notificationclick` only on a cold launch, and a warm-resumed page reads
+ * a STALE CacheStorage snapshot — measured on-device, the page saw `{}` 2.8s
+ * after the worker's `cache.put` resolved. A network read has no cross-context
+ * storage semantics to get this wrong, and the sender already knows what it sent.
+ *
+ * One file per device (like `consumers/`): the monitor writes, the bridge reads,
+ * and a shared JSON file would lose a writer's slice on concurrent updates.
+ */
+export const PUSHED_DIR = `${PATHS.dir}/pushed`;
+const PUSHED_TTL_MS = 120_000;
+
+const pushedPath = (deviceId: string) => `${PUSHED_DIR}/${deviceId}.json`;
+
+/** Append `sessionId` to the device's ledger, dropping entries past the TTL. */
+export function recordSentPush(deviceId: string, sessionId: string, now = Date.now()): void {
+  if (!isValidDeviceId(deviceId) || !sessionId) return;
+  try {
+    mkdirSync(PUSHED_DIR, { recursive: true });
+    const prev = readJson<Record<string, number>>(pushedPath(deviceId)) ?? {};
+    const kept: Record<string, number> = {};
+    for (const [id, at] of Object.entries(prev)) {
+      if (now - at <= PUSHED_TTL_MS) kept[id] = at;
+    }
+    kept[sessionId] = now;
+    writeAtomic(pushedPath(deviceId), JSON.stringify(kept));
+  } catch {
+    // Non-fatal — the tap just won't be attributable to a session.
+  }
+}
+
+/**
+ * Read the device's ledger and clear it. Delete-on-read so one push can never be
+ * attributed to two different foregrounds — a tap is consumed exactly once.
+ */
+export function takeRecentPushes(deviceId: string, now = Date.now()): Record<string, number> {
+  if (!isValidDeviceId(deviceId)) return {};
+  const path = pushedPath(deviceId);
+  const prev = readJson<Record<string, number>>(path);
+  if (!prev) return {};
+  try {
+    rmSync(path, { force: true });
+  } catch {
+    // Non-fatal — a re-read would just re-offer the same (TTL-bounded) entries.
+  }
+  const fresh: Record<string, number> = {};
+  for (const [id, at] of Object.entries(prev)) {
+    if (now - at <= PUSHED_TTL_MS) fresh[id] = at;
+  }
+  return fresh;
 }
 
 // ---------------------------------------------------------------------------
@@ -302,6 +361,8 @@ export async function sendWebPush(deviceId: string, payload: PushPayload): Promi
         signal: controller.signal,
       });
       if ([401, 403, 404, 410].includes(res.status)) removeSubscription(deviceId);
+      // Ledger the delivery so a later tap can be attributed to this session.
+      else if (res.ok && payload.sessionId) recordSentPush(deviceId, payload.sessionId);
     } finally {
       clearTimeout(timer);
     }

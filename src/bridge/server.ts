@@ -59,6 +59,7 @@ import {
   getVapidPublicKey,
   saveSubscription,
   getSubscription,
+  takeRecentPushes,
 } from "../core/web-push";
 import { watchEvents } from "../core/watch";
 import { EVENTS_DIR, pendingToolCall } from "../core/hook-events";
@@ -95,6 +96,8 @@ const STATIC: Record<string, string> = {
   "/time-ago.js": "../../shared/time-ago.js",
   // Unified-patch parser, shared with its test suite — served unbuilt.
   "/diff-lines.js": "../../shared/diff-lines.js",
+  // Notification-tap attribution, shared with its test suite — served unbuilt.
+  "/tap-target.js": "../../shared/tap-target.js",
   "/manifest.json": "manifest.json",
   "/icon-512.png": "icon-512.png",
   "/apple-touch-icon.png": "apple-touch-icon.png",
@@ -870,6 +873,13 @@ async function route(req: Request): Promise<Response> {
   if (method === "GET" && path === "/push/subscribed") {
     const d = url.searchParams.get("device");
     return json({ subscribed: isValidDeviceId(d) && getSubscription(d) !== null });
+  }
+  // Which sessions we pushed to this device lately, so the page can tell a
+  // notification tap from a manual app open (it diffs this against the shade —
+  // see shared/tap-target.js). Delete-on-read: one push, one attribution.
+  if (method === "GET" && path === "/push/recent") {
+    const d = url.searchParams.get("device");
+    return json({ pushes: isValidDeviceId(d) ? takeRecentPushes(d) : {} });
   }
   // sendBeacon target fired on visibilitychange→hidden: the client closes its
   // EventSource FIRST (so no heartbeat re-touches the marker on a lingering

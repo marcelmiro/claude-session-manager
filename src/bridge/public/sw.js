@@ -3,6 +3,8 @@
 // skipWaiting/claim so an updated worker takes over on next launch instead of
 // iOS's lazy default (otherwise stale push handlers linger for days).
 
+const NAV_CACHE = "csm-nav";
+
 self.addEventListener("install", () => self.skipWaiting());
 self.addEventListener("activate", (event) => event.waitUntil(self.clients.claim()));
 
@@ -44,13 +46,18 @@ self.addEventListener("push", (event) => {
 async function stashTarget(sessionId) {
   if (!sessionId) return;
   try {
-    const cache = await caches.open("csm-nav");
+    const cache = await caches.open(NAV_CACHE);
     await cache.put("pending", new Response(JSON.stringify({ sessionId, at: Date.now() })));
   } catch {
     /* cache unavailable — the ?s= URL and postMessage paths still try */
   }
 }
 
+// Only reached on a COLD launch — iOS never dispatches this to an already-running PWA.
+// Stash first: on that cold path `matchAll()` already returns the launching window ~800ms
+// before its JS boots, so the postMessage below lands in a page with no listener yet and
+// `openWindow` is never reached. The stash is what actually carries the deep link; the
+// other two are belt-and-braces for platforms that behave.
 self.addEventListener("notificationclick", (event) => {
   event.notification.close();
   const sessionId = (event.notification.data || {}).sessionId || "";
