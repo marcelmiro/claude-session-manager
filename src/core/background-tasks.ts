@@ -24,6 +24,8 @@
  *   routed to the parent, launches on the far side of a /clear split) are ignored.
  */
 
+import { resolveVerdicts, runnersAlive, type RunnerProbe } from "./runner-verdicts";
+
 export type BackgroundTaskKind = "script" | "agent" | "workflow";
 export type BackgroundTaskStatus = "pending" | "completed" | "killed";
 
@@ -164,29 +166,9 @@ export function pendingScripts(tasks: BackgroundTask[]): BackgroundTask[] {
   return tasks.filter((t) => t.kind === "script" && t.status === "pending");
 }
 
-// Liveness verdicts by taskId. Death is terminal — a runner never revives, so a dead
-// verdict is cached forever and costs no further probes. An alive verdict re-probes
-// after a short TTL to notice the runner exiting.
-const runnerVerdicts = new Map<string, { ts: number; alive: boolean }>();
-const ALIVE_TTL_MS = 15_000;
-
-/**
- * Whether anything still runs a task: the runner holds an open fd on its output file
- * for its whole life, so `lsof` on that path is a definitive orphan test. A session
- * resumed under a new Claude process orphans its tasks — the transcript then says
- * "pending" forever (seen in real data: a 3-day-old wait on a live pane), and this
- * probe is what catches it. A missing output file (tmp pruned, reboot) reads dead too.
- */
-export async function runnerAlive(outputPath: string): Promise<boolean> {
-  try {
-    // Absolute path: the monitor runs under tmux's status-command environment,
-    // whose PATH lacks /usr/sbin — a bare "lsof" throws ENOENT there, which the
-    // catch below would misreport as a dead runner.
-    const proc = Bun.spawn(["/usr/sbin/lsof", "-t", outputPath], { stdout: "ignore", stderr: "ignore" });
-    return (await proc.exited) === 0;
-  } catch {
-    return false; // lsof unavailable/failed — treat as dead rather than badge forever
-  }
+/** The verdict-store key for a task: the harness task id, or the tool use it came from. */
+export function taskKey(task: BackgroundTask): string {
+  return task.taskId ?? task.toolUseId;
 }
 
 /**
@@ -194,28 +176,21 @@ export async function runnerAlive(outputPath: string): Promise<boolean> {
  * rendering surface uses. A task without an outputPath can't be probed and stays
  * visible. Note the flip side of trusting the probe: an intentionally-infinite
  * background daemon shows for as long as it truly runs — a true statement.
+ *
+ * Verdicts come from the shared persisted store, so a task already known to be dead
+ * costs no probe here no matter which process asks (see `runner-verdicts.ts`).
  */
 export async function liveScripts(
   tasks: BackgroundTask[],
-  probe: (outputPath: string) => Promise<boolean> = runnerAlive,
+  probe: RunnerProbe = runnersAlive,
 ): Promise<BackgroundTask[]> {
-  const out: BackgroundTask[] = [];
-  for (const t of pendingScripts(tasks)) {
-    if (!t.outputPath) {
-      out.push(t);
-      continue;
-    }
-    const key = t.taskId ?? t.toolUseId;
-    const hit = runnerVerdicts.get(key);
-    let alive: boolean;
-    if (hit && (!hit.alive || Date.now() - hit.ts < ALIVE_TTL_MS)) alive = hit.alive;
-    else {
-      alive = await probe(t.outputPath);
-      runnerVerdicts.set(key, { ts: Date.now(), alive });
-    }
-    if (alive) out.push(t);
-  }
-  return out;
+  const pending = pendingScripts(tasks);
+  const verdicts = await resolveVerdicts(
+    pending.filter((t) => t.outputPath).map((t) => ({ key: taskKey(t), outputPath: t.outputPath! })),
+    Date.now(),
+    probe,
+  );
+  return pending.filter((t) => !t.outputPath || verdicts.get(taskKey(t)));
 }
 
 // Per-transcript cache keyed by (size, mtime) — launch and notification are both

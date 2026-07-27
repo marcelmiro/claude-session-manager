@@ -1,5 +1,19 @@
-import { describe, expect, test } from "bun:test";
+// Home helper FIRST so CSM_HOME is set before config.ts freezes PATHS.dir —
+// `liveScripts` now resolves verdicts through the persisted store, which must
+// land in the throwaway temp home rather than the real ~/.config/csm.
+import "../../test/helpers/home";
+import { CSM_DIR } from "../../test/helpers/home";
+import { describe, expect, test, beforeEach } from "bun:test";
+import { rmSync } from "node:fs";
+import { join } from "node:path";
 import { parseBackgroundTasks, pendingScripts, liveScripts } from "./background-tasks";
+
+// Dead verdicts are terminal AND persisted, so they would otherwise leak between tests.
+beforeEach(() => rmSync(join(CSM_DIR, "runner-verdicts.json"), { force: true }));
+
+/** Batched-probe stand-in: alive iff the path satisfies `isAlive`. */
+const probeWhere = (isAlive: (p: string) => boolean) => async (paths: string[]) =>
+  new Map(paths.map((p) => [p, isAlive(p)]));
 
 const line = (o: unknown) => JSON.stringify(o);
 
@@ -177,19 +191,32 @@ describe("liveScripts", () => {
       ...bashLaunch("toolu_1", "bdead1", "gh pr checks --watch"),
       ...bashLaunch("toolu_2", "blive2", "gh pr checks --watch"),
     ].join("\n");
-    const probe = async (outputPath: string) => outputPath.includes("blive2");
-    const live = await liveScripts(parseBackgroundTasks(jsonl), probe);
+    const live = await liveScripts(parseBackgroundTasks(jsonl), probeWhere((p) => p.includes("blive2")));
     expect(live.map((t) => t.taskId)).toEqual(["blive2"]);
   });
 
   test("a dead verdict is terminal — the probe is never re-run for that task", async () => {
     const jsonl = bashLaunch("toolu_1", "bdead9").join("\n");
     let calls = 0;
-    const probe = async () => ((calls += 1), false);
+    const probe = async (paths: string[]) => (calls += 1, new Map(paths.map((p) => [p, false])));
     const tasks = parseBackgroundTasks(jsonl);
     await liveScripts(tasks, probe);
     await liveScripts(tasks, probe);
     expect(calls).toBe(1);
+  });
+
+  test("all tasks are probed in ONE batched call, not one call each", async () => {
+    const jsonl = [
+      ...bashLaunch("toolu_1", "bone"),
+      ...bashLaunch("toolu_2", "btwo"),
+      ...bashLaunch("toolu_3", "bthree"),
+    ].join("\n");
+    const batches: string[][] = [];
+    const probe = async (paths: string[]) => (batches.push(paths), new Map(paths.map((p) => [p, true])));
+    const live = await liveScripts(parseBackgroundTasks(jsonl), probe);
+    expect(live).toHaveLength(3);
+    expect(batches).toHaveLength(1);
+    expect(batches[0]).toHaveLength(3);
   });
 
   test("a pending task without an output path can't be probed and stays visible", async () => {
@@ -210,8 +237,7 @@ describe("liveScripts", () => {
         },
       }),
     ].join("\n");
-    const probe = async () => false;
-    const live = await liveScripts(parseBackgroundTasks(jsonl), probe);
+    const live = await liveScripts(parseBackgroundTasks(jsonl), probeWhere(() => false));
     expect(live.map((t) => t.taskId)).toEqual(["bnopath"]);
   });
 });

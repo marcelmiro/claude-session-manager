@@ -17,8 +17,7 @@ import { buildLaunchCommand } from "./core/launch-command";
 import { initWizard, renderWizard, renderWizardPreview, renderWizardStatusBar, handleWizardKey, setWizardBranches } from "./ui/wizard";
 import { loadAllSessions, searchEntries, type SearchEntry } from "./core/search";
 import { recoverWorktreeTranscript } from "./core/recover";
-import { resolveTranscriptPath } from "./core/last-turn";
-import { pendingScriptsAt } from "./core/background-tasks";
+import { detectScriptWaits } from "./core/script-wait";
 import { renderSearchResults } from "./ui/search-list";
 import { createSpaceMenuState, renderSpaceMenu, handleSpaceMenuKey, getMenuDimensions, type SpaceMenuState } from "./ui/space-menu";
 import { createQuestionPicker, renderQuestionPicker, handleQuestionPickerKey, getPickerDimensions, type QuestionPickerState } from "./ui/question-picker";
@@ -451,17 +450,16 @@ async function refresh(opts?: { skipArchivedSummaries?: boolean }) {
     }
 
     // ⏳ script-wait: a ready session may still be driving a run_in_background
-    // script. Cheap here — the TUI is long-lived, so pendingScriptsAt's mtime
-    // cache and liveness-probe TTL persist across refreshes. Visibility only:
-    // never affects status, sort, or attention.
-    await Promise.all(
-      sessions
-        .filter((s) => s.status === "ready" && s.id)
-        .map(async (s) => {
-          const path = await resolveTranscriptPath(s.id);
-          if (path) s.scriptWaiting = (await pendingScriptsAt(path)).length > 0;
-        }),
-    );
+    // script. Same entry point the monitor uses, so the transcript parse and the
+    // runner-liveness verdicts come from their shared on-disk caches — launched via
+    // `tmux display-popup` this is a fresh process on every open, and nothing held
+    // in memory survives to the next one. Visibility only: never affects status,
+    // sort, or attention.
+    const readyIds = sessions.filter((s) => s.status === "ready" && s.id).map((s) => s.id);
+    const scriptWaitIds = readyIds.length > 0 ? await detectScriptWaits(readyIds) : new Set<string>();
+    for (const session of sessions) {
+      if (scriptWaitIds.has(session.id)) session.scriptWaiting = true;
+    }
 
     const groups = groupSessions(sessions, notifConfig.priorityRepos ?? []);
 
