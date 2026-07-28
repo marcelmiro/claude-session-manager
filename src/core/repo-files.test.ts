@@ -1,7 +1,7 @@
 import { expect, test, beforeAll, afterAll } from "bun:test";
 import { realpathSync, mkdtempSync, writeFileSync, mkdirSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { fileDiff, safeRepoPath, changedFiles, baseRef } from "./repo-files";
+import { fileDiff, safeRepoPath, changedFiles, baseRef, syncTiers, rangeDiff } from "./repo-files";
 
 // --- safeRepoPath: the containment guard the /diff, /changes routes lean on ---
 
@@ -325,6 +325,218 @@ test("dangling origin/HEAD symref falls through to a local default branch", asyn
   const paths = (await changedFiles(root, ref)).map((f) => f.path);
   expect(paths).toContain("committed.txt");
   rmSync(root, { recursive: true, force: true });
+});
+
+// --- syncTiers: the chain base → origin/<branch> → HEAD → working tree ---
+
+/** Repo with a real bare `origin`, `main` pushed, one committed file (`base.txt`). */
+async function remoteRepo(): Promise<{ root: string; bare: string; clean: () => void }> {
+  const root = await tempRepo();
+  const bare = realpathSync(mkdtempSync(`${tmpdir()}/rf-bare-`));
+  await Bun.$`git init -q --bare ${bare}`.quiet();
+  writeFileSync(`${root}/base.txt`, "one\n");
+  await Bun.$`git -C ${root} add -A`.quiet();
+  await Bun.$`git -C ${root} commit -qm base`.quiet();
+  await Bun.$`git -C ${root} branch -M main`.quiet();
+  await Bun.$`git -C ${root} remote add origin ${bare}`.quiet();
+  await Bun.$`git -C ${root} push -q -u origin main`.quiet();
+  return {
+    root,
+    bare,
+    clean: () => {
+      rmSync(root, { recursive: true, force: true });
+      rmSync(bare, { recursive: true, force: true });
+    },
+  };
+}
+
+const tiersOf = async (root: string) => (await syncTiers(root, (await baseRef(root)).ref))!;
+const tierByKey = (t: Awaited<ReturnType<typeof tiersOf>>, key: string) => t.tiers.find((x) => x.key === key);
+
+test("syncTiers: one file touched in all three ranges appears in each, with THAT segment's LOC", async () => {
+  const { root, clean } = await remoteRepo();
+  await Bun.$`git -C ${root} checkout -q -b feature`.quiet();
+  writeFileSync(`${root}/base.txt`, "one\ntwo\n"); // pushed segment: +1
+  await Bun.$`git -C ${root} commit -qam pushed`.quiet();
+  await Bun.$`git -C ${root} push -q -u origin feature`.quiet();
+  writeFileSync(`${root}/base.txt`, "one\ntwo\nthree\n"); // unpushed segment: +1
+  await Bun.$`git -C ${root} commit -qam local`.quiet();
+  writeFileSync(`${root}/base.txt`, "one\ntwo\nthree\nfour\n"); // uncommitted segment: +1
+
+  const sync = await tiersOf(root);
+  expect(sync.tiers.map((t) => t.key)).toEqual(["uncommitted", "unpushed", "pushed"]);
+  for (const key of ["uncommitted", "unpushed", "pushed"]) {
+    const t = tierByKey(sync, key)!;
+    expect(t.files.map((f) => f.path)).toEqual(["base.txt"]);
+    expect(t.add).toBe(1); // that range's churn, NOT the branch's cumulative +3
+    expect(t.del).toBe(0);
+    expect(t.add).toBe(t.files.reduce((s, f) => s + f.add, 0)); // header total == sum of its rows
+  }
+  expect(sync.pushed).toBe(true);
+  expect(sync.unpushedCount).toBe(1); // one FILE the Mac still holds, not two tier entries
+  clean();
+});
+
+test("syncTiers: never-pushed branch has no On-GitHub tier and its unpushed tier spans base..HEAD", async () => {
+  const { root, clean } = await remoteRepo();
+  await Bun.$`git -C ${root} checkout -q -b feature`.quiet();
+  writeFileSync(`${root}/committed.txt`, "x\n");
+  await Bun.$`git -C ${root} add -A`.quiet();
+  await Bun.$`git -C ${root} commit -qm feat`.quiet();
+  const sync = await tiersOf(root);
+  expect(sync.pushed).toBe(false);
+  expect(tierByKey(sync, "pushed")).toBeUndefined();
+  expect(tierByKey(sync, "unpushed")!.files.map((f) => f.path)).toEqual(["committed.txt"]);
+  clean();
+});
+
+test("syncTiers: detached HEAD has no branch to push, so no chain", async () => {
+  const { root, clean } = await remoteRepo();
+  await Bun.$`git -C ${root} checkout -q --detach`.quiet();
+  expect(await syncTiers(root, (await baseRef(root)).ref)).toBeNull();
+  clean();
+});
+
+test("syncTiers measures against origin/<branch> by NAME, ignoring a misleading @{upstream}", async () => {
+  const { root, clean } = await remoteRepo();
+  await Bun.$`git -C ${root} checkout -q -b feature`.quiet();
+  writeFileSync(`${root}/pushed.txt`, "x\n");
+  await Bun.$`git -C ${root} add -A`.quiet();
+  await Bun.$`git -C ${root} commit -qm pushed`.quiet();
+  await Bun.$`git -C ${root} push -q -u origin feature`.quiet();
+  // The state two live repos are actually in: a feature branch tracking origin/main.
+  await Bun.$`git -C ${root} branch --set-upstream-to=origin/main feature`.quiet();
+  writeFileSync(`${root}/local.txt`, "y\n");
+  await Bun.$`git -C ${root} add -A`.quiet();
+  await Bun.$`git -C ${root} commit -qm local`.quiet();
+
+  const sync = await tiersOf(root);
+  // Measured against origin/feature: only the second commit is unpushed. Against @{upstream}
+  // (origin/main) BOTH files would be, reporting pushed work as still on the Mac.
+  expect(tierByKey(sync, "unpushed")!.files.map((f) => f.path)).toEqual(["local.txt"]);
+  expect(tierByKey(sync, "pushed")!.files.map((f) => f.path)).toEqual(["pushed.txt"]);
+  clean();
+});
+
+test("remote ahead of local: no phantom deletions in the unpushed tier (three-dot, not two-dot)", async () => {
+  const { root, clean } = await remoteRepo();
+  await Bun.$`git -C ${root} checkout -q -b feature`.quiet();
+  writeFileSync(`${root}/theirs.txt`, "pushed from another worktree\n");
+  await Bun.$`git -C ${root} add -A`.quiet();
+  await Bun.$`git -C ${root} commit -qm theirs`.quiet();
+  await Bun.$`git -C ${root} push -q -u origin feature`.quiet();
+  await Bun.$`git -C ${root} reset -q --hard HEAD~1`.quiet(); // local behind its own remote
+
+  const sync = await tiersOf(root);
+  // `git diff origin/feature HEAD` (two-dot) invents `D theirs.txt` — a file this branch never
+  // deleted, reported as un-landed local work.
+  expect(tierByKey(sync, "unpushed")).toBeUndefined();
+  expect(sync.unpushedCount).toBe(0);
+  expect(tierByKey(sync, "pushed")!.files.map((f) => f.path)).toEqual(["theirs.txt"]);
+  clean();
+});
+
+test("branch rebased after a force-push: the On-GitHub tier has no phantom deletions either", async () => {
+  const { root, clean } = await remoteRepo();
+  await Bun.$`git -C ${root} checkout -q -b feature`.quiet();
+  writeFileSync(`${root}/feat.txt`, "f\n");
+  await Bun.$`git -C ${root} add -A`.quiet();
+  await Bun.$`git -C ${root} commit -qm feat`.quiet();
+  await Bun.$`git -C ${root} push -q -u origin feature`.quiet();
+  // main moves on and the branch is rebased onto it — `base` is no longer an ancestor of
+  // origin/feature, which still points at the pre-rebase commit.
+  await Bun.$`git -C ${root} checkout -q main`.quiet();
+  writeFileSync(`${root}/mainonly.txt`, "m\n");
+  await Bun.$`git -C ${root} add -A`.quiet();
+  await Bun.$`git -C ${root} commit -qm mainwork`.quiet();
+  await Bun.$`git -C ${root} push -q origin main`.quiet();
+  await Bun.$`git -C ${root} checkout -q feature`.quiet();
+  await Bun.$`git -C ${root} rebase -q main`.quiet();
+
+  const pushedTier = tierByKey(await tiersOf(root), "pushed")!;
+  expect(pushedTier.files.map((f) => f.path)).toEqual(["feat.txt"]);
+  expect(pushedTier.files.some((f) => f.status === "D")).toBe(false); // not `D mainonly.txt`
+  clean();
+});
+
+test("syncTiers: an untracked file is uncommitted-only, status A", async () => {
+  const { root, clean } = await remoteRepo();
+  await Bun.$`git -C ${root} checkout -q -b feature`.quiet();
+  writeFileSync(`${root}/untracked.txt`, "u\n");
+  const sync = await tiersOf(root);
+  expect(sync.tiers.map((t) => t.key)).toEqual(["uncommitted"]);
+  expect(tierByKey(sync, "uncommitted")!.files).toEqual([
+    { path: "untracked.txt", status: "A", add: 1, del: 0, binary: false },
+  ]);
+  clean();
+});
+
+test("rename inside an unpushed commit is one R row carrying its old path, and its patch opens", async () => {
+  const { root, clean } = await remoteRepo();
+  await Bun.$`git -C ${root} checkout -q -b feature`.quiet();
+  writeFileSync(`${root}/old.txt`, "line1\nline2\nline3\nline4\n");
+  await Bun.$`git -C ${root} add -A`.quiet();
+  await Bun.$`git -C ${root} commit -qm add`.quiet();
+  await Bun.$`git -C ${root} push -q -u origin feature`.quiet();
+  await Bun.$`git -C ${root} mv old.txt new.txt`.quiet();
+  writeFileSync(`${root}/new.txt`, "line1\nCHANGED\nline3\nline4\n");
+  await Bun.$`git -C ${root} commit -qam rename`.quiet();
+
+  const t = tierByKey(await tiersOf(root), "unpushed")!;
+  expect(t.files.length).toBe(1);
+  expect(t.files[0]!.status).toBe("R");
+  expect(t.files[0]!.orig).toBe("old.txt");
+  // Tapping the row asks for the same range the row's LOC was measured over.
+  const d = await rangeDiff(root, t.from, t.to, "new.txt", "old.txt");
+  expect(d.status).toBe("R");
+  expect(d.patch).toContain("CHANGED");
+  expect(d.add).toBeLessThan(4); // real churn, not the whole file re-added
+  clean();
+});
+
+test("rangeDiff shows only the segment's churn, not the branch's cumulative diff", async () => {
+  const { root, clean } = await remoteRepo();
+  await Bun.$`git -C ${root} checkout -q -b feature`.quiet();
+  writeFileSync(`${root}/base.txt`, "one\nPUSHED\n");
+  await Bun.$`git -C ${root} commit -qam pushed`.quiet();
+  await Bun.$`git -C ${root} push -q -u origin feature`.quiet();
+  writeFileSync(`${root}/base.txt`, "one\nPUSHED\nLOCAL\n");
+  await Bun.$`git -C ${root} commit -qam local`.quiet();
+
+  const sync = await tiersOf(root);
+  const landed = tierByKey(sync, "pushed")!;
+  const d = await rangeDiff(root, landed.from, landed.to, "base.txt");
+  expect(d.patch).toContain("PUSHED");
+  expect(d.patch).not.toContain("LOCAL"); // the unpushed commit belongs to the next tier
+  clean();
+});
+
+test("changedFiles in ref-to-ref mode skips the untracked pass (the working tree isn't an endpoint)", async () => {
+  const { root, clean } = await remoteRepo();
+  await Bun.$`git -C ${root} checkout -q -b feature`.quiet();
+  writeFileSync(`${root}/committed.txt`, "c\n");
+  await Bun.$`git -C ${root} add -A`.quiet();
+  await Bun.$`git -C ${root} commit -qm feat`.quiet();
+  writeFileSync(`${root}/untracked.txt`, "u\n");
+  const paths = (await changedFiles(root, "origin/main", "HEAD")).map((f) => f.path);
+  expect(paths).toEqual(["committed.txt"]);
+  clean();
+});
+
+test("unpushedCount is the distinct union: a file both committed-unpushed and dirty counts once", async () => {
+  const { root, clean } = await remoteRepo();
+  await Bun.$`git -C ${root} checkout -q -b feature`.quiet();
+  writeFileSync(`${root}/base.txt`, "one\ntwo\n");
+  writeFileSync(`${root}/other.txt`, "o\n");
+  await Bun.$`git -C ${root} add -A`.quiet();
+  await Bun.$`git -C ${root} commit -qm local`.quiet();
+  writeFileSync(`${root}/base.txt`, "one\ntwo\nthree\n"); // same file, now also dirty
+
+  const sync = await tiersOf(root);
+  const sizes = tierByKey(sync, "uncommitted")!.files.length + tierByKey(sync, "unpushed")!.files.length;
+  expect(sizes).toBe(3); // base.txt twice + other.txt
+  expect(sync.unpushedCount).toBe(2); // base.txt, other.txt
+  clean();
 });
 
 // --- untracked nested repos are not files ---

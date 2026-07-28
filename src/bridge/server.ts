@@ -47,7 +47,7 @@ import { resolveTranscriptPath } from "../core/last-turn";
 import { homedir } from "os";
 import { discoverRepos, getBaseRepoPath, compareRepos } from "../core/git";
 import { listSlashCommands } from "../core/skills";
-import { repoRootForSession, safeRepoPath, fileDiff, branchChanges } from "../core/repo-files";
+import { repoRootForSession, safeRepoPath, fileDiff, rangeDiff, branchChanges } from "../core/repo-files";
 import { branchPullRequest, type PullRequestInfo } from "../core/pull-request";
 import { recoverWorktreeTranscript } from "../core/recover";
 import { loadConfig, PATHS } from "../core/config";
@@ -985,7 +985,9 @@ async function route(req: Request): Promise<Response> {
   const relTo = (root: string, abs: string) => relative(root, abs);
 
   // Files this branch changed vs its base branch (committed + uncommitted) — the changed-files
-  // card + full list. Only changed files, never the whole repo.
+  // card + full list. Only changed files, never the whole repo. Carries `tiers`, the same work
+  // split by how far it has travelled (pushed / committed-not-pushed / uncommitted), on the
+  // same payload so the card and the list can never disagree about it.
   const changes = path.match(/^\/sessions\/([^/]+)\/changes$/);
   if (method === "GET" && changes) {
     const data = await cachedBranchChanges(decodeURIComponent(changes[1]!));
@@ -995,7 +997,8 @@ async function route(req: Request): Promise<Response> {
 
   // Single-file diff, branch vs its base (committed + uncommitted, + untracked). `path` =
   // repo-relative, sent by the Edit/Write chip or a changed-files row; git calls use
-  // `-- <rel>` so a leading-dash path can't be read as a flag.
+  // `-- <rel>` so a leading-dash path can't be read as a flag. `from`/`to` scope the patch to
+  // one tier of the sync chain — the row's LOC and its patch then measure the same range.
   const diff = path.match(/^\/sessions\/([^/]+)\/diff$/);
   if (method === "GET" && diff) {
     const rel = url.searchParams.get("path");
@@ -1006,15 +1009,29 @@ async function route(req: Request): Promise<Response> {
     const abs = safeRepoPath(root, decodeURIComponent(rel));
     if (!abs) return json({ ok: false, reason: "not-found" }, 404);
     const relPath = relTo(root, abs);
+    const changed = await cachedBranchChanges(id);
+    // Only a range this session's own chain published is honoured: the endpoints reach git as
+    // a revspec, and a caller-supplied one could otherwise pose as an option (`--output=…`).
+    // A pair that no longer matches (the chain moved since the list was fetched) degrades to
+    // the branch-vs-base diff rather than erroring.
+    const from = url.searchParams.get("from");
+    const to = url.searchParams.get("to") || "";
+    const tier = from ? changed?.tiers?.find((t) => t.from === from && t.to === to) : undefined;
     // `orig` (the old path of a rename) makes the diff show the true rename rather than a
     // whole-file add. Resolve it from the change list rather than trusting the caller to
     // supply it: a tool chip only knows the path it edited, so a chip and a changed-files
     // row would otherwise disagree about whether the same file is new. The list is cached,
-    // so this costs nothing on the common path. An explicit `orig` param still wins.
+    // so this costs nothing on the common path. An explicit `orig` param still wins. Within a
+    // tier the lookup is scoped to THAT tier — a rename committed but not pushed is a rename
+    // in one range and an ordinary file in the next.
     const origParam = url.searchParams.get("orig");
     const origAbs = origParam ? safeRepoPath(root, decodeURIComponent(origParam)) : null;
     let orig = origAbs ? relTo(root, origAbs) : undefined;
-    if (!orig) orig = (await cachedBranchChanges(id))?.files.find((f) => f.path === relPath)?.orig;
+    if (!orig) orig = (tier?.files ?? changed?.files ?? []).find((f) => f.path === relPath)?.orig;
+    if (tier?.to) return json(await rangeDiff(root, tier.from, tier.to, relPath, orig));
+    // A tier ending at the working tree (`uncommitted`) still needs `fileDiff`'s untracked
+    // fallback and pathspec normalization — only its start ref moves.
+    if (tier) return json(await fileDiff(root, abs, relPath, orig, { ref: tier.from, label: tier.from }));
     return json(await fileDiff(root, abs, relPath, orig));
   }
 

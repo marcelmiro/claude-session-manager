@@ -170,15 +170,19 @@ export async function baseRef(root: string): Promise<{ ref: string; label: strin
  * patch. `--no-renames` keeps paths literal so numstat parses cleanly. `abs` is the
  * pre-validated absolute path (from `safeRepoPath`); `rel` is repo-relative. Every pathspec
  * goes through `literal()` — a real filename can contain glob metacharacters.
+ *
+ * `refOverride` replaces the base with another ref-vs-worktree endpoint — the "uncommitted"
+ * tier passes `HEAD` so the patch shown is the one that tier's LOC was measured over.
  */
 export async function fileDiff(
   root: string,
   abs: string,
   rel: string,
   orig?: string,
+  refOverride?: { ref: string; label: string },
 ): Promise<FileDiff> {
   const branch = await currentBranch(root);
-  const { ref, label } = await baseRef(root);
+  const { ref, label } = refOverride ?? (await baseRef(root));
 
   // Rename: diff BOTH endpoints (`-M`) so the true content churn shows, not the whole new file
   // as a fresh add. `changedFiles` supplies `orig` (the old path) for its status-R rows.
@@ -253,6 +257,47 @@ export async function fileDiff(
   return { branch, base: label, status, add, del, patch };
 }
 
+/** Shorten a raw commit sha for a UI label; named refs pass through untouched. */
+const shortRef = (r: string) => (/^[0-9a-f]{40}$/.test(r) ? r.slice(0, 7) : r);
+
+/**
+ * Diff for one file over a REF-TO-REF range — the "committed, not pushed" and "on GitHub"
+ * tiers. Same three-dot rule as `changedFiles`'s range mode, so the patch is measured over
+ * exactly the range its row's LOC came from. None of `fileDiff`'s working-tree machinery
+ * applies here (an untracked file is by definition in neither ref, and the NFD/NFC pathspec
+ * retry exists because git matches the pathspec against the working copy, not a ref).
+ */
+export async function rangeDiff(
+  root: string,
+  from: string,
+  to: string,
+  rel: string,
+  orig?: string,
+): Promise<FileDiff> {
+  const branch = await currentBranch(root);
+  const label = `${shortRef(from)}…${shortRef(to)}`;
+  const range = `${from}...${to}`;
+  const isRename = !!orig && orig !== rel;
+  const specs = isRename ? [literal(orig!), literal(rel)] : [literal(rel)];
+  const patch = (await Bun.$`git -C ${root} diff -M ${range} -- ${specs}`.nothrow().quiet()).stdout.toString();
+  if (!patch.trim()) return { branch, base: label, add: 0, del: 0, empty: true };
+  const numstat = (
+    await Bun.$`git -C ${root} diff -M --numstat ${range} -- ${specs}`.nothrow().quiet()
+  ).stdout.toString();
+  const { add, del, binary } = parseNumstat(numstat);
+  const status = isRename
+    ? "R"
+    : /^new file mode/m.test(patch)
+      ? "A"
+      : /^deleted file mode/m.test(patch)
+        ? "D"
+        : "M";
+  const head = { branch, base: label, status, add, del, ...(isRename ? { orig } : {}) };
+  if (binary) return { ...head, binary: true };
+  if (patch.length > SIZE_CAP) return { ...head, tooLarge: true };
+  return { ...head, patch };
+}
+
 export interface ChangedFile {
   path: string; // for a rename, the NEW path
   status: string; // git status vs base: A(dded) / M(odified) / D(eleted) / R(enamed) / T(ype)
@@ -270,11 +315,18 @@ export interface ChangedFile {
  * churn), instead of a misleading delete+add pair. `-z` gives NUL-delimited, raw (unquoted,
  * un-normalized) UTF-8 paths so non-ASCII names parse cleanly and round-trip to a reachable
  * diff. Deduped/keyed by the new path.
+ *
+ * With `to`, this is a REF-TO-REF range instead (a tier of the sync chain): the working tree
+ * isn't an endpoint, so the untracked pass is skipped. The two refs are passed as ONE
+ * three-dot revspec, never as two arguments — `git diff A B` means `A..B`, which compares the
+ * tips directly and reports everything the far side has and this side lacks as a *deletion*,
+ * inventing phantom `D` rows for files that only ever existed on the remote.
  */
-export async function changedFiles(root: string, ref: string): Promise<ChangedFile[]> {
+export async function changedFiles(root: string, ref: string, to?: string): Promise<ChangedFile[]> {
+  const range = to ? `${ref}...${to}` : ref;
   const [numstatR, statusR] = await Promise.all([
-    Bun.$`git -C ${root} diff -M -z --numstat ${ref}`.nothrow().quiet(),
-    Bun.$`git -C ${root} diff -M -z --name-status ${ref}`.nothrow().quiet(),
+    Bun.$`git -C ${root} diff -M -z --numstat ${range}`.nothrow().quiet(),
+    Bun.$`git -C ${root} diff -M -z --name-status ${range}`.nothrow().quiet(),
   ]);
   // `-z` records are NUL-separated. A rename spans THREE tokens: the status/counts token, then
   // the old path, then the new path (numstat's counts token ends with an empty path field;
@@ -318,6 +370,7 @@ export async function changedFiles(root: string, ref: string): Promise<ChangedFi
       binary,
     });
   }
+  if (to) return [...map.values()]; // ref-to-ref range: the working tree isn't an endpoint
   // Untracked new files aren't in `git diff <ref>`; add them as all-additions (status A).
   const untracked = (
     await Bun.$`git -C ${root} ls-files -z --others --exclude-standard`.nothrow().quiet()
@@ -344,29 +397,121 @@ export async function changedFiles(root: string, ref: string): Promise<ChangedFi
   return [...map.values()];
 }
 
+/** Most-recently-modified first, so the phone's card previews the latest edits. */
+function sortByMtime(root: string, files: ChangedFile[]): ChangedFile[] {
+  return files
+    .map((f) => {
+      let mtime = 0;
+      try {
+        mtime = statSync(`${root}/${f.path}`).mtimeMs; // deleted files sort last (mtime 0)
+      } catch {}
+      return { f, mtime };
+    })
+    .sort((a, b) => b.mtime - a.mtime)
+    .map((x) => x.f);
+}
+
+export type TierKey = "uncommitted" | "unpushed" | "pushed";
+
+export interface ChangeTier {
+  key: TierKey;
+  /** Diff endpoints for this tier. `to: ""` means the working tree. */
+  from: string;
+  to: string;
+  files: ChangedFile[];
+  add: number;
+  del: number;
+}
+
+/**
+ * How far this branch's work has travelled, as a CHAIN of three adjacent ranges rather than a
+ * set of overlapping filters:
+ *
+ *     base ──────► origin/<branch> ──────► HEAD ──────► working tree
+ *           pushed          committed,          uncommitted
+ *                           not pushed
+ *
+ * Each link is a real diff range, so each has its own file list, its own per-file LOC and its
+ * own openable patch. A file pushed and then edited again appears in more than one tier, with
+ * the LOC of THAT segment in each — the same way an editor's SCM panel lists a file under both
+ * staged and unstaged. Empty tiers are dropped.
+ *
+ * The comparison ref is `origin/<branch>` BY NAME, not `@{upstream}` and not `@{push}`: two
+ * repos on this machine point a feature branch's upstream at `origin/main` (which would report
+ * the branch as hundreds of files out of sync with itself), and `@{push}` fails outright on
+ * those same two ("cannot resolve 'simple' push to a single destination").
+ *
+ * `base` is the caller's already-resolved `baseRef` ref (threaded in rather than re-derived —
+ * `baseRef` costs several git calls). Null on a detached HEAD or an unborn HEAD: neither has a
+ * branch to push, so there is no chain to draw and the flat list stands alone.
+ */
+export async function syncTiers(
+  root: string,
+  base: string,
+): Promise<{ tiers: ChangeTier[]; pushed: boolean; unpushedCount: number } | null> {
+  const branch = await currentBranch(root);
+  if (!branch) return null;
+  if ((await Bun.$`git -C ${root} rev-parse --verify --quiet HEAD`.nothrow().quiet()).exitCode !== 0) return null;
+
+  const remote = `origin/${branch}`;
+  const pushed =
+    (await Bun.$`git -C ${root} rev-parse --verify --quiet ${remote}`.nothrow().quiet()).exitCode === 0;
+  // Never pushed → the "committed, not pushed" tier starts at the base instead: every commit
+  // on this branch is unpushed, and the pushed tier is empty. Same chain, one link missing.
+  const landed = pushed ? remote : base;
+
+  const [uncommitted, unpushed, pushedFiles] = await Promise.all([
+    changedFiles(root, "HEAD"), // includes untracked, as all-additions
+    changedFiles(root, landed, "HEAD"),
+    pushed ? changedFiles(root, base, remote) : Promise.resolve([] as ChangedFile[]),
+  ]);
+
+  const tier = (key: TierKey, from: string, to: string, files: ChangedFile[]): ChangeTier => ({
+    key,
+    from,
+    to,
+    files: sortByMtime(root, files),
+    add: files.reduce((s, f) => s + f.add, 0),
+    del: files.reduce((s, f) => s + f.del, 0),
+  });
+  const tiers = [
+    tier("uncommitted", "HEAD", "", uncommitted),
+    tier("unpushed", landed, "HEAD", unpushed),
+    tier("pushed", base, remote, pushedFiles),
+  ].filter((t) => t.files.length > 0);
+
+  // The DISTINCT union of the two un-landed tiers — a file that is both committed-unpushed and
+  // dirty is one file the Mac still holds, not two. Summing the tier sizes would say otherwise.
+  const notLanded = new Set([...uncommitted, ...unpushed].map((f) => f.path));
+  return { tiers, pushed, unpushedCount: notLanded.size };
+}
+
 /**
  * The files this branch changed vs its base — the "PR view" (committed + uncommitted). Uses
  * `baseRef` (merge-base with the default branch), so committed work shows, not just
  * working-tree edits. Ordered most-recently-modified first so the phone's card previews the
- * latest edits. `base` is the base-branch name for the UI. Null when the session has no live repo.
+ * latest edits. `base` is the base-branch name for the UI. `tiers` splits the same work by how
+ * far it has travelled (see `syncTiers`); the flat `files` list stays authoritative for the
+ * card's totals and `/diff`'s rename lookup. Null when the session has no live repo.
  */
 export async function branchChanges(sessionId: string): Promise<{
   root: string;
   branch: string;
   base: string;
   files: ChangedFile[];
+  tiers?: ChangeTier[];
+  pushed?: boolean;
+  unpushedCount?: number;
 } | null> {
   const root = await repoRootForSession(sessionId);
   if (!root) return null;
   const { ref, label } = await baseRef(root);
-  const files = await changedFiles(root, ref);
-  const withMtime = files.map((f) => {
-    let mtime = 0;
-    try {
-      mtime = statSync(`${root}/${f.path}`).mtimeMs; // deleted files sort last (mtime 0)
-    } catch {}
-    return { f, mtime };
-  });
-  withMtime.sort((a, b) => b.mtime - a.mtime);
-  return { root, branch: await currentBranch(root), base: label, files: withMtime.map((x) => x.f) };
+  const [files, sync] = await Promise.all([changedFiles(root, ref), syncTiers(root, ref)]);
+  return {
+    root,
+    branch: await currentBranch(root),
+    base: label,
+    files: sortByMtime(root, files),
+    ...(sync ? { tiers: sync.tiers, pushed: sync.pushed, unpushedCount: sync.unpushedCount } : {}),
+  };
 }

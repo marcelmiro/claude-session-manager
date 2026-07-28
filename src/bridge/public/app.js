@@ -2993,6 +2993,35 @@ const STATUS_CLASS = { A: "st-a", M: "st-m", D: "st-d", R: "st-r" };
 const baseline = (d) =>
   d && d.branch ? `${d.branch}${d.base && d.base !== d.branch ? ` vs ${d.base}` : ""}` : "";
 
+// Group chrome for the sync chain (see syncTiers). The un-landed tiers are peach — peach means
+// one thing here, "hasn't left this Mac" — and the landed one is muted: it's context, not news.
+const TIER_META = {
+  uncommitted: { label: "Uncommitted", tone: "t-live" },
+  unpushed: { label: "Committed, not pushed", tone: "t-live" },
+  pushed: { label: "On GitHub", tone: "t-landed" },
+};
+
+// A tier's header: what the group is, how many files, and how much code moved in THAT range —
+// the "how much has changed but isn't pushed" number, per group rather than one branch total.
+function tierHead(tier) {
+  const m = TIER_META[tier.key];
+  const n = tier.files.length;
+  return html`<div class=${"tier-head " + m.tone}>
+    <!-- The landed tier keeps the dot's SPACE but not its ink, so all three group labels
+         start on the same column — otherwise "ON GITHUB" hangs left of the others. -->
+    <span class=${"sync-dot" + (tier.key === "pushed" ? " dot-off" : "")}></span>
+    <span class="tier-name">${m.label}</span>
+    <span class="tier-n">${n} file${n === 1 ? "" : "s"}</span>
+    <span class="tier-loc"><span class="cadd">+${tier.add}</span> <span class="cdel">−${tier.del}</span></span>
+  </div>`;
+}
+
+// The card's one-line answer to "has any of this left the Mac?", from the same /changes
+// payload the totals come from. Null when everything is on GitHub — then the PR's own LOC
+// keeps the slot, as it always has.
+const syncChip = (d) =>
+  !d || !d.tiers ? null : !d.pushed ? "never pushed" : d.unpushedCount ? `${d.unpushedCount} not pushed` : null;
+
 // One file's status badge + path (dir dimmed, filename bright) + LOC delta — shared by the
 // changed-files card preview and the full list so both read identically.
 function fileLine(f) {
@@ -3066,6 +3095,9 @@ function ChangesCard() {
   // out to GitHub lives on the list itself. A merged PR showing at glance level is the point:
   // it says this session's work already landed.
   const prState = pr && PR_TONE[pr.state] ? pr : null;
+  // Un-landed work takes the PR's LOC slot: the reason the PR's numbers disagree with the
+  // totals right above them beats restating the PR's own delta.
+  const chip = syncChip(data);
   // A <div role=button>, NOT a <button>: WebKit (iOS Safari) refuses to render block/flex
   // children inside a <button>, collapsing it to an empty padded box. A div renders its block
   // children everywhere and still takes the click.
@@ -3080,9 +3112,10 @@ function ChangesCard() {
       </div>
       <div class="cc-meta">
         ${prState &&
-        html`<span class=${"pr-chip " + PR_TONE[prState.state]}>${prState.state} #${prState.number}</span>${prLoc(
-          prState,
-        )}`}
+        html`<span class=${"pr-chip " + PR_TONE[prState.state]}>${prState.state} #${prState.number}</span>${chip
+          ? ""
+          : prLoc(prState)}`}
+        ${chip && html`<span class="sync-chip"><span class="sync-dot"></span>${chip}</span>`}
         ${baseline(data) && html`<span class="cc-base">${baseline(data)}</span>`}
       </div>
     </div>
@@ -3114,6 +3147,10 @@ function DiffView() {
   const sid = selectedId.value;
   const path = v ? v.path : null;
   const orig = v ? v.orig : null; // old path of a rename → the route diffs both endpoints
+  // A row opened from a tier carries that tier's range, so the patch shown is the one its LOC
+  // was measured over. A tool chip in the thread sends neither and gets the branch-vs-base diff.
+  const from = v && v.from ? v.from : null;
+  const to = v && v.to ? v.to : "";
   useEffect(() => {
     if (!path) return;
     setData(null);
@@ -3121,7 +3158,8 @@ function DiffView() {
     let stale = false;
     (async () => {
       try {
-        const q = `path=${encodeURIComponent(path)}${orig ? `&orig=${encodeURIComponent(orig)}` : ""}`;
+        const range = from ? `&from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}` : "";
+        const q = `path=${encodeURIComponent(path)}${orig ? `&orig=${encodeURIComponent(orig)}` : ""}${range}`;
         const r = await fetch(`/sessions/${encodeURIComponent(sid)}/diff?${q}`);
         // A failed REQUEST is not a git answer: keep the two apart so an unreachable bridge
         // never renders as "this file has no changes".
@@ -3132,7 +3170,7 @@ function DiffView() {
       }
     })();
     return () => (stale = true);
-  }, [path, orig, sid]);
+  }, [path, orig, sid, from, to]);
   if (!v) return null;
   const bad = data && (data.error || data.offline);
   // Re-indent to 2 spaces per level: a 4-space file at depth 5 spends 20 of ~45 phone columns
@@ -3148,9 +3186,10 @@ function DiffView() {
   // lone piece of diff chrome above otherwise ordinary code.
   const body = plain ? lines.filter((l) => l.t !== "hunk") : lines;
   const shown = full ? body : body.slice(0, DIFF_COLLAPSE);
-  const sub = data && !bad
-    ? `${baseline(data) || "—"} · +${data.add} −${data.del}`
-    : path;
+  // For a tier diff the ref pair ("origin/feat…HEAD") is noise — the group's own name is what
+  // says the patch is scoped, and it's the name the reader just tapped under.
+  const scope = v.tier ? TIER_META[v.tier].label : baseline(data) || "—";
+  const sub = data && !bad ? `${scope} · +${data.add} −${data.del}` : path;
   // The basename alone is ambiguous in any repo with repeated leaf names (`app/[slug]/page.tsx`
   // vs `app/s/page.tsx`), so the header carries the directory too — dimmed and truncating, the
   // same treatment the file list uses.
@@ -3298,14 +3337,31 @@ function FilesView() {
   if (!open) return null;
   const bad = data && (data.error || data.offline);
   const files = (data && data.files) || [];
+  const tiers = (data && data.tiers) || [];
+  const grouped = tiers.length > 0;
+  const row = (f, tier) => html`<div
+    class="changerow"
+    role="button"
+    tabindex="0"
+    key=${(tier ? tier.key : "") + f.path}
+    onClick=${() =>
+      (diffView.value = { path: f.path, orig: f.orig, ...(tier ? { from: tier.from, to: tier.to, tier: tier.key } : {}) })}
+  >
+    ${fileLine(f)}
+  </div>`;
   return html`
     <div class="screen files-view" ref=${rootRef} onTouchStart=${onTouchStart} onTouchEnd=${onTouchEnd}>
       <div class="subagent-head">
         <button class="iconbtn" onClick=${() => (filesView.value = false)} aria-label="Back to session">‹</button>
+        <!-- Grouped: the baseline alone. Summing the tiers would DOUBLE-COUNT a file that was
+             pushed and then edited again — it legitimately appears in two groups — and the
+             group headers already carry the honest per-range counts. -->
         <span class="grow"
           ><span class="name">Changed files</span>${data &&
           !bad &&
-          html`<span class="sub">${files.length}${baseline(data) ? ` · ${baseline(data)}` : ""}</span>`}</span
+          html`<span class="sub"
+            >${grouped ? baseline(data) : `${files.length}${baseline(data) ? ` · ${baseline(data)}` : ""}`}</span
+          >`}</span
         >
       </div>
       <div class="scroll">
@@ -3313,18 +3369,15 @@ function FilesView() {
         ${!data && html`<div class="sub" style="padding:8px">loading…</div>`}
         ${data && data.offline && html`<div class="guard">Couldn't reach the bridge — list not loaded.</div>`}
         ${data && data.error && html`<div class="guard">No live repo for this session.</div>`}
-        ${data && !bad && files.length === 0 && html`<div class="guard">No file changes yet.</div>`}
-        ${files.map(
-          (f) => html`<div
-            class="changerow"
-            role="button"
-            tabindex="0"
-            key=${f.path}
-            onClick=${() => (diffView.value = { path: f.path, orig: f.orig })}
-          >
-            ${fileLine(f)}
-          </div>`,
-        )}
+        ${data && !bad && files.length === 0 && !grouped && html`<div class="guard">No file changes yet.</div>`}
+        ${grouped
+          ? tiers.map(
+              (t) => html`<div class=${"tier " + TIER_META[t.key].tone} key=${t.key}>
+                ${tierHead(t)}
+                <div class="tier-body">${t.files.map((f) => row(f, t))}</div>
+              </div>`,
+            )
+          : files.map((f) => row(f, null))}
       </div>
     </div>
   `;

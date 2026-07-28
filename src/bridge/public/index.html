@@ -1112,6 +1112,28 @@
       .cadd { color: var(--addgut); }
       .cdel { color: var(--delgut); }
       .cbin { color: var(--muted); }
+
+      /* Sync chain groups (pushed / committed-not-pushed / uncommitted). The "hasn't left this
+         Mac" marker is one hue with one meaning — peach on the card chip and on the un-landed
+         group headers and rails. */
+      .sync-dot { flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--peach); }
+      .sync-dot.dot-off { background: transparent; }
+      .sync-chip { display: inline-flex; align-items: center; gap: 5px; flex: none; font-size: 11px; color: var(--peach); }
+      .tier { margin-top: 14px; }
+      /* Sticky within its OWN group, so each header hands over when the next group starts —
+         the label governing the rows on screen is always the one on screen. */
+      .tier-head { position: sticky; top: 0; z-index: 2; display: flex; align-items: center; gap: 8px; background: var(--surface); padding: 7px 12px; font-size: 10px; font-weight: 600; letter-spacing: 0.09em; text-transform: uppercase; }
+      .tier-head.t-live { color: var(--peach); }
+      .tier-head.t-landed { color: var(--muted); }
+      .tier-name { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      /* Counts and LOC are data, not label: they opt out of the header's caps and tracking. */
+      .tier-n { margin-left: auto; flex: none; color: var(--muted); font-size: 10.5px; font-weight: 400; letter-spacing: 0; text-transform: none; }
+      .tier-loc { flex: none; font-family: var(--mono); font-size: 10.5px; font-weight: 400; letter-spacing: 0; text-transform: none; }
+      /* A rail down the rows carries the group's tone past the header, so a row scrolled far
+         from its heading still says which group it belongs to. */
+      .tier-body .changerow { border-left: 3px solid transparent; padding-left: 9px; }
+      .tier.t-live .tier-body .changerow { border-left-color: rgba(255, 199, 153, 0.5); }
+      .tier.t-landed .tier-body .changerow { border-left-color: var(--dim); }
     </style>
   </head>
   <body>
