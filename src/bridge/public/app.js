@@ -101,8 +101,8 @@ const filesView = signal(false); // full changed-files list pushed over the deta
 // signal re-renders them on their own; paused while hidden and resynced on resume.
 const tick = signal(Date.now());
 
-// File-editing tools, shared by the rewind-checkpoint calc (canCode) and the diff chips.
-// Diff chips gate additionally on an edited path — `file_path` for most, `notebook_path`
+// File-editing tools, shared by the rewind-checkpoint calc (canCode) and the edit chips.
+// Edit chips gate additionally on an edited path — `file_path` for most, `notebook_path`
 // for NotebookEdit.
 const EDIT_TOOLS = new Set(["Edit", "Write", "MultiEdit", "NotebookEdit"]);
 /** The path a tool_use chip edited, whichever field carries it. */
@@ -1672,18 +1672,25 @@ function Turn({ turn, upCount, canCode }) {
       const input = b.input || {};
       const path = editedPath(input);
       const arg = input.command || path || input.pattern || "";
-      // A file-editing chip with a path is tappable → opens that file's diff. The route
-      // resolves a rename's old path itself, so the chip only has to name the file.
-      const tappable = EDIT_TOOLS.has(b.name) && !!path;
-      els.push(
-        html`<div
-          class=${"tool" + (tappable ? " tap" : "")}
-          onClick=${tappable ? () => (diffView.value = { path }) : undefined}
-        >
-          ▸ ${b.name || "tool"}${arg && html` <span class="arg">${arg}</span>`}${tappable &&
-          html`<span class="tapchev">›</span>`}
-        </div>`,
-      );
+      if (EDIT_TOOLS.has(b.name) && path) {
+        // Edit chips are informational — diffs live on the changed-files page, which
+        // doesn't depend on a per-chip path resolving inside the session's repo (a
+        // removed worktree or scratchpad edit never can). What the chip owes the reader
+        // is the FILENAME: the dir shrinks (dimmed, ellipsized) and the basename never
+        // does — the same treatment as the changed-files list.
+        const p = path.replace(/^\/Users\/[^/]+\//, "~/");
+        const slash = p.lastIndexOf("/");
+        const dir = slash >= 0 ? p.slice(0, slash + 1) : "";
+        const base = slash >= 0 ? p.slice(slash + 1) : p;
+        els.push(
+          html`<div class="tool edit">
+            <span class="tname">▸ ${b.name}</span
+            ><span class="fl-dir">${dir}</span><span class="fl-base">${base}</span>
+          </div>`,
+        );
+      } else {
+        els.push(html`<div class="tool">▸ ${b.name || "tool"}${arg && html` <span class="arg">${arg}</span>`}</div>`);
+      }
     }
   }
   return els.length ? html`<div class="turn">${els}</div>` : null;
@@ -3148,7 +3155,7 @@ function DiffView() {
   const path = v ? v.path : null;
   const orig = v ? v.orig : null; // old path of a rename → the route diffs both endpoints
   // A row opened from a tier carries that tier's range, so the patch shown is the one its LOC
-  // was measured over. A tool chip in the thread sends neither and gets the branch-vs-base diff.
+  // was measured over. A row without a range gets the branch-vs-base diff.
   const from = v && v.from ? v.from : null;
   const to = v && v.to ? v.to : "";
   useEffect(() => {

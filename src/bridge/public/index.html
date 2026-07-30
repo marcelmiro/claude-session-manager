@@ -312,6 +312,10 @@
         white-space: nowrap;
       }
       .tool .arg { color: var(--muted); }
+      /* Edit chip: the dir shrinks (dimmed .fl-dir ellipsis), the basename never does —
+         the filename must survive any width. Same span pair the changed-files list uses. */
+      .tool.edit { display: flex; align-items: baseline; }
+      .tool.edit .tname { flex: 0 0 auto; margin-right: 5px; }
       /* Post-compaction summary: a full-width system divider, collapsed by default. The
          peach summary line makes it unmistakable that the conversation continued from a
          compact; expanding reveals the verbatim summary text. */
@@ -1011,10 +1015,7 @@
       }
       .sibnav:active { background: var(--hover); }
 
-      /* Diff chip affordance + the diff / file-browser / reader pushed views. */
-      .tool.tap { border: 1px solid var(--peach); border-radius: 8px; }
-      .tool.tap:active { background: var(--hover); }
-      .tapchev { color: var(--peach); margin-left: 4px; }
+      /* The diff / file-browser / reader pushed views. */
       .files-view {
         position: fixed;
         inset: 0;

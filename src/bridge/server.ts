@@ -996,7 +996,7 @@ async function route(req: Request): Promise<Response> {
   }
 
   // Single-file diff, branch vs its base (committed + uncommitted, + untracked). `path` =
-  // repo-relative, sent by the Edit/Write chip or a changed-files row; git calls use
+  // repo-relative, sent by a changed-files row; git calls use
   // `-- <rel>` so a leading-dash path can't be read as a flag. `from`/`to` scope the patch to
   // one tier of the sync chain — the row's LOC and its patch then measure the same range.
   const diff = path.match(/^\/sessions\/([^/]+)\/diff$/);
@@ -1019,11 +1019,10 @@ async function route(req: Request): Promise<Response> {
     const tier = from ? changed?.tiers?.find((t) => t.from === from && t.to === to) : undefined;
     // `orig` (the old path of a rename) makes the diff show the true rename rather than a
     // whole-file add. Resolve it from the change list rather than trusting the caller to
-    // supply it: a tool chip only knows the path it edited, so a chip and a changed-files
-    // row would otherwise disagree about whether the same file is new. The list is cached,
-    // so this costs nothing on the common path. An explicit `orig` param still wins. Within a
-    // tier the lookup is scoped to THAT tier — a rename committed but not pushed is a rename
-    // in one range and an ordinary file in the next.
+    // supply it, so a caller that only knows the current path still gets the true rename.
+    // The list is cached, so this costs nothing on the common path. An explicit `orig`
+    // param still wins. Within a tier the lookup is scoped to THAT tier — a rename
+    // committed but not pushed is a rename in one range and an ordinary file in the next.
     const origParam = url.searchParams.get("orig");
     const origAbs = origParam ? safeRepoPath(root, decodeURIComponent(origParam)) : null;
     let orig = origAbs ? relTo(root, origAbs) : undefined;
