@@ -1,5 +1,6 @@
 import type { ClaudeProcess } from "../types.ts";
 import { nativeSessionIdByPid } from "./session-state";
+import { retryOnDeadline } from "./deadline";
 
 /**
  * Session id from a claude process command line, or undefined.
@@ -43,7 +44,7 @@ export function dictatedSessionId(command: string): string | undefined {
  */
 export async function findClaudeProcesses(): Promise<ClaudeProcess[]> {
   try {
-    const output = await Bun.$`ps -eo pid,tty,command`.quiet().text();
+    const output = await retryOnDeadline(() => Bun.$`ps -eo pid,tty,command`.quiet().text(), 5000, "ps");
     const lines = output.split("\n");
 
     const results: ClaudeProcess[] = [];

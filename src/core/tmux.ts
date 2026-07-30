@@ -1,5 +1,6 @@
 import type { PaneInfo } from "../types.ts";
 import { isPermissionPrompt } from "./status";
+import { retryOnDeadline } from "./deadline";
 
 /**
  * Get the "main" tmux session name (i.e. not the popup session).
@@ -35,9 +36,14 @@ export async function getMainSession(): Promise<string | null> {
  */
 export async function listPanes(): Promise<PaneInfo[]> {
   try {
-    const output = await Bun.$`tmux list-panes -a -F '#{pane_tty} #{pane_id} #{session_name} #{window_index} #{window_name} #{pane_current_path}'`
-      .quiet()
-      .text();
+    const output = await retryOnDeadline(
+      () =>
+        Bun.$`tmux list-panes -a -F '#{pane_tty} #{pane_id} #{session_name} #{window_index} #{window_name} #{pane_current_path}'`
+          .quiet()
+          .text(),
+      5000,
+      "tmux list-panes",
+    );
 
     const lines = output.trim().split("\n").filter(Boolean);
 
@@ -76,7 +82,7 @@ export async function capturePane(
   try {
     const args = ["-t", paneId, "-p", "-J", "-S", "-50"];
     if (options?.escapes) args.push("-e");
-    const output = await Bun.$`tmux capture-pane ${args}`.quiet().text();
+    const output = await retryOnDeadline(() => Bun.$`tmux capture-pane ${args}`.quiet().text(), 5000, "tmux capture-pane");
     return output;
   } catch {
     return "";

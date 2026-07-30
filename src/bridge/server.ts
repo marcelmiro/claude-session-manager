@@ -76,6 +76,7 @@ import {
 } from "../core/names";
 import { buildSessionLabel, disambiguateNames } from "../core/session-label";
 import { loadState, saveState } from "../core/state";
+import { withDeadline } from "../core/deadline";
 import { loadAllSessions, filterAndRankEntries, type SearchEntry } from "../core/search";
 import { fixtureData } from "./fixtures";
 import type { RestoreState, Session } from "../types";
@@ -457,7 +458,11 @@ let sessionsRefreshing: Promise<unknown> | null = null;
 function startSessionsRefresh(): Promise<unknown> {
   if (!sessionsRefreshing) {
     const prev = sessionsCache ? JSON.stringify(sessionsCache.value) : null;
-    sessionsRefreshing = computeSessionsPayload()
+    // Watchdog: every request funnels into this one promise, so if the compute never
+    // settles (a subprocess await lost by the runtime — see core/deadline.ts) it must
+    // reject rather than pin the bridge forever. The finally then clears the slot, so
+    // the next request starts a fresh compute instead of joining a dead one.
+    sessionsRefreshing = withDeadline(computeSessionsPayload(), 30_000, "sessions compute")
       .then((value) => {
         if (prev !== null && JSON.stringify(value) !== prev) broadcast({ type: "session-changed" });
         return value;

@@ -26,6 +26,7 @@
 import { mkdir, readdir, rename, unlink, writeFile } from "node:fs/promises";
 import { realpath } from "node:fs/promises";
 import { PATHS } from "./config";
+import { withDeadline } from "./deadline";
 
 const VERDICTS_DIR = `${PATHS.dir}/verdicts`;
 const ALIVE_TTL_MS = 15_000;
@@ -99,7 +100,10 @@ export const runnersAlive: RunnerProbe = async (outputPaths) => {
     // non-zero while still correctly reporting every other path, so the verdicts have
     // to come from the output itself.
     const out = await new Response(proc.stdout).text();
-    await proc.exited;
+    // EOF above means lsof closed stdout and is done — `exited` is only reaping. Bun can
+    // lose a child's exit under concurrent spawn churn, leaving this await pending forever,
+    // so bound it and keep the (already complete) output either way.
+    await withDeadline(proc.exited, 2000, "lsof exit").catch(() => {});
     for (const line of out.split("\n")) {
       if (!line.startsWith("n")) continue;
       for (const p of byResolved.get(line.slice(1)) ?? []) verdicts.set(p, true);
