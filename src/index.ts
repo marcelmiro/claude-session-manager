@@ -11,7 +11,7 @@ import { loadNameCache, getSessionName, generateAIName, saveNameCache, normalize
 import { loadConfig } from "./core/config";
 import { loadState, saveState, loadPaneSessions } from "./core/state";
 import { listPendingApprovals, decideApproval, decideQuestion, buildAnswersMap } from "./core/approval";
-import { syncWindowPrefix, buildBaseName } from "./core/notifications";
+import { syncWindowPrefix, buildBaseName, abbreviateRepo } from "./core/notifications";
 import { discoverRepos, listBranches, fetchRepo, getDefaultBranch, branchCheckedOutPath } from "./core/git";
 import { buildLaunchCommand } from "./core/launch-command";
 import { initWizard, renderWizard, renderWizardPreview, renderWizardStatusBar, handleWizardKey, setWizardBranches } from "./ui/wizard";
@@ -1571,18 +1571,19 @@ async function handleWizardLaunch(
   try {
     // Compound command: git setup (if any) then claude, run inside the new window.
     const cmd = buildLaunchCommand(mode, repo, branch, text, !shellOnly);
+    const windowName = abbreviateRepo(repo.name);
 
     if (cmd === "") {
       // Shell-only with no git setup: plain window on the default shell.
-      await Bun.$`tmux new-window -a -t ${targetSession} -n ${repo.name} -c ${repo.path}`.quiet();
+      await Bun.$`tmux new-window -a -t ${targetSession} -n ${windowName} -c ${repo.path}`.quiet();
     } else if (cmd === "claude") {
       // Simple case: launch claude directly as the window command (no shell race)
-      await Bun.$`tmux new-window -a -t ${targetSession} -n ${repo.name} -c ${repo.path} claude`.quiet();
+      await Bun.$`tmux new-window -a -t ${targetSession} -n ${windowName} -c ${repo.path} claude`.quiet();
     } else {
       // Compound command: run via zsh -c to avoid send-keys race with shell init
       // (oh-my-zsh prompts can swallow keystrokes). exec zsh -l keeps shell open after claude exits.
       const wrapped = `${cmd}; exec zsh -l`;
-      await Bun.$`tmux new-window -a -t ${targetSession} -n ${repo.name} -c ${repo.path} zsh -c ${wrapped}`.quiet();
+      await Bun.$`tmux new-window -a -t ${targetSession} -n ${windowName} -c ${repo.path} zsh -c ${wrapped}`.quiet();
     }
   } catch {
     // ignore — window may already exist

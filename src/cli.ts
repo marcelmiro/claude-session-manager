@@ -12,7 +12,7 @@
 import { homedir } from "os";
 import { loadState, saveState, loadPaneSessions, migratePaneMap } from "./core/state";
 import { switchToPane, listPanes, renameWindow, capturePane, displayMessage, atMacFocus } from "./core/tmux";
-import { syncWindowPrefix, stripAllPrefixes, ATTENTION_PREFIX } from "./core/notifications";
+import { syncWindowPrefix, stripAllPrefixes, abbreviateRepo, ATTENTION_PREFIX } from "./core/notifications";
 import { findClaudeProcesses } from "./core/process";
 import { detectStatus } from "./core/status";
 import { eventSourcedStatus } from "./core/hook-events";
@@ -208,7 +208,7 @@ export async function reset(): Promise<void> {
         const repo = pane.currentPath === home
           ? "~"
           : (pane.currentPath.split("/").pop() || "claude");
-        windowRepos.set(wKey, repo);
+        windowRepos.set(wKey, abbreviateRepo(repo));
       }
     }
 

@@ -15,7 +15,7 @@ import { reapDeadSessionFiles } from "./core/approval";
 import { loadConfig } from "./core/config";
 import { debugLog } from "./core/debug";
 import { loadState, saveState, computeAggregate, buildSessionStates, loadPaneSessions, savePaneSessions, processHookEvents } from "./core/state";
-import { detectTransitions, dispatchNotifications, syncWindowPrefix, ATTENTION_PREFIX, RUNNING_PREFIX, SCRIPT_PREFIX, stripAllPrefixes, desiredPrefix, buildBaseName, NAME_SEPARATOR } from "./core/notifications";
+import { detectTransitions, dispatchNotifications, syncWindowPrefix, ATTENTION_PREFIX, RUNNING_PREFIX, SCRIPT_PREFIX, stripAllPrefixes, desiredPrefix, buildBaseName, abbreviateRepo, NAME_SEPARATOR } from "./core/notifications";
 import { clearSource } from "./core/input-source";
 import { detectScriptWaits } from "./core/script-wait";
 import { getBaseRepoPath } from "./core/git";
@@ -386,7 +386,7 @@ async function main(): Promise<void> {
     // If any pane in this window just had /clear, reset to repo name
     const hasCleared = win.paneIds.some(id => clearPaneIds.has(id));
     if (hasCleared) {
-      baseName = repo;
+      baseName = abbreviateRepo(repo);
     } else if (win.paneIds.length === 1) {
       // Single-pane: {repo}·{ai-or-pinned-name} or just {repo}
       const sessionId = paneSessionMap[win.paneIds[0]];
@@ -394,7 +394,9 @@ async function main(): Promise<void> {
       baseName = buildBaseName(repo, aiName ? slugify(aiName) || undefined : undefined);
     } else {
       // Multi-pane: show all unique repos joined with "+"
-      baseName = uniqueRepos.length > 1 ? uniqueRepos.join("+") : repo;
+      baseName = uniqueRepos.length > 1
+        ? uniqueRepos.map(abbreviateRepo).join("+")
+        : abbreviateRepo(repo);
     }
 
     const desired = `${prefix}${baseName}`;

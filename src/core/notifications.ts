@@ -34,9 +34,20 @@ export function desiredPrefix(hasAttention: boolean, isRunning: boolean, hasScri
   return "";
 }
 
+/** Display abbreviations for long repo names on tmux windows. Window names only —
+ *  the TUI list, grouping, and push labels keep the real repo name. */
+const REPO_ABBREVIATIONS: Record<string, string> = {
+  customeros: "cos",
+  throxy: "thr",
+};
+
+export function abbreviateRepo(repo: string): string {
+  return REPO_ABBREVIATIONS[repo] ?? repo;
+}
+
 /** Build the base window name: {repo}[·{ai-name}][+] */
 export function buildBaseName(repo: string, aiName?: string, isFork?: boolean): string {
-  let name = repo;
+  let name = abbreviateRepo(repo);
   if (aiName) name += `${NAME_SEPARATOR}${aiName}`;
   if (isFork) name += "+";
   return name;
