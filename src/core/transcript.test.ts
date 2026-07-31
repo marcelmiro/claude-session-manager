@@ -145,6 +145,61 @@ test("drops isMeta user records (e.g. skill base-directory injection)", () => {
   expect(JSON.stringify(turns)).not.toContain("Base directory");
 });
 
+// --- `!cmd` bash passthrough: input + output records fold into one bash turn ---
+
+const bashInput =
+  '{"type":"user","message":{"role":"user","content":"<bash-input>git status</bash-input>"}}';
+const bashOutput =
+  '{"type":"user","message":{"role":"user","content":"<bash-stdout>On branch main\\nnothing to commit</bash-stdout><bash-stderr></bash-stderr>"}}';
+
+test("bash input + output records fold into one bash turn", () => {
+  const raw = [
+    bashInput,
+    bashOutput,
+    '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Clean tree."}]}}',
+  ].join("\n");
+  expect(parseTranscript(raw)).toEqual([
+    {
+      role: "user",
+      content: [],
+      bash: { command: "git status", stdout: "On branch main\nnothing to commit", stderr: "" },
+    },
+    { role: "assistant", content: [{ type: "text", text: "Clean tree." }] },
+  ]);
+});
+
+test("bash output tags extract independently (stderr-only, missing tags tolerated)", () => {
+  const raw = [
+    bashInput,
+    '{"type":"user","message":{"role":"user","content":"<bash-stderr>boom</bash-stderr>"}}',
+  ].join("\n");
+  expect(parseTranscript(raw)[0].bash).toEqual({ command: "git status", stdout: "", stderr: "boom" });
+});
+
+test("orphan bash output is dropped; input-only keeps empty output", () => {
+  // Orphan output (clipped branch): no preceding command turn to fold into.
+  expect(parseTranscript(bashOutput)).toEqual([]);
+  // Input-only (killed mid-command): the command turn survives with empty output.
+  expect(parseTranscript(bashInput)).toEqual([
+    { role: "user", content: [], bash: { command: "git status", stdout: "", stderr: "" } },
+  ]);
+});
+
+test("parseActiveBranch folds a bash pair on the active branch", () => {
+  const bashRec = (uuid: string, parentUuid: string, content: string) =>
+    JSON.stringify({ type: "user", uuid, parentUuid, message: { role: "user", content } });
+  const raw = [
+    rec({ uuid: "a", parentUuid: null, role: "user", text: "first" }),
+    rec({ uuid: "b", parentUuid: "a", role: "assistant", text: "reply" }),
+    bashRec("c", "b", "<bash-input>ls</bash-input>"),
+    bashRec("d", "c", "<bash-stdout>file.txt</bash-stdout><bash-stderr></bash-stderr>"),
+    rec({ uuid: "e", parentUuid: "d", role: "assistant", text: "one file" }),
+  ].join("\n");
+  const turns = parseActiveBranch(raw);
+  expect(turns.map((t) => t.bash?.command ?? null)).toEqual([null, null, "ls", null]);
+  expect(turns[2].bash).toEqual({ command: "ls", stdout: "file.txt", stderr: "" });
+});
+
 test("drops async-subagent <task-notification> user records", () => {
   const raw = [
     '{"type":"user","message":{"role":"user","content":"go"}}',

@@ -125,11 +125,13 @@ const turnMarkerText = (turn) => {
 // `queued` turns (messages consumed from the input queue mid-turn) are excluded too:
 // Claude's /rewind picker does not list them, so counting one would shift every earlier
 // prompt's upCount by one.
+// `bash` turns (`!cmd`, content empty) ARE included: Claude's picker lists them (verified
+// live — `! echo … · No code changes`), the deliberate opposite of slash-command turns.
 const isPromptTurn = (turn) =>
   turn.role === "user" &&
   !turn.queued &&
   !turnMarkerText(turn) &&
-  (turn.content || []).some((b) => b.type === "text" || b.type === "image");
+  (!!turn.bash || (turn.content || []).some((b) => b.type === "text" || b.type === "image"));
 
 // Ordered turn indices that are actual /rewind CHECKPOINTS. A typed prompt only becomes a
 // checkpoint once it starts producing output — i.e. an assistant turn follows it before the
@@ -236,6 +238,9 @@ function userTurnTexts(t) {
     // Executed slash commands land with their text on `command` (content is empty) — the
     // optimistic bubble for a "/cmd args" send must retire against that, not content.
     if (turn.command) out.add(turn.command.trim());
+    // A `!cmd` send lands as a bash turn whose text lives on `bash.command` (the `!` is
+    // stripped by Claude's record) — retire the optimistic `!cmd` bubble against it.
+    if (turn.bash) out.add("!" + turn.bash.command);
     for (const b of turn.content || []) if (b.type === "text" && b.text) out.add(b.text.trim());
   }
   return out;
@@ -1621,6 +1626,30 @@ function History() {
   `;
 }
 
+// A folded `!` bash turn: right-aligned peach mono command bubble, then the output as a
+// full-width rail — stdout mint (clamped at 8 lines behind a tap-to-expand row), stderr
+// red after it. Output is literal text, never markdown. Empty output renders nothing
+// (killed mid-command, or a genuinely silent command).
+const BASH_CLAMP_LINES = 8;
+function BashTurn({ bash, upCount, canCode }) {
+  const [expanded, setExpanded] = useState(false);
+  const lines = bash.stdout ? bash.stdout.split("\n") : [];
+  const clamped = !expanded && lines.length > BASH_CLAMP_LINES;
+  const shown = clamped ? lines.slice(0, BASH_CLAMP_LINES).join("\n") : bash.stdout;
+  return html`<div class="turn">
+    <div class="bang-cmd" ...${lpProps(lpStart("!" + bash.command, upCount, canCode))}>
+      <span class="glyph">!</span>${bash.command}
+    </div>
+    ${bash.stdout && html`<div class="bang-out"><pre>${shown}</pre></div>`}
+    ${clamped &&
+    html`<div class="bang-more" onClick=${() => setExpanded(true)}>
+      … +${lines.length - BASH_CLAMP_LINES} lines
+    </div>`}
+    ${bash.stderr && html`<div class="bang-out err"><pre>${bash.stderr}</pre></div>`}
+    <div class="bang-gap"></div>
+  </div>`;
+}
+
 // One conversational turn → a sequence of chat elements: text blocks become
 // bubbles (user right / assistant left), tool calls become compact chips, image
 // attachments become a 🖼 marker; thinking and tool_result blocks are omitted.
@@ -1644,6 +1673,14 @@ function Turn({ turn, upCount, canCode }) {
   // long-press rewind handlers.
   if (turn.command) {
     return html`<div class="turn"><div class="bubble user">${turn.command}</div></div>`;
+  }
+
+  // A `!` bash command (input + output records folded into one turn by the parser).
+  // Unlike slash commands, a bash turn IS a rewind checkpoint (Claude's picker lists it),
+  // so the command bubble gets the full user long-press: rewind targets the checkpoint
+  // and the prefill restores the literal `!cmd` the user typed.
+  if (turn.bash) {
+    return html`<${BashTurn} bash=${turn.bash} upCount=${upCount} canCode=${canCode} />`;
   }
 
   // Interrupt / system markers ("[Request interrupted by user…]") render as a dim event
@@ -2003,6 +2040,15 @@ function Composer({ disabled, status }) {
   // switch, or by a safety timeout — so it never strands the button hidden on a running turn.
   const interruptedId = useRef(null);
   const interruptTimer = useRef(null);
+  // Bash mode: a typed leading "!" flips the composer into command mode — the "!" lifts
+  // out of the text into an in-field glyph, and the textarea remounts (keyed by mode)
+  // with autocorrect/spellcheck off, since iOS only honors those attributes at focus
+  // time. `bashRef` mirrors the state for the native listeners; `carryRef` hands the
+  // draft text + focus across the remount (writing to the outgoing node would be lost).
+  const [bashMode, setBashMode] = useState(false);
+  const bashRef = useRef(false);
+  const carryRef = useRef(null); // { text, focus, scrollY } | null — applied by the effect below
+  const trampRef = useRef(null); // hidden focus-holder for the mode-flip remount (see flipBashMode)
   // "/" slash-command menu. Kept in a ref (not state) so the once-attached native
   // beforeinput/keydown listeners below never read stale values; `rerender` repaints.
   const slash = useRef({ open: false, filtered: [], active: 0 });
@@ -2023,14 +2069,43 @@ function Composer({ disabled, status }) {
   function syncHasText() {
     const el = ref.current;
     setHasText(!!(el && el.value.trim()));
-    if (el) saveDraft(selectedId.value, el.value);
+    // In bash mode the "!" lives in the glyph, not the value — persist the full send
+    // string so the draft survives a reload as the literal `!cmd` text.
+    if (el) saveDraft(selectedId.value, bashRef.current && el.value ? "!" + el.value : el.value);
+  }
+  // Flip the composer's bash mode (remounting the keyed textarea). Two iOS traps live
+  // here, both around the keyboard's above-keyboard pan of the page:
+  // - scrollY: with the keyboard up iOS PANS the window so the dock sits above it, and
+  //   a programmatic focus never re-applies that pan (only typing's caret-reveal does) —
+  //   so capture the correct offset NOW, while the outgoing field still has it, and
+  //   restore it after the swap.
+  // - trampoline: if focus drops to <body> for the frame the swap takes, iOS releases
+  //   the pan and re-applies it late — a visible vertical flicker. A hidden input inside
+  //   the dock holds focus (same location → same pan) until the new field mounts.
+  function flipBashMode(bang, text, focus) {
+    bashRef.current = bang;
+    carryRef.current = { text, focus, scrollY: window.scrollY };
+    if (focus && trampRef.current) trampRef.current.focus({ preventScroll: true });
+    setBashMode(bang);
+  }
+  function enterBash(carryText) {
+    flipBashMode(true, carryText, true);
+  }
+  function exitBash({ text = "", focus = true } = {}) {
+    flipBashMode(false, text, focus);
   }
   // Assign the textarea wholesale and resync everything derived from it (height,
-  // Stop⇄Send toggle, persisted draft).
-  function setComposerText(text) {
+  // Stop⇄Send toggle, persisted draft, bash mode). A text starting with "!" re-enters
+  // bash mode — a bash draft is saved/restored as the full `!cmd` send string, and the
+  // send string is identical either way, so the mode is purely presentational to restore.
+  function setComposerText(text, opts = {}) {
+    const bang = text.startsWith("!");
+    // The mode flip remounts the keyed textarea, so the write must ride the carry
+    // effect instead of landing on the outgoing node.
+    if (bang !== bashRef.current) return flipBashMode(bang, bang ? text.slice(1) : text, !!opts.focus);
     const el = ref.current;
     if (!el) return;
-    el.value = text;
+    el.value = bang ? text.slice(1) : text;
     grow();
     syncHasText();
   }
@@ -2122,12 +2197,21 @@ function Composer({ disabled, status }) {
   // command gate: it opens whenever a "/" + token is being typed at the end of the field
   // and the "/" sits at the start or right after whitespace (so paths like src/foo never
   // trigger). Closes otherwise. Selecting a row only replaces that "/"-token (see selectSlash).
-  async function onInput() {
+  async function onInput(e) {
     grow();
     syncHasText();
     disarmStop(); // typing cancels an armed Stop
     const el = ref.current;
     if (!el) return;
+    // A TYPED "!" opening an empty draft enters bash mode — never a paste, and never
+    // mid-draft (terminal parity: the pane treats a pasted "!cmd" as literal text too,
+    // so a copied snippet that happens to start with "!" keeps its meaning). The "!"
+    // lifts out of the text into the in-field glyph.
+    if (!bashRef.current && el.value === "!" && e && e.inputType === "insertText" && e.data === "!") {
+      enterBash("");
+      return closeSlash();
+    }
+    if (bashRef.current) return; // no slash menu inside a shell command ("ls /tmp")
     const m = el.value.match(/(?:^|\s)\/(\S*)$/);
     if (!m || !sid) return closeSlash();
     const items = await loadSlashItems(sid);
@@ -2179,14 +2263,20 @@ function Composer({ disabled, status }) {
   async function send() {
     const el = ref.current;
     if (!el) return;
-    const text = el.value;
+    // Bash mode sends the full `!cmd` string (the glyph's "!" re-attached, command
+    // trimmed so the optimistic bubble matches the folded turn's trimmed command) — the
+    // pane enters shell mode from the literal text, exactly as if typed there. A bare
+    // "!" with no command is nothing to send.
+    const text = bashRef.current ? "!" + el.value.trim() : el.value;
     const items = attachments.value;
-    if (!text.trim() && items.length === 0) return;
+    if ((bashRef.current ? !el.value.trim() : !text.trim()) && items.length === 0) return;
     const sid = selectedId.value;
     el.value = "";
     grow();
     syncHasText();
     el.blur(); // drop focus so the soft keyboard dismisses on submit
+    // Exit bash mode after dispatch; no refocus — the blur above dismissed the keyboard.
+    if (bashRef.current) exitBash({ focus: false });
     if (items.length === 0) {
       pendingSends.value = [...pendingSends.value, text];
       lastSentText.set(sid, text); // restore-on-interrupt candidate
@@ -2256,6 +2346,11 @@ function Composer({ disabled, status }) {
         }
       }
       if (e.key === "Enter") enterShift.current = e.shiftKey; // fires before beforeinput
+      // Backspace on an empty bash field deletes the glyph — i.e. leaves bash mode.
+      if (bashRef.current && e.key === "Backspace" && el.value === "") {
+        e.preventDefault();
+        exitBash();
+      }
     };
     const onBeforeInput = (e) => {
       // Slash menu open: Enter picks the highlighted row instead of newline/submit. Reset the
@@ -2295,7 +2390,7 @@ function Composer({ disabled, status }) {
       el.removeEventListener("keydown", onKeyDown);
       el.removeEventListener("beforeinput", onBeforeInput);
     };
-  }, []);
+  }, [bashMode]); // the mode flip remounts the keyed textarea — re-bind to the new node
   useEffect(() => {
     closeSlash();
     disarmStop();
@@ -2310,6 +2405,31 @@ function Composer({ disabled, status }) {
     }
   }, [status]);
   useEffect(() => () => clearTimeout(disarmTimer.current), []); // clear the disarm timer on unmount
+  // Apply the carried draft after a bash-mode flip: the keyed textarea was just recreated
+  // (iOS only honors autocorrect/spellcheck attributes at focus time, hence the remount),
+  // so text, caret and focus land on the NEW node here.
+  useEffect(() => {
+    const c = carryRef.current;
+    if (!c) return;
+    carryRef.current = null;
+    const el = ref.current;
+    if (!el) return;
+    el.value = c.text;
+    grow();
+    syncHasText();
+    if (c.focus) {
+      // Restore the keyboard pan captured at flip time (see enterBash): programmatic
+      // focus doesn't trigger iOS's caret-reveal pan, so without this the page sits
+      // shifted down with the composer under the keyboard until the next keystroke.
+      // Repeated because iOS applies its own (wrong) adjustment after focus returns.
+      el.focus({ preventScroll: true });
+      el.setSelectionRange(el.value.length, el.value.length);
+      const restore = () => window.scrollTo(0, c.scrollY || 0);
+      restore();
+      requestAnimationFrame(restore);
+      setTimeout(restore, 120);
+    }
+  }, [bashMode]);
   // Load the persisted draft when the composer (re)appears for a session — mount after
   // navigating back from the list, an app reload, or a PWA eviction. On an in-place
   // switch (notification tap, fork open) the outgoing session's text is already saved
@@ -2319,6 +2439,8 @@ function Composer({ disabled, status }) {
   // keeps precedence (a rewind's text overwrites; keepDraft yields — a draft stored for
   // this session IS the draft restore-on-interrupt must yield to).
   useEffect(() => {
+    // A bash-mode draft round-trips: saved as the full `!cmd` send string, and
+    // setComposerText re-enters bash mode for any `!`-leading text.
     const d = readDrafts()[sid];
     setComposerText(d ? d.text : "");
   }, [sid]);
@@ -2334,13 +2456,16 @@ function Composer({ disabled, status }) {
     if (el && !(p.keepDraft && el.value.trim())) {
       // An empty prefill ("Chat about this") exists only to focus the box and raise the
       // keyboard — writing the "" would wipe whatever is typed and delete the saved draft.
-      if (p.text) setComposerText(p.text);
+      // focus:true covers the bash-mode case, where the write rides the remount carry
+      // and the el.focus() below would land on the outgoing node.
+      if (p.text) setComposerText(p.text, { focus: true });
       el.focus();
     }
     composerPrefill.value = null;
   }, [composerPrefill.value]);
   return html`
     <div class="composerwrap">
+      <input ref=${trampRef} class="focustramp" tabindex="-1" aria-hidden="true" autocapitalize="none" autocorrect="off" />
       ${slash.current.open &&
       html`<div class="slash-menu">
         ${slash.current.filtered.map(
@@ -2373,14 +2498,30 @@ function Composer({ disabled, status }) {
         >
           ＋
         </button>
-        <textarea
-          ref=${ref}
-          rows="1"
-          placeholder="Message…"
-          autocapitalize="none"
-          disabled=${disabled}
-          onInput=${onInput}
-        ></textarea>
+        ${bashMode
+          ? html`<div class="bashfield" key="bash">
+              <span class="bangglyph" onClick=${() => exitBash()} aria-label="Leave bash mode">!</span>
+              <textarea
+                ref=${ref}
+                rows="1"
+                placeholder="command…"
+                autocapitalize="none"
+                autocorrect="off"
+                spellcheck="false"
+                autocomplete="off"
+                disabled=${disabled}
+                onInput=${onInput}
+              ></textarea>
+            </div>`
+          : html`<textarea
+              key="plain"
+              ref=${ref}
+              rows="1"
+              placeholder="Message…"
+              autocapitalize="none"
+              disabled=${disabled}
+              onInput=${onInput}
+            ></textarea>`}
         ${!hasText && attachments.value.length === 0 && status === "running" && !disabled && interruptedId.current !== sid
           ? html`<button
               class=${"stop" + (stopArmed.current ? " armed" : "")}
@@ -2504,6 +2645,7 @@ function Detail() {
   for (const turn of displayTurns) {
     if (turn.role !== "user") continue;
     if (turn.command) landed.add(turn.command.trim());
+    if (turn.bash) landed.add("!" + turn.bash.command);
     for (const b of turn.content || []) {
       if (b.type === "text" && b.text) landed.add(stripImagePrefix(b.text).trim());
     }
@@ -2711,24 +2853,43 @@ function Detail() {
             return html`<${Turn} key=${i} turn=${turn} upCount=${up} canCode=${editAfter[i]} />`;
           });
         })()}
-        ${queued.map(
-          (text, i) => html`<div
-            class="bubble user queued"
-            key=${`q${i}`}
-            ...${lpProps(lpStartCopyOnly(text))}
-          >
-            ${text}
-            <div class="queuedtag">queued</div>
-          </div>`,
+        ${queued.map((text, i) =>
+          text.trim().startsWith("!")
+            ? html`<div
+                class="bang-cmd queued"
+                key=${`q${i}`}
+                ...${lpProps(lpStartCopyOnly(text))}
+              >
+                <span class="glyph">!</span>${text.trim().slice(1)}
+                <div class="queuedtag">queued</div>
+              </div>`
+            : html`<div
+                class="bubble user queued"
+                key=${`q${i}`}
+                ...${lpProps(lpStartCopyOnly(text))}
+              >
+                ${text}
+                <div class="queuedtag">queued</div>
+              </div>`,
         )}
         ${pendingSends.value
           .filter((text) => !landed.has(text.trim()))
-          .map(
-            (text, i) => html`<div
-              class="bubble user pending"
-              key=${`p${i}`}
-              ...${lpProps(lpStartCopyOnly(text))}
-            >${text}</div>`,
+          .map((text, i) =>
+            // A `!cmd` echo renders as the bash command bubble (no output yet) so the
+            // optimistic bubble matches the folded turn it retires into.
+            text.trim().startsWith("!")
+              ? html`<div
+                  class="bang-cmd pending"
+                  key=${`p${i}`}
+                  ...${lpProps(lpStartCopyOnly(text))}
+                >
+                  <span class="glyph">!</span>${text.trim().slice(1)}
+                </div>`
+              : html`<div
+                  class="bubble user pending"
+                  key=${`p${i}`}
+                  ...${lpProps(lpStartCopyOnly(text))}
+                >${text}</div>`,
           )}
         ${pendingImageSends.value
           .filter((e) => !landed.has(stripImagePrefix(e.text).trim()))

@@ -191,7 +191,7 @@ export async function readPaneStatusline(paneId: string, capture?: string): Prom
 /** Outcome of a send; `reason` is set only on rejection (nothing was sent). */
 export type SendResult = {
   ok: boolean;
-  reason?: "no-pane" | "no-question" | "stale-question" | "not-presented" | "not-held" | "no-prompt" | "no-session" | "rewind-unavailable" | "rewind-mismatch" | "rewind-mode" | "bad-image" | "bad-selection" | "no-confirm" | "no-repo" | "no-transcript" | "resume-failed" | "not-found";
+  reason?: "no-pane" | "no-question" | "stale-question" | "not-presented" | "not-held" | "no-prompt" | "no-session" | "rewind-unavailable" | "rewind-mismatch" | "rewind-mode" | "bad-image" | "bad-selection" | "no-confirm" | "no-repo" | "no-transcript" | "resume-failed" | "not-found" | "shell-draft" | "shell-clear-failed";
   /** Fresh session id, set by createSession to the dictated id. */
   sessionId?: string;
 };
@@ -1266,7 +1266,25 @@ export async function sendMessage(
 ): Promise<SendResult> {
   const paneId = await resolveSessionPane(sessionId);
   if (!paneId) return { ok: false, reason: "no-pane" };
-  const hadDraft = inputPending(await capturePane(paneId));
+  let capture = await capturePane(paneId);
+  // Shell-mode guard, BEFORE the `❯` draft guard (mutually exclusive prompts — shell mode
+  // has no live `❯` line, so killInput can neither see nor clear it). The case this
+  // catches: after a QUEUED `!cmd` executes, the pane's prompt STAYS in shell mode, and a
+  // plain send typed into it would execute as bash.
+  const shell = shellModeInput(capture);
+  if (shell) {
+    // Text on the shell prompt is a Mac-side command mid-composition. The kill-ring
+    // choreography is unverified in shell mode and its failure mode is silent draft
+    // loss — abort loudly and leave the draft untouched.
+    if (shell.text) return { ok: false, reason: "shell-draft" };
+    // Empty shell prompt: Backspace exits shell mode (lab-verified). Require the shell
+    // prompt to actually be gone before typing — never send into an unknown state.
+    await sendKey(paneId, "BSpace");
+    await Bun.sleep(KEY_GAP);
+    capture = await capturePane(paneId);
+    if (shellModeInput(capture)) return { ok: false, reason: "shell-clear-failed" };
+  }
+  const hadDraft = inputPending(capture);
   for (const step of buildSendPlan(text, imagePaths, hadDraft)) {
     // A failed stash aborts BEFORE the message is typed: proceeding would splice it into
     // the remnant draft and submit both as one turn. The phone surfaces the failure and
@@ -1353,6 +1371,31 @@ export function inputPending(capture: string): boolean {
     }
   }
   return false;
+}
+
+/**
+ * Whether the pane's input is in SHELL MODE (a `!` bash command being composed), and the
+ * text it holds. In shell mode the live input line renders `! …` where the `❯` line would
+ * be, with a "! for shell mode" hint under the input box (both lab-verified). The hint
+ * requirement disambiguates from ordinary output lines that happen to start with `!`;
+ * a `❯` found first (scanning bottom-up) means the normal prompt is live — echoed
+ * `❯ message` lines only ever sit ABOVE the live input.
+ *
+ * This exists because `inputPending`/`killInput` are `❯`-keyed and blind to a shell
+ * prompt: killInput's C-u loop would no-op yet report the input empty, and the send
+ * would type a plain message into a prompt that executes it as bash.
+ */
+export function shellModeInput(capture: string): { text: string } | null {
+  const lines = capture.split("\n");
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i]!;
+    if (/^❯/.test(line)) return null;
+    const m = line.match(/^!\s?(.*)$/);
+    if (m && lines.slice(i + 1).some((l) => l.includes("! for shell mode"))) {
+      return { text: m[1]!.trim() };
+    }
+  }
+  return null;
 }
 
 /**

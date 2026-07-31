@@ -132,6 +132,34 @@ export const FIXTURE_TRANSCRIPT = {
       role: "assistant",
       content: [{ type: "text", text: "Shipping — wiring the cookie into the auth route now." }],
     },
+    // A `!` bash passthrough (input + output records folded into one turn by the parser) →
+    // peach command bubble + rail output; long stdout exercises the "+N lines" expander,
+    // stderr renders as a red rail block after it. A rewind checkpoint (the assistant
+    // reply below follows it), unlike the slash-command turn above.
+    {
+      role: "user",
+      content: [],
+      bash: {
+        command: "git status -sb && bun test 2>&1 | tail -8",
+        stdout: [
+          "## eng-2687-cookie-auth...origin/eng-2687-cookie-auth",
+          " M src/bridge/server.ts",
+          " M src/bridge/public/app.js",
+          "?? src/core/cookie-auth.ts",
+          "",
+          "bun test v1.3.14",
+          " 12 pass",
+          " 0 fail",
+          " 31 expect() calls",
+          "Ran 12 tests across 3 files. [412ms]",
+        ].join("\n"),
+        stderr: "warn: cookie secret unset — using dev fallback",
+      },
+    },
+    {
+      role: "assistant",
+      content: [{ type: "text", text: "Clean tree and green tests — the deploy can go out." }],
+    },
     // A message consumed from the input queue MID-turn (queued_command attachment, never a
     // `user` record) — renders as a normal user bubble, excluded from rewind checkpoints.
     {

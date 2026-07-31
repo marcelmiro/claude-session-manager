@@ -311,6 +311,11 @@ export interface TranscriptTurn {
   // ("/pr-triage args"), shown as a normal user message — the terminal echoes commands as
   // your prompt line. `content` is empty, so it is never a rewind checkpoint.
   command?: string;
+  // Set on a `!` bash passthrough (`<bash-input>` record), with the adjacent output
+  // record's stdout/stderr folded in by the parser. `content` is empty. Unlike slash
+  // command turns, bash turns ARE rewind checkpoints — Claude's own /rewind picker
+  // lists them (verified live), so prompt-counting walks must include them.
+  bash?: { command: string; stdout: string; stderr: string };
 }
 
 /**

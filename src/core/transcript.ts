@@ -49,6 +49,22 @@ const LOCAL_COMMAND_META =
  */
 const TASK_NOTIFICATION = /^\s*<task-notification>/;
 
+/**
+ * `!cmd` bash passthrough. Claude Code writes two ADJACENT `user` records: the command
+ * (`<bash-input>cmd</bash-input>`) and its output (`<bash-stdout>…</bash-stdout>
+ * <bash-stderr>…</bash-stderr>` — both tags observed on every record, stderr empty
+ * included, but the parser must not depend on that shape). `recordToTurn` maps the
+ * input to a `bash` turn and the output to a fold marker; `foldBashTurns` merges the
+ * marker into the preceding command turn so the pair renders as one turn.
+ */
+const BASH_INPUT = /^\s*<bash-input>([\s\S]*)<\/bash-input>\s*$/;
+const BASH_OUTPUT_OPEN = /^\s*<bash-(?:stdout|stderr)>/;
+
+/** Internal pre-fold turn: `bashOutput` marks an output record and never leaves this module. */
+interface FoldableTurn extends TranscriptTurn {
+  bashOutput?: { stdout: string; stderr: string };
+}
+
 /** A parsed conversational record: the turn plus the tree links used to rebuild a branch. */
 interface RawRecord {
   type?: string;
@@ -93,7 +109,7 @@ export function isQueuedPromptAttachment(record: {
  * adds as a `user` turn) are hidden by the terminal; we drop them too so they don't show
  * as user bubbles.
  */
-function recordToTurn(record: RawRecord): TranscriptTurn | null {
+function recordToTurn(record: RawRecord): FoldableTurn | null {
   if (isQueuedPromptAttachment(record)) {
     const text = typeof record.attachment?.prompt === "string" ? record.attachment.prompt : "";
     if (!text || LOCAL_COMMAND_META.test(text) || TASK_NOTIFICATION.test(text)) return null;
@@ -124,6 +140,20 @@ function recordToTurn(record: RawRecord): TranscriptTurn | null {
     return { role: record.type, content: [], command: args ? `${name} ${args}` : name };
   }
 
+  // `!cmd` bash passthrough records (see BASH_INPUT above). Only `user` records carry them.
+  if (record.type === "user") {
+    const input = joined.match(BASH_INPUT);
+    if (input) {
+      return { role: "user", content: [], bash: { command: input[1].trim(), stdout: "", stderr: "" } };
+    }
+    if (BASH_OUTPUT_OPEN.test(joined)) {
+      // Extract each tag independently — don't assume both are present.
+      const stdout = joined.match(/<bash-stdout>([\s\S]*?)<\/bash-stdout>/)?.[1] ?? "";
+      const stderr = joined.match(/<bash-stderr>([\s\S]*?)<\/bash-stderr>/)?.[1] ?? "";
+      return { role: "user", content: [], bashOutput: { stdout, stderr } };
+    }
+  }
+
   const visible = blocks.filter(
     (b) =>
       !(b.type === "text" && (LOCAL_COMMAND_META.test(b.text) || TASK_NOTIFICATION.test(b.text))),
@@ -138,9 +168,33 @@ function recordToTurn(record: RawRecord): TranscriptTurn | null {
   return { role: record.type, content: visible };
 }
 
+/**
+ * Merge each bash output marker into its immediately-preceding bash command turn.
+ * An orphan output (no preceding command — e.g. a branch walk clipped the input) is
+ * dropped; a command with no following output keeps empty stdout/stderr (killed
+ * mid-command). Markers never survive this pass.
+ */
+function foldBashTurns(turns: FoldableTurn[]): TranscriptTurn[] {
+  const out: TranscriptTurn[] = [];
+  for (const turn of turns) {
+    if (turn.bashOutput) {
+      const prev = out[out.length - 1];
+      // Guard on still-empty output so a stray second output record can't clobber a
+      // previously-folded pair.
+      if (prev?.bash && !prev.bash.stdout && !prev.bash.stderr) {
+        prev.bash.stdout = turn.bashOutput.stdout;
+        prev.bash.stderr = turn.bashOutput.stderr;
+      }
+      continue;
+    }
+    out.push(turn);
+  }
+  return out;
+}
+
 /** Parse a raw JSONL transcript into ordered turns (oldest first), in file order. */
 export function parseTranscript(raw: string): TranscriptTurn[] {
-  const turns: TranscriptTurn[] = [];
+  const turns: FoldableTurn[] = [];
   for (const line of raw.split("\n")) {
     if (!line.trim()) continue;
     let record: RawRecord;
@@ -152,7 +206,7 @@ export function parseTranscript(raw: string): TranscriptTurn[] {
     const turn = recordToTurn(record);
     if (turn) turns.push(turn);
   }
-  return turns;
+  return foldBashTurns(turns);
 }
 
 /**
@@ -212,12 +266,12 @@ export function parseActiveBranch(raw: string): TranscriptTurn[] {
   }
   chain.reverse(); // walked leaf→root; emit oldest-first
 
-  const turns: TranscriptTurn[] = [];
+  const turns: FoldableTurn[] = [];
   for (const record of chain) {
     const turn = recordToTurn(record);
     if (turn) turns.push(turn);
   }
-  return turns;
+  return foldBashTurns(turns);
 }
 
 /** The text of the last assistant turn that has any text content, else undefined. */

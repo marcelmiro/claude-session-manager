@@ -29,6 +29,7 @@ import {
   composeMessageSteps,
   buildSendPlan,
   inputPending,
+  shellModeInput,
   parseQueuedPending,
   getTranscript,
   sendMessage,
@@ -387,6 +388,47 @@ test("inputPending: false once the input cleared (last ❯ line empty)", () => {
   // An earlier ❯ echo of the submitted message must NOT count — only the LAST ❯ line does.
   const cap = ["❯ [Image #1] what color", "  ⎿ [Image #1]", "⏺ Purple.", "❯ ", "────"].join("\n");
   expect(inputPending(cap)).toBe(false);
+});
+
+// --- shellModeInput (send-path shell-mode guard) --------------------------------
+// Capture shapes taken from a live pane: in shell mode the input line renders `! …`
+// where `❯` would be, with the "! for shell mode" hint under the input box.
+
+const RULE = "─".repeat(40);
+
+test("shellModeInput: empty shell prompt (the lingering queued-bang shape)", () => {
+  const cap = ["⏺ done.", RULE, "! ", RULE, "  ! for shell mode"].join("\n");
+  expect(shellModeInput(cap)).toEqual({ text: "" });
+});
+
+test("shellModeInput: shell prompt holding a Mac-side draft", () => {
+  const cap = [RULE, "! echo hi there", RULE, "  ! for shell mode"].join("\n");
+  expect(shellModeInput(cap)).toEqual({ text: "echo hi there" });
+});
+
+test("shellModeInput: null on a normal ❯ prompt, even after echoed bang output", () => {
+  // Output lines starting with "!" (and echoed ❯ lines) sit ABOVE the live prompt —
+  // neither may read as shell mode when the `❯` input is live.
+  const cap = ["❯ !ls -la", "!remember: legacy syntax", "⏺ ok", RULE, "❯ ", RULE, "  0/200k (0%)"].join("\n");
+  expect(shellModeInput(cap)).toBe(null);
+});
+
+test("shellModeInput: a bare ! output line without the hint is not shell mode", () => {
+  const cap = ["⏺ running", "! some stray output line", RULE, "  esc to interrupt"].join("\n");
+  expect(shellModeInput(cap)).toBe(null);
+});
+
+test("shellModeInput: null on a spinner capture with no prompt at all", () => {
+  expect(shellModeInput("✶ Deliberating… (3s · 1.2k tokens)")).toBe(null);
+});
+
+test("inputPending is blind to a shell-mode draft (why the guard is its own step)", () => {
+  // Shell mode has no live ❯ line, so inputPending reports "no draft" while a command
+  // sits half-typed in the shell prompt — the draft guard alone would type right into
+  // it. shellModeInput sees it and the send path aborts before inputPending is consulted.
+  const cap = [RULE, "! rm -rf build", RULE, "  ! for shell mode"].join("\n");
+  expect(inputPending(cap)).toBe(false);
+  expect(shellModeInput(cap)).toEqual({ text: "rm -rf build" });
 });
 
 test("inputPending: false on the queued-messages placeholder (hint text, not a draft)", () => {
