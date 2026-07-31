@@ -1030,6 +1030,22 @@ const lpStart = (text, upCount, canCode) => () => {
 };
 const lpCancel = () => clearTimeout(lpTimer);
 
+// Optimistic/queued user bubbles (not yet in the transcript, so no rewind target): a
+// copy-only sheet. This is the recovery path when a send silently never lands — without
+// it the text exists nowhere the user can reach.
+const lpStartCopyOnly = (text) => () => {
+  clearTimeout(lpTimer);
+  lpTimer = setTimeout(() => (menuText.value = { text, copyOnly: true }), 450);
+};
+
+// The shared touch-handler bundle for a long-pressable bubble — spread onto the element.
+const lpProps = (start) => ({
+  onTouchStart: start,
+  onTouchMove: lpCancel,
+  onTouchEnd: lpCancel,
+  onContextMenu: (e) => e.preventDefault(),
+});
+
 // Assistant bubble: long-press → a Copy-only sheet (rewind is a user-turn concept). The
 // `assistant` flag tells ActionSheet to drop the rewind buttons. `asstLpFired` suppresses the
 // click iOS fires on release so a long-press never also tap-copies a code span underneath it.
@@ -1654,18 +1670,12 @@ function Turn({ turn, upCount, canCode }) {
           ? html`<div
               class="bubble assistant md"
               onClick=${assistantTap}
-              onTouchStart=${lpStartAsst(b.text)}
-              onTouchMove=${lpCancel}
-              onTouchEnd=${lpCancel}
-              onContextMenu=${(e) => e.preventDefault()}
+              ...${lpProps(lpStartAsst(b.text))}
               dangerouslySetInnerHTML=${{ __html: md(shown) }}
             ></div>`
           : html`<div
               class="bubble user"
-              onTouchStart=${lpStart(b.text, upCount, canCode)}
-              onTouchMove=${lpCancel}
-              onTouchEnd=${lpCancel}
-              onContextMenu=${(e) => e.preventDefault()}
+              ...${lpProps(lpStart(b.text, upCount, canCode))}
             >${shown}</div>`,
       );
     } else if (b.type === "tool_use") {
@@ -1948,6 +1958,32 @@ function RunningTool({ tool }) {
   `;
 }
 
+// --- Composer drafts ---------------------------------------------------------
+// Per-session draft persisted to localStorage, so leaving the detail view (the
+// composer unmounts), an app reload, or an iOS PWA eviction never loses typed-but-
+// unsent text. Written from syncHasText — the one choke point every el.value
+// mutation already calls — so sending (value → "") clears the entry for free.
+// Best-effort: storage failures are swallowed. Bounded to the newest 20 sessions.
+const DRAFTS_KEY = "csm-drafts";
+function readDrafts() {
+  try {
+    return JSON.parse(localStorage.getItem(DRAFTS_KEY)) || {};
+  } catch {
+    return {};
+  }
+}
+function saveDraft(sid, text) {
+  if (!sid) return;
+  try {
+    const drafts = readDrafts();
+    if (text.trim()) drafts[sid] = { text, at: Date.now() };
+    else delete drafts[sid];
+    const ids = Object.keys(drafts).sort((a, b) => drafts[b].at - drafts[a].at);
+    for (const id of ids.slice(20)) delete drafts[id];
+    localStorage.setItem(DRAFTS_KEY, JSON.stringify(drafts));
+  } catch {}
+}
+
 // Free-text composer — available in any state (TUI parity: the bridge sends keys to
 // the pane regardless of status; Claude queues input while running, accepts it at the
 // prompt). Sent text shows immediately as an optimistic bubble until the transcript
@@ -1982,10 +2018,21 @@ function Composer({ disabled, status }) {
   }
   // The textarea is uncontrolled, so hasText must be resynced at EVERY site that mutates
   // el.value — onInput fires for keystrokes, but selectSlash() and the failed-send restore
-  // assign el.value directly (no native input event). Call this at all of them.
+  // assign el.value directly (no native input event). Call this at all of them. The same
+  // every-mutation invariant makes it the one place the persisted draft stays current.
   function syncHasText() {
     const el = ref.current;
     setHasText(!!(el && el.value.trim()));
+    if (el) saveDraft(selectedId.value, el.value);
+  }
+  // Assign the textarea wholesale and resync everything derived from it (height,
+  // Stop⇄Send toggle, persisted draft).
+  function setComposerText(text) {
+    const el = ref.current;
+    if (!el) return;
+    el.value = text;
+    grow();
+    syncHasText();
   }
   function disarmStop() {
     clearTimeout(disarmTimer.current);
@@ -2148,6 +2195,11 @@ function Composer({ disabled, status }) {
         const idx = pendingSends.value.lastIndexOf(text);
         if (idx >= 0) pendingSends.value = pendingSends.value.filter((_, i) => i !== idx);
         lastSentText.delete(sid); // never reached the pane — an interrupt can't hand it back
+        // Restore so nothing is silently lost (mirrors the image path below). If the user
+        // navigated away mid-await the box belongs to another session (or is unmounted) —
+        // persist under the sending session instead so the draft is waiting on return.
+        if (selectedId.value === sid) setComposerText(text);
+        else saveDraft(sid, text);
       }
       return;
     }
@@ -2164,9 +2216,8 @@ function Composer({ disabled, status }) {
       // Restore so nothing is silently lost; keep the URLs alive for the retry.
       pendingImageSends.value = pendingImageSends.value.filter((e) => e !== entry);
       attachments.value = items;
-      el.value = text;
-      grow();
-      syncHasText();
+      if (selectedId.value === sid) setComposerText(text);
+      else saveDraft(sid, text);
     }
   }
   // Enter handling via NATIVE listeners (not Preact props) so the binding is unambiguous on
@@ -2259,6 +2310,18 @@ function Composer({ disabled, status }) {
     }
   }, [status]);
   useEffect(() => () => clearTimeout(disarmTimer.current), []); // clear the disarm timer on unmount
+  // Load the persisted draft when the composer (re)appears for a session — mount after
+  // navigating back from the list, an app reload, or a PWA eviction. On an in-place
+  // switch (notification tap, fork open) the outgoing session's text is already saved
+  // under its own key by syncHasText, so the box is handed to the new session wholesale:
+  // leftover text is replaced rather than carried over, where the next keystroke would
+  // persist it under the wrong session's draft. The prefill effect below runs after and
+  // keeps precedence (a rewind's text overwrites; keepDraft yields — a draft stored for
+  // this session IS the draft restore-on-interrupt must yield to).
+  useEffect(() => {
+    const d = readDrafts()[sid];
+    setComposerText(d ? d.text : "");
+  }, [sid]);
   // One-shot autofill after a rewind: drop the rewound message back into the box (TUI parity).
   // Guarded on sessionId so a stale prefill never lands in the wrong session's composer; the
   // steady-state/mount re-fire (value null) is a no-op.
@@ -2269,9 +2332,9 @@ function Composer({ disabled, status }) {
     // keepDraft (restore-on-interrupt): the fill yields to anything already typed — the
     // user may have started the replacement message before the restore resolved.
     if (el && !(p.keepDraft && el.value.trim())) {
-      el.value = p.text;
-      grow();
-      syncHasText();
+      // An empty prefill ("Chat about this") exists only to focus the box and raise the
+      // keyboard — writing the "" would wipe whatever is typed and delete the saved draft.
+      if (p.text) setComposerText(p.text);
       el.focus();
     }
     composerPrefill.value = null;
@@ -2649,20 +2712,34 @@ function Detail() {
           });
         })()}
         ${queued.map(
-          (text, i) => html`<div class="bubble user queued" key=${`q${i}`}>
+          (text, i) => html`<div
+            class="bubble user queued"
+            key=${`q${i}`}
+            ...${lpProps(lpStartCopyOnly(text))}
+          >
             ${text}
             <div class="queuedtag">queued</div>
           </div>`,
         )}
         ${pendingSends.value
           .filter((text) => !landed.has(text.trim()))
-          .map((text, i) => html`<div class="bubble user pending" key=${`p${i}`}>${text}</div>`)}
+          .map(
+            (text, i) => html`<div
+              class="bubble user pending"
+              key=${`p${i}`}
+              ...${lpProps(lpStartCopyOnly(text))}
+            >${text}</div>`,
+          )}
         ${pendingImageSends.value
           .filter((e) => !landed.has(stripImagePrefix(e.text).trim()))
           .map(
-            (e, i) => html`<div class="bubble user pending imgbubble" key=${`pi${i}`}>
-            <div class="bubthumbs">${e.urls.map((u) => html`<img src=${u} alt="" key=${u} />`)}</div>
-            ${e.text && html`<div>${e.text}</div>`}
+            (entry, i) => html`<div
+            class="bubble user pending imgbubble"
+            key=${`pi${i}`}
+            ...${lpProps(entry.text ? lpStartCopyOnly(entry.text) : undefined)}
+          >
+            <div class="bubthumbs">${entry.urls.map((u) => html`<img src=${u} alt="" key=${u} />`)}</div>
+            ${entry.text && html`<div>${entry.text}</div>`}
           </div>`,
           )}
         ${t && t.pendingTool && !blocked && html`<${RunningTool} tool=${t.pendingTool} />`}
@@ -2789,7 +2866,7 @@ function ActionSheet() {
           m.upCount > 0 &&
           m.canCode &&
           html`<button class="danger" onClick=${() => rewind("both")}>Rewind code + conversation</button>`}
-          ${!m.assistant && busy && html`<div class="sheethint">Rewind is available at the prompt.</div>`}
+          ${!m.assistant && !m.copyOnly && busy && html`<div class="sheethint">Rewind is available at the prompt.</div>`}
           <button class="sheetcancel" onClick=${close}>Cancel</button>
         </div>
       </div>
