@@ -229,6 +229,14 @@ function cacheTranscript(id, data) {
   boundedSet(transcriptCache, id, data);
 }
 
+// Retirement key for a sent text: a `!cmd` send normalizes to "!" + the trimmed command,
+// because the transcript's folded bash turn carries the command trimmed — a pasted
+// "! cmd" (space after the bang; a paste never flips bash mode) must still match it.
+function bangKey(text) {
+  const s = String(text || "").trim();
+  return s.startsWith("!") ? "!" + s.slice(1).trim() : s;
+}
+
 // Text of every user turn already in the transcript — used to retire optimistic
 // bubbles once the real send lands (the transcript lags the pane by a few seconds).
 function userTurnTexts(t) {
@@ -253,13 +261,22 @@ const stripImagePrefix = (t) => String(t || "").replace(/^(?:\[Image #\d+\]\s*)+
 
 // --- data ---------------------------------------------------------------
 
+// Order list responses by request sequence, same as the transcript path: concurrent
+// refreshes (SSE bursts + foreground resync) can resolve out of order, and a slow stale
+// response landing last would overwrite a fresher list until the next broadcast.
+let listReqSeq = 0;
+let listAppliedSeq = 0;
+
 async function refreshSessions() {
+  const seq = ++listReqSeq;
   try {
     const r = await fetch("/sessions");
     if (r.status === 401) return (authed.value = false);
     if (!r.ok) return;
     const list = await r.json();
     if (!Array.isArray(list)) return; // malformed payload — never poison the render with it
+    if (seq < listAppliedSeq) return; // a newer response already applied — never regress
+    listAppliedSeq = seq;
     sessions.value = list;
     followClearedSession(); // /clear or /compact on the open session → follow to its successor
     authed.value = true;
@@ -394,7 +411,7 @@ async function refreshTranscript() {
     if (pendingSends.value.length) {
       const seen = userTurnTexts(transcript.value);
       for (const q of transcript.value.queuedPending || []) seen.add(q.trim());
-      const remaining = pendingSends.value.filter((p) => !seen.has(p.trim()));
+      const remaining = pendingSends.value.filter((p) => !seen.has(bangKey(p)));
       if (remaining.length !== pendingSends.value.length) pendingSends.value = remaining;
     }
     // Same for optimistic image bubbles, matched on the prefix-stripped caption (an
@@ -483,10 +500,13 @@ function connectStream() {
     }
     if (msg.type === "session-changed") {
       refreshSessionsSoon();
-      if (msg.id === selectedId.value) {
-        refreshTranscriptSoon(); // updates the subagent list (status flips) on the open session
-        if (openSubagent.value) refreshSubagent();
-      }
+      // Refresh the open transcript on EVERY broadcast, not just id-matched ones: the
+      // list-recompute broadcasts carry no id, and they're the signal that still arrives
+      // when a targeted refresh was lost (failed fetch, dropped-socket moment) — without
+      // this the thread freezes until remount while the list keeps updating. Near-free:
+      // the rev-conditional fetch returns a tiny "unchanged" body when nothing moved.
+      if (selectedId.value) refreshTranscriptSoon();
+      if (msg.id === selectedId.value && openSubagent.value) refreshSubagent();
     }
   };
 }
@@ -2873,7 +2893,7 @@ function Detail() {
               </div>`,
         )}
         ${pendingSends.value
-          .filter((text) => !landed.has(text.trim()))
+          .filter((text) => !landed.has(bangKey(text)))
           .map((text, i) =>
             // A `!cmd` echo renders as the bash command bubble (no output yet) so the
             // optimistic bubble matches the folded turn it retires into.

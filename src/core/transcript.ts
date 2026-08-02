@@ -160,6 +160,21 @@ function recordToTurn(record: RawRecord): FoldableTurn | null {
   );
   if (visible.length === 0 && blocks.length > 0) return null;
 
+  // "No response requested." is a sentinel the terminal suppresses, in both its forms:
+  // the harness writes it as a synthetic assistant record (model "<synthetic>") to close
+  // a dangling user leaf on resume, and the model itself replies with it when a turn
+  // needs no answer (e.g. after a `!` command's output). Drop it so neither renders as
+  // a real assistant bubble.
+  const only = visible[0];
+  if (
+    record.type === "assistant" &&
+    visible.length === 1 &&
+    only?.type === "text" &&
+    only.text.trim() === "No response requested."
+  ) {
+    return null;
+  }
+
   // The post-compaction summary is a `user` record carrying the entire summary as its text.
   // Flag it so the UI labels it a "continued from compacted summary" divider rather than a
   // giant user bubble — the branch literally originated from a compact here.

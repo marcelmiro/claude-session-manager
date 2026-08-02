@@ -1294,7 +1294,24 @@ export function startBridge(): ReturnType<typeof Bun.serve> {
   if (!existsSync(EVENTS_DIR)) {
     console.error("EVENTS_DIR not found: live push disabled; restart bridge after csm setup");
   }
-  watchEvents((id) => broadcast({ type: "session-changed", id }));
+  watchEvents((id) => {
+    broadcast({ type: "session-changed", id });
+    // The cached projection predates this event — drop it and recompute NOW, so a
+    // request landing after the event (a client refetch, or a phone foregrounding off
+    // a push tap) waits briefly for the post-event world instead of being served the
+    // pre-flip snapshot and correcting seconds later on a second broadcast.
+    sessionsCache = null;
+    if (sessionsRefreshing) {
+      // A compute is mid-flight and won't see this event (turn-end bursts: the Stop
+      // event lands while the last PostToolUse's compute runs) — run one more after
+      // it. Concurrent chains dedupe: the first re-kick claims the slot, the rest join.
+      sessionsRefreshing
+        .catch(() => {})
+        .then(() => void startSessionsRefresh().catch(() => {}));
+    } else {
+      void startSessionsRefresh().catch(() => {});
+    }
+  });
   setInterval(() => {
     if (clients.size > 0) touchMarker(BRIDGE_CONSUMER); // keep the marker fresh while a phone is live
     for (const deviceId of new Set(clients.values())) {

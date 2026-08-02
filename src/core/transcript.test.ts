@@ -145,6 +145,21 @@ test("drops isMeta user records (e.g. skill base-directory injection)", () => {
   expect(JSON.stringify(turns)).not.toContain("Base directory");
 });
 
+// --- "No response requested." sentinel: suppressed in both its forms ---
+
+test("drops the 'No response requested.' sentinel (synthetic closure and real model reply)", () => {
+  const raw = [
+    // Harness-written synthetic closure of a dangling user leaf (seen on resume).
+    '{"type":"assistant","message":{"role":"assistant","model":"<synthetic>","content":[{"type":"text","text":"No response requested."}]}}',
+    // Genuine model turn replying with the same sentinel (seen after a `!` command).
+    '{"type":"assistant","message":{"role":"assistant","model":"claude-opus-4-8","content":[{"type":"text","text":"No response requested."}]}}',
+    '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"A real reply."}]}}',
+  ].join("\n");
+  expect(parseTranscript(raw)).toEqual([
+    { role: "assistant", content: [{ type: "text", text: "A real reply." }] },
+  ]);
+});
+
 // --- `!cmd` bash passthrough: input + output records fold into one bash turn ---
 
 const bashInput =

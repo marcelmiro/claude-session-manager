@@ -748,11 +748,12 @@ export function slimTurns(turns: TranscriptTurn[]): TranscriptTurn[] {
     if (content.length === 0 && t.content.length > 0) continue;
     // Rebuild with only the fields the client uses — the per-turn flags must ride along
     // (the compact-summary divider, the queued/rewind-skip handling, and the command
-    // turn all key on them).
+    // and bash turns all key on them).
     const slim: TranscriptTurn = { role: t.role, content };
     if (t.compactSummary) slim.compactSummary = true;
     if (t.queued) slim.queued = true;
     if (t.command) slim.command = t.command;
+    if (t.bash) slim.bash = t.bash;
     out.push(slim);
   }
   return out;
