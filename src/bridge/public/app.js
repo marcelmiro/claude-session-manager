@@ -3733,10 +3733,12 @@ async function dismissNotifications() {
 
 function resync() {
   if (!authed.value) return;
-  // Reads the shade, follows a notification tap into its session, then clears both.
-  followNotificationTap();
   tick.value = Date.now(); // ages froze while the tab was hidden — catch them up first
-  refreshSessions();
+  // Follow a notification tap only AFTER the fresh list lands. markRead() is a one-shot
+  // check against sessions.value, and the pre-background copy predates the turn whose
+  // completion fired the push — stale data reads unread:false (or a stale `modified`),
+  // so the tap would open the session without ever clearing its ⚡.
+  refreshSessions().then(followNotificationTap);
   if (selectedId.value) refreshTranscript();
   if (openSubagent.value) refreshSubagent();
   // ALWAYS rebuild the stream on foreground — no readyState check. iOS can resume the
@@ -3873,6 +3875,7 @@ async function followNotificationTap() {
   }
   const id = stashed || tapped;
   if (id && selectedId.value !== id) open(id);
+  else if (id) markRead(id); // already open — still consume the ⚡ this tap answered
   dismissNotifications(); // you're looking now — clear the shade + badge
 }
 
