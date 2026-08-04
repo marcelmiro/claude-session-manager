@@ -29,7 +29,9 @@ const DEFAULT_CONFIG: CsmConfig = {
   windowPrefix: true,
   nativeNotification: true,
   repoPaths: ["~/Documents"],
-  priorityRepos: ["throxy"],
+  // Matches portkey's REPO_ORDER (bridge/public/app.js) so both surfaces pin the same
+  // repo groups in the same order.
+  priorityRepos: ["throxy", "customeros", "~", "csm"],
 };
 
 // Retired by the ntfy → Web Push migration; stripped from config.json on load so

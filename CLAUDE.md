@@ -164,7 +164,7 @@ Neovim which-key style popup at bottom-left. Press a key to select an action:
 | idle | ○ | No claude process on pane |
 | archived | ○ | Modified in last 24h, no active pane |
 
-Sort order: waiting → running → ready → idle → archived. Within same status: non-worktrees before worktrees; archived sorted most recent first. Priority repos pinned at top.
+Sort order mirrors portkey's list (`compareSessions` in `bridge/public/app.js`): attention (⚡) first, then waiting → running → ready → idle → archived, then last-turn recency desc (`lastTurnAt`; never a live session's `modified` fallback — that's stamped per refresh and would shuffle the list). Priority repos pinned at top (default matches portkey's `REPO_ORDER`: throxy, customeros, ~, csm).
 
 ### Session labels
 

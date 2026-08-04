@@ -847,10 +847,16 @@ async function getGitBranch(projectPath: string): Promise<string> {
 }
 
 /**
- * Group sessions by repo name, sorted alphabetically.
- * Sessions within each group are sorted by status priority, then by modified desc.
+ * Group sessions by repo name, priority repos first then alphabetical.
+ * Sessions within each group mirror portkey's list order (`compareSessions` in
+ * bridge/public/app.js): attention (⚡) first, then status priority, then
+ * last-activity recency desc.
  */
-export function groupSessions(sessions: Session[], priorityRepos: string[]): RepoGroup[] {
+export function groupSessions(
+  sessions: Session[],
+  priorityRepos: string[],
+  attentionKeys: Set<string> = new Set(),
+): RepoGroup[] {
   const statusPriority: Record<Session["status"], number> = {
     waiting: 0,
     running: 1,
@@ -874,22 +880,24 @@ export function groupSessions(sessions: Session[], priorityRepos: string[]): Rep
   // Build RepoGroup array
   const groups: RepoGroup[] = [];
 
+  // Recency uses lastTurnAt — a stable transcript timestamp — never a live session's
+  // `modified` fallback, which is stamped new Date() each refresh and would shuffle
+  // same-status sessions between cycles. Archived mtimes are stable, so they stand in.
+  const activityMs = (s: Session): number =>
+    s.lastTurnAt?.getTime() ?? (s.status === "archived" ? s.modified.getTime() : 0);
+
   for (const [name, groupSessions] of groupMap) {
-    // Sort sessions: by status priority asc, then by stable key.
-    // Avoid sorting by modified time — active sessions get new Date() each refresh,
-    // which causes same-status sessions to shuffle order between cycles.
+    // Portkey's compareSessions: attention first, then status rank, then recency desc.
+    // Stable pane-id/id tiebreak so exact ties keep a fixed order across refreshes.
     groupSessions.sort((a, b) => {
+      const attnDiff =
+        (attentionKeys.has(a.tmuxPane?.paneId ?? "") ? 0 : 1) -
+        (attentionKeys.has(b.tmuxPane?.paneId ?? "") ? 0 : 1);
+      if (attnDiff !== 0) return attnDiff;
       const statusDiff = statusPriority[a.status] - statusPriority[b.status];
       if (statusDiff !== 0) return statusDiff;
-      // Archived sessions have stable mtimes (index/file), so recency sorting is safe:
-      // most recent first.
-      if (a.status === "archived") {
-        return b.modified.getTime() - a.modified.getTime();
-      }
-      // Non-worktrees before worktrees (same status)
-      const aWt = a.repoPath !== a.baseRepoPath ? 1 : 0;
-      const bWt = b.repoPath !== b.baseRepoPath ? 1 : 0;
-      if (aWt !== bWt) return aWt - bWt;
+      const recency = activityMs(b) - activityMs(a);
+      if (recency !== 0) return recency;
       const aKey = a.tmuxPane?.paneId ?? a.id;
       const bKey = b.tmuxPane?.paneId ?? b.id;
       return aKey.localeCompare(bKey);

@@ -461,9 +461,7 @@ async function refresh(opts?: { skipArchivedSummaries?: boolean }) {
       if (scriptWaitIds.has(session.id)) session.scriptWaiting = true;
     }
 
-    const groups = groupSessions(sessions, notifConfig.priorityRepos ?? []);
-
-    // Read attention from monitor's state.json
+    // Read attention from monitor's state.json (before grouping — ⚡ sessions sort first)
     const monitorState = await loadState();
     needsAttention.clear();
     attentionTypes.clear();
@@ -479,6 +477,8 @@ async function refresh(opts?: { skipArchivedSummaries?: boolean }) {
         localDismissals.delete(key);
       }
     }
+
+    const groups = groupSessions(sessions, notifConfig.priorityRepos ?? [], needsAttention);
 
     if (groups.length === 0) {
       listBox.setContent(
