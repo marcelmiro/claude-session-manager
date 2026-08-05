@@ -42,12 +42,16 @@ deliberate, not an inconsistency: it mirrors Claude's own picker, which lists ba
 commands and excludes slash-command turns (both verified live). Counting them any other
 way shifts every earlier prompt's upCount and lands the rewind on the wrong checkpoint.
 
-**Composer bash mode enters on a TYPED `!` only.** A typed `!` opening an empty draft
-lifts into an in-field glyph and remounts the textarea with autocorrect/spellcheck off
-(iOS honors those attributes only at focus time). A paste never enters the mode — that is
-terminal parity (the pane treats a pasted `!cmd` as literal text), and it means a copied
-snippet that happens to start with `!` keeps its meaning. Backspace on the empty field or
-tapping the glyph exits; sending exits after dispatch and sends the literal `"!" + text`.
+**Composer bash mode enters on a `!` opening an empty draft — typed or pasted.** A typed
+`!` on an empty field lifts into an in-field glyph and remounts the textarea with
+autocorrect/spellcheck off (iOS honors those attributes only at focus time). *Amended
+2026-08-05:* a `!`-leading paste into an **empty** composer now enters the mode too — the
+send string is identical either way (the pane executes it as bash regardless), so
+withholding the mode only hid the "this will execute" affordance from the paste-a-command
+workflow. A `!` typed or pasted **mid-draft** still never flips: a copied snippet that
+happens to contain `!` keeps its meaning, matching the pane. Backspace on the empty field
+or tapping the glyph exits; sending exits after dispatch and sends the literal
+`"!" + text`.
 
 **The send path guards against a lingering shell prompt as its own step.** The existing
 draft guard is `❯`-keyed and blind to shell mode — `killInput`'s C-u loop would no-op yet
@@ -67,8 +71,10 @@ abort ever actually annoys.
   makes a phone-sent command look lost (same reasoning as slash-command turns).
 - **A passive tint instead of a real composer mode** — too subtle on-device, and it can't
   fix autocorrect, which needs the attribute remount.
-- **Auto-entering bash mode on paste or on restored drafts** — breaks the typed-only
-  rule for no gain: the send string is identical either way, so restored `!cmd` drafts
-  land as literal text.
+- **Auto-entering bash mode on paste or on restored drafts** — originally rejected as
+  "no gain: the send string is identical either way". *Partially reversed 2026-08-05:*
+  the paste-into-empty case turned out to have a real gain (the mode's visual
+  affordance), so it now flips; mid-draft pastes and restored drafts still don't
+  (restored `!cmd` drafts re-enter the mode via setComposerText, unchanged).
 - **Reusing `killInput` + C-y restore for shell-mode drafts** — unverified in shell mode
   with silent-loss failure; the fail-safe abort is strictly safer.

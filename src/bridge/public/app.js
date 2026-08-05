@@ -230,8 +230,8 @@ function cacheTranscript(id, data) {
 }
 
 // Retirement key for a sent text: a `!cmd` send normalizes to "!" + the trimmed command,
-// because the transcript's folded bash turn carries the command trimmed — a pasted
-// "! cmd" (space after the bang; a paste never flips bash mode) must still match it.
+// because the transcript's folded bash turn carries the command trimmed — a "! cmd"
+// sent outside bash mode (e.g. pasted mid-draft) must still match it.
 function bangKey(text) {
   const s = String(text || "").trim();
   return s.startsWith("!") ? "!" + s.slice(1).trim() : s;
@@ -476,22 +476,32 @@ function coalesce(fn, ms = 300) {
 const refreshSessionsSoon = coalesce(refreshSessions);
 const refreshTranscriptSoon = coalesce(refreshTranscript);
 
+// Last time the stream demonstrably worked (open, broadcast, or server ping). The
+// watchdog below reads it; every EventSource callback stamps it.
+let lastStreamActivity = Date.now();
+const stampStream = () => (lastStreamActivity = Date.now());
+
 function connectStream() {
   if (es) es.close();
   es = new EventSource(`/stream?device=${encodeURIComponent(DEVICE_ID)}`);
   // Re-snapshot on every (re)connect. EventSource reconnects on its own but never resends
   // state, so without this the list stays stale after a dropped socket reconnects.
   es.onopen = () => {
+    stampStream();
     connected.value = true;
     refreshSessions();
     if (selectedId.value) refreshTranscript();
     if (openSubagent.value) refreshSubagent();
   };
+  // The server heartbeats a named `ping` every 15s — named events bypass onmessage,
+  // so this listener exists only to stamp liveness for the watchdog.
+  es.addEventListener("ping", stampStream);
   // EventSource auto-reconnects; surface the gap so a dropped tailnet/socket isn't silent.
   es.onerror = () => {
     if (!es || es.readyState !== 1) connected.value = false;
   };
   es.onmessage = (ev) => {
+    stampStream();
     let msg;
     try {
       msg = JSON.parse(ev.data);
@@ -510,6 +520,23 @@ function connectStream() {
     }
   };
 }
+
+// Zombie-stream watchdog. iOS can kill the socket with no error and no visibility
+// change — the EventSource still claims OPEN, so `resync` (foreground-only) never
+// runs and the app silently stops hearing broadcasts until a manual remount. The
+// server pings every 15s; silence past ~2.5 periods while visible means the stream
+// is dead regardless of readyState — rebuild it and refetch what the dead window
+// may have dropped. Stamping before the rebuild spaces retries to one per window.
+// Hidden is excluded on purpose: sendGoodbye closes the stream deliberately there,
+// and resync already rebuilds it on return to foreground.
+setInterval(() => {
+  if (document.visibilityState !== "visible" || !authed.value) return;
+  if (Date.now() - lastStreamActivity < 40_000) return;
+  stampStream();
+  connectStream();
+  refreshSessions();
+  if (selectedId.value) refreshTranscript();
+}, 10_000);
 
 // --- Web Push (installed-PWA only: iOS allows push solely for home-screen apps) ---
 // The bell shows only in the true first-run case (permission not yet asked); once
@@ -2051,6 +2078,7 @@ function Composer({ disabled, status }) {
   const enterArmed = useRef(false); // true after a plain Enter — a second one submits
   const enterShift = useRef(false); // e.shiftKey of the latest Enter keydown
   const shiftRun = useRef(false); // inside a Shift+Enter run — suppress submit until a keystroke
+  const pasteWasEmpty = useRef(false); // pre-paste field emptiness (input's e.data is null for pastes)
   const [hasText, setHasText] = useState(false); // drives the Stop⇄Send toggle; uncontrolled textarea
   const stopArmed = useRef(false); // first Stop tap arms; a second within 3s fires (double-tap confirm)
   const disarmTimer = useRef(null);
@@ -2223,12 +2251,17 @@ function Composer({ disabled, status }) {
     disarmStop(); // typing cancels an armed Stop
     const el = ref.current;
     if (!el) return;
-    // A TYPED "!" opening an empty draft enters bash mode — never a paste, and never
-    // mid-draft (terminal parity: the pane treats a pasted "!cmd" as literal text too,
-    // so a copied snippet that happens to start with "!" keeps its meaning). The "!"
-    // lifts out of the text into the in-field glyph.
+    // A "!" opening an empty draft enters bash mode — typed, or pasted as the whole
+    // draft (`!cmd` into an empty field; pasteWasEmpty is stamped by beforeinput, since
+    // this event's e.data is null for pastes). Never mid-draft: a "!" typed or pasted
+    // into existing text keeps its literal meaning, matching the pane. The "!" lifts
+    // out of the text into the in-field glyph; the send string is identical either way.
     if (!bashRef.current && el.value === "!" && e && e.inputType === "insertText" && e.data === "!") {
       enterBash("");
+      return closeSlash();
+    }
+    if (!bashRef.current && e && e.inputType === "insertFromPaste" && pasteWasEmpty.current && el.value.startsWith("!")) {
+      enterBash(el.value.slice(1));
       return closeSlash();
     }
     if (bashRef.current) return; // no slash menu inside a shell command ("ls /tmp")
@@ -2373,6 +2406,8 @@ function Composer({ disabled, status }) {
       }
     };
     const onBeforeInput = (e) => {
+      // Pre-mutation snapshot for onInput's paste-into-empty bash-mode check.
+      if (e.inputType === "insertFromPaste") pasteWasEmpty.current = el.value === "";
       // Slash menu open: Enter picks the highlighted row instead of newline/submit. Reset the
       // Enter state machine so no stale arm/run leaks across the menu.
       const s = slash.current;

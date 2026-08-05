@@ -1317,7 +1317,10 @@ export function startBridge(): ReturnType<typeof Bun.serve> {
     for (const deviceId of new Set(clients.values())) {
       if (deviceId) touchDeviceConsumer(deviceId);
     }
-    pushAll(encoder.encode(":\n\n"));
+    // Named `ping` (not a comment): EventSource surfaces it to a listener, so the
+    // client can measure stream silence and rebuild a zombie socket that still
+    // claims OPEN. A `:` comment keeps the socket alive but is invisible to JS.
+    pushAll(encoder.encode("event: ping\ndata: {}\n\n"));
   }, 15_000);
 
   // Sync the unread/⚡ set from the monitor (which rewrites state.json ~every 3s). Only
