@@ -2,7 +2,7 @@
 // HttpOnly `csm` cookie (set by POST /auth); this file never touches the token
 // after the one login POST, and never puts it in a URL.
 import { h, render } from "preact";
-import { useRef, useEffect, useState } from "preact/hooks";
+import { useRef, useEffect, useLayoutEffect, useState } from "preact/hooks";
 import { signal } from "@preact/signals";
 import htm from "htm";
 import { Marked } from "marked";
@@ -197,7 +197,7 @@ const hiddenInterrupts = signal([]);
 // Optimistic "Chat about this": holds the sessionId whose open question we just declined,
 // so the dock flips to the composer instantly (before the hook's deny resolves and the
 // transcript poll drops openQuestions). Cleared on reconcile (poll shows no question), on
-// failure, or by a safety timeout. null = off.
+// failure, or by the post-settle verify timer in QuestionCard. null = off.
 const clarifying = signal(null);
 // Optimistic approve: the sessionId whose blocking APPROVAL card was just decided.
 // Hides the card the instant the choice is tapped — before the POST round-trip and the
@@ -1389,9 +1389,23 @@ function Login() {
   `;
 }
 
+// Last-known scroll offset of the session list, recorded as the user scrolls and
+// re-applied when the list re-mounts. Not persisted: it lives for the page's life only.
+let listScrollTop = 0;
+
 function List() {
   const all = sessions.value;
   const list = orderedSessions();
+  // Restore the list's scroll offset on re-mount (back from a session/history/new-session
+  // — the list unmounts while a detail screen shows). Offset, not row: the list live-sorts
+  // between visits, so an approximate position beats chasing a moved row. Module-level on
+  // purpose — a fresh app launch starts at the top, where attention-first sorting belongs.
+  const scrollRef = useRef(null);
+  // Layout effect: apply before paint, so the list never flashes a top-of-list frame.
+  useLayoutEffect(() => {
+    const el = scrollRef.current;
+    if (el && listScrollTop > 0) el.scrollTop = listScrollTop; // browser clamps a too-large offset
+  }, []);
   // Blocked-ON-YOU sessions surface in a pinned section ABOVE the repo groups — fixed
   // group order otherwise buries them in a low-priority repo. "Act now" = a real pending
   // question/approval OR a `waiting` status (a y/n confirm the pending-detector missed);
@@ -1453,7 +1467,7 @@ function List() {
   const runningCount = all.filter((s) => s.status === "running" || s.pendingScripts > 0).length;
   return html`
     <div class="screen">
-      <div class="scroll">
+      <div class="scroll" ref=${scrollRef} onScroll=${(e) => (listScrollTop = e.currentTarget.scrollTop)}>
         <div class="listhead">
           <h1>
             portkey
@@ -1697,6 +1711,13 @@ function BashTurn({ bash, upCount, canCode }) {
   </div>`;
 }
 
+// A command-carrying chip (Bash) clamps its command to one ellipsized line — tapping
+// toggles the full command, wrapped, so the reader can check what actually ran.
+function CommandChip({ name, command }) {
+  const [open, setOpen] = useState(false);
+  return html`<div class=${open ? "tool open" : "tool"} onClick=${() => setOpen(!open)}>▸ ${name} <span class="arg">${command}</span></div>`;
+}
+
 // One conversational turn → a sequence of chat elements: text blocks become
 // bubbles (user right / assistant left), tool calls become compact chips, image
 // attachments become a 🖼 marker; thinking and tool_result blocks are omitted.
@@ -1766,8 +1787,8 @@ function Turn({ turn, upCount, canCode }) {
       const input = b.input || {};
       const path = editedPath(input);
       const arg = input.command || path || input.pattern || "";
-      if (EDIT_TOOLS.has(b.name) && path) {
-        // Edit chips are informational — diffs live on the changed-files page, which
+      if ((EDIT_TOOLS.has(b.name) || b.name === "Read") && path) {
+        // Edit/Read chips are informational — diffs live on the changed-files page, which
         // doesn't depend on a per-chip path resolving inside the session's repo (a
         // removed worktree or scratchpad edit never can). What the chip owes the reader
         // is the FILENAME: the dir shrinks (dimmed, ellipsized) and the basename never
@@ -1782,6 +1803,8 @@ function Turn({ turn, upCount, canCode }) {
             ><span class="fl-dir">${dir}</span><span class="fl-base">${base}</span>
           </div>`,
         );
+      } else if (input.command) {
+        els.push(html`<${CommandChip} name=${b.name || "tool"} command=${input.command} />`);
       } else {
         els.push(html`<div class="tool">▸ ${b.name || "tool"}${arg && html` <span class="arg">${arg}</span>`}</div>`);
       }
@@ -1869,14 +1892,26 @@ function QuestionCard({ questions, toolUseId }) {
         // not-presented = the question isn't answerable right now (picker not on
         // screen, a permission prompt is up, or someone's typing in it at the desk) —
         // say so rather than echo the code.
-        if (d && d.ok === false)
+        if (d && d.ok === false) {
           revert(d.reason === "not-presented" ? "question is busy on the desk — try again" : d.reason || "clarify failed");
+          return;
+        }
+        // The deny resolving produces no reliable broadcast, so drive the reconcile
+        // ourselves — same shape as the answer path's verify timer. The old blind 5s
+        // timeout re-showed the card from STALE data whenever nothing had refetched in
+        // between; only a question still open in a fresh transcript may re-show it.
+        refreshTranscriptSoon();
+        setTimeout(() => {
+          if (clarifying.value !== id) return; // reconciled — the question resolved
+          if (selectedId.value !== id) return (clarifying.value = null); // left the session
+          refreshTranscript().then(() => {
+            if (clarifying.value !== id) return; // the refetch reconciled it — deny landed
+            clarifying.value = null;
+            flashError("✗ chat about this may not have landed — try again");
+          });
+        }, 8000);
       })
       .catch(() => revert("bridge unreachable"));
-    // Safety: never leave the card hidden if the question somehow stays open.
-    setTimeout(() => {
-      if (clarifying.value === id) clarifying.value = null;
-    }, 5000);
   };
   return html`
     <div class="qwrap">

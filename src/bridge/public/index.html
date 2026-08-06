@@ -312,10 +312,16 @@
         white-space: nowrap;
       }
       .tool .arg { color: var(--muted); }
+      /* Tapped-open command chip: the one-line ellipsis clamp gives way to the full
+         command, wrapped (pre-wrap keeps a multi-line command's line breaks). */
+      .tool.open { white-space: pre-wrap; word-break: break-all; }
       /* Edit chip: the dir shrinks (dimmed .fl-dir ellipsis), the basename never does —
          the filename must survive any width. Same span pair the changed-files list uses. */
       .tool.edit { display: flex; align-items: baseline; }
       .tool.edit .tname { flex: 0 0 auto; margin-right: 5px; }
+      /* In chips the dir matches the gray of a command chip's .arg — the changed-files
+         list keeps the dimmer shared .fl-dir. */
+      .tool.edit .fl-dir { color: var(--muted); }
       /* Post-compaction summary: a full-width system divider, collapsed by default. The
          peach summary line makes it unmistakable that the conversation continued from a
          compact; expanding reveals the verbatim summary text. */
