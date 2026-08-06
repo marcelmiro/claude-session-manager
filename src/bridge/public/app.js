@@ -1736,6 +1736,13 @@ const TM_COLORS = {
 // behind the chevron. JSON bodies pretty-print; anything else renders as markdown
 // (reports are agent prose, same trust level as assistant output). The toggle lives on
 // the byline+summary only, so selecting text in an expanded body can't collapse it.
+// Head preview for agent-message reports, which carry no summary — first non-empty
+// body line, ellipsized so a long opening sentence doesn't balloon the collapsed row.
+function firstLine(body) {
+  const line = (body.split("\n").find((l) => l.trim()) || "").trim();
+  return line.length > 120 ? line.slice(0, 120) + "…" : line;
+}
+
 function TeammateRow({ msg }) {
   const [open, setOpen] = useState(false);
   const tint = TM_COLORS[msg.color] || "var(--muted)";
@@ -1748,7 +1755,7 @@ function TeammateRow({ msg }) {
   return html`<div class="tm-bubble" style=${`border-left-color:${open ? tint : "var(--border)"}`}>
     <div class="tm-head" onClick=${() => setOpen(!open)}>
       <div class="tm-byline"><span style=${`color:${tint}`}>🤝 ${msg.id}</span><span class="tm-chev">${open ? "▾" : "▸"}</span></div>
-      <div class="tm-sum">${msg.summary}</div>
+      <div class="tm-sum">${msg.summary || firstLine(msg.body)}</div>
     </div>
     ${open &&
     (isJson
@@ -1802,8 +1809,11 @@ function Turn({ turn, upCount, canCode }) {
   // reports worth reading (bylined bubble); bare idle pings are plumbing, collapsed to
   // one near-invisible line per turn. No long-press handlers — no text to restore.
   if (turn.teammate) {
-    const reports = turn.teammate.filter((m) => m.summary);
-    const idle = turn.teammate.filter((m) => !m.summary);
+    // Idle = a bare idle_notification ping without a lifted summary. "No summary" alone
+    // isn't enough: agent-message reports carry no summary attribute but are real content.
+    const isIdle = (m) => !m.summary && /"type"\s*:\s*"idle_notification"/.test(m.body);
+    const reports = turn.teammate.filter((m) => !isIdle(m));
+    const idle = turn.teammate.filter(isIdle);
     return html`<div class="turn">
       ${reports.map((m, i) => html`<${TeammateRow} key=${i} msg=${m} />`)}
       ${idle.length > 0 &&

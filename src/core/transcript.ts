@@ -63,14 +63,40 @@ const BASH_OUTPUT_OPEN = /^\s*<bash-(?:stdout|stderr)>/;
 /**
  * Claude-teams mailbox delivery: a teammate session's message injected into this
  * transcript as a `user` record — "Another Claude session sent a message:" followed by
- * one or more `<teammate-message>` blocks and a trailing trust-boundary boilerplate.
+ * one or more tagged blocks and a trailing trust-boundary boilerplate. Two wrappers
+ * exist: `<teammate-message teammate_id= color= [summary=]>` (mailbox deliveries) and
+ * `<agent-message from=>` (direct agent reports — no color or summary attributes).
  * Gate on the injected PREFIX, not the tag alone: a user pasting a quoted teammate
  * block mid-message must keep rendering as their own text. The summary lives either as
  * a `summary` attribute on the tag or as a `summary` field in a JSON payload
  * (idle_notification records use the latter).
  */
-const TEAMMATE_PREFIX = /^\s*Another Claude session sent a message:/;
-const TEAMMATE_MESSAGE = /<teammate-message\b([^>]*)>([\s\S]*?)<\/teammate-message>/g;
+export const TEAMMATE_PREFIX = /^\s*Another Claude session sent a message:/;
+const TEAMMATE_MESSAGE = /<(teammate-message|agent-message)\b([^>]*)>([\s\S]*?)<\/\1>/g;
+
+/** Parse a teams delivery's tagged blocks; null when the prefix or every tag is absent. */
+function parseTeammateDelivery(text: string): TranscriptTurn["teammate"] | null {
+  if (!TEAMMATE_PREFIX.test(text)) return null;
+  const msgs: NonNullable<TranscriptTurn["teammate"]> = [];
+  for (const m of text.matchAll(TEAMMATE_MESSAGE)) {
+    const attrs = m[2];
+    const body = m[3].trim();
+    let summary = attrs.match(/summary="([^"]*)"/)?.[1] ?? "";
+    if (!summary) {
+      try {
+        const payload = JSON.parse(body);
+        if (typeof payload?.summary === "string") summary = payload.summary;
+      } catch {} // non-JSON payload — no summary to lift
+    }
+    msgs.push({
+      id: attrs.match(/(?:teammate_id|from)="([^"]*)"/)?.[1] ?? "teammate",
+      color: attrs.match(/color="([^"]*)"/)?.[1],
+      summary,
+      body,
+    });
+  }
+  return msgs.length ? msgs : null;
+}
 
 /** Internal pre-fold turn: `bashOutput` marks an output record and never leaves this module. */
 interface FoldableTurn extends TranscriptTurn {
@@ -125,11 +151,33 @@ function recordToTurn(record: RawRecord): FoldableTurn | null {
   if (isQueuedPromptAttachment(record)) {
     const text = typeof record.attachment?.prompt === "string" ? record.attachment.prompt : "";
     if (!text || LOCAL_COMMAND_META.test(text) || TASK_NOTIFICATION.test(text)) return null;
+    // A teams delivery consumed mid-turn from the input queue is still a teammate
+    // message, not something the user queued — render it as a teammate turn.
+    const attachedTeammate = parseTeammateDelivery(text);
+    if (attachedTeammate) return { role: "user", content: [], teammate: attachedTeammate };
     return { role: "user", content: [{ type: "text", text }], queued: true };
   }
   if (record.type !== "user" && record.type !== "assistant") return null;
-  if (record.isMeta) return null;
   const content = record.message?.content;
+  if (record.isMeta) {
+    // The one meta shape we surface: a queue-consumed teams delivery lands as an
+    // isMeta user record (turn-end deliveries arrive non-meta). Everything else
+    // meta stays hidden.
+    if (record.type === "user") {
+      const text =
+        typeof content === "string"
+          ? content
+          : Array.isArray(content)
+            ? (content as RawBlock[])
+                .filter((b): b is { type: "text"; text: string } => b?.type === "text")
+                .map((b) => b.text)
+                .join("\n")
+            : "";
+      const metaTeammate = parseTeammateDelivery(text);
+      if (metaTeammate) return { role: "user", content: [], teammate: metaTeammate };
+    }
+    return null;
+  }
 
   const blocks: TranscriptBlock[] =
     typeof content === "string"
@@ -166,27 +214,9 @@ function recordToTurn(record: RawRecord): FoldableTurn | null {
     }
 
     // Teams mailbox delivery (see TEAMMATE_PREFIX above) → a teammate turn, one entry
-    // per <teammate-message> block. The surrounding boilerplate is plumbing and dropped.
-    if (TEAMMATE_PREFIX.test(joined)) {
-      const msgs: Array<{ id: string; color?: string; summary: string; body: string }> = [];
-      for (const m of joined.matchAll(TEAMMATE_MESSAGE)) {
-        const body = m[2].trim();
-        let summary = m[1].match(/summary="([^"]*)"/)?.[1] ?? "";
-        if (!summary) {
-          try {
-            const payload = JSON.parse(body);
-            if (typeof payload?.summary === "string") summary = payload.summary;
-          } catch {} // non-JSON payload — no summary to lift
-        }
-        msgs.push({
-          id: m[1].match(/teammate_id="([^"]*)"/)?.[1] ?? "teammate",
-          color: m[1].match(/color="([^"]*)"/)?.[1],
-          summary,
-          body,
-        });
-      }
-      if (msgs.length) return { role: "user", content: [], teammate: msgs };
-    }
+    // per tagged block. The surrounding boilerplate is plumbing and dropped.
+    const teammate = parseTeammateDelivery(joined);
+    if (teammate) return { role: "user", content: [], teammate };
   }
 
   const visible = blocks.filter(

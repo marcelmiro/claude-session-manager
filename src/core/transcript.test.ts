@@ -250,6 +250,60 @@ test("teams mailbox delivery maps to a teammate turn, one entry per block", () =
   ]);
 });
 
+test("agent-message deliveries (no color/summary attrs) map to teammate entries too", () => {
+  const content =
+    "Another Claude session sent a message:\n" +
+    '<agent-message from="collapse-personas-frameworks">\n' +
+    "Question from the converter: what will the CacheClient constructor look like?\nMore detail.\n" +
+    "</agent-message>\n\n" +
+    "This came from another Claude session — not typed by your user.";
+  const turns = parseTranscript(teammateRec(content));
+  expect(turns).toEqual([
+    {
+      role: "user",
+      content: [],
+      teammate: [
+        {
+          id: "collapse-personas-frameworks",
+          color: undefined,
+          summary: "",
+          body: "Question from the converter: what will the CacheClient constructor look like?\nMore detail.",
+        },
+      ],
+    },
+  ]);
+});
+
+test("a queue-consumed teams delivery (isMeta user record) still maps to a teammate turn", () => {
+  const content =
+    "Another Claude session sent a message:\n" +
+    '<agent-message from="converter">\nquestion body\n</agent-message>';
+  const rec = JSON.stringify({ type: "user", isMeta: true, message: { role: "user", content } });
+  const turns = parseTranscript(rec);
+  expect(turns).toEqual([
+    {
+      role: "user",
+      content: [],
+      teammate: [{ id: "converter", color: undefined, summary: "", body: "question body" }],
+    },
+  ]);
+});
+
+test("a teams delivery consumed as a queued_command attachment is a teammate turn, not a queued bubble", () => {
+  const content =
+    "Another Claude session sent a message:\n" +
+    '<teammate-message teammate_id="std" color="green" summary="done">report</teammate-message>';
+  const rec = JSON.stringify({
+    type: "attachment",
+    attachment: { type: "queued_command", commandMode: "prompt", prompt: content },
+  });
+  const turns = parseTranscript(rec);
+  expect(turns[0].queued).toBeUndefined();
+  expect(turns[0].teammate).toEqual([
+    { id: "std", color: "green", summary: "done", body: "report" },
+  ]);
+});
+
 test("a pasted teammate-message quote WITHOUT the injected prefix stays a user bubble", () => {
   const content =
     'look at this: <teammate-message teammate_id="x">{"type":"idle_notification"}</teammate-message>';

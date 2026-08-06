@@ -491,6 +491,14 @@ test("parseQueuedPending: popAll drains everything; task-notifications never sur
   ).toEqual(["real msg"]);
 });
 
+test("parseQueuedPending: an enqueued teams delivery never surfaces as the user's queued message", () => {
+  const delivery =
+    'Another Claude session sent a message:\n<agent-message from="x">report</agent-message>';
+  expect(
+    parseQueuedPending([qop("enqueue", delivery), qop("enqueue", "real msg")].join("\n")),
+  ).toEqual(["real msg"]);
+});
+
 test("parseQueuedPending: tolerates torn lines and unknown ops", () => {
   const raw = [qop("enqueue", "kept"), '{"type":"queue-operation","operation":"enq', qop("compact", "x")].join("\n");
   expect(parseQueuedPending(raw)).toEqual(["kept"]);
