@@ -41,7 +41,7 @@ import { slugify } from "./names";
 import { parseBackgroundTasks, liveScripts, type BackgroundTask } from "./background-tasks";
 import { decideQuestion, declineQuestion, buildAnswersMap } from "./approval";
 import { parkedJobSessions } from "./session-state";
-import type { PendingQuestion, PendingToolCall } from "./jsonl-reader";
+import { jsonlLines, type PendingQuestion, type PendingToolCall } from "./jsonl-reader";
 import type { RestoreState, TranscriptBlock, TranscriptTurn } from "../types";
 
 export interface SessionTranscript {
@@ -700,13 +700,14 @@ export async function getSubagentTranscript(
   if (!isValidAgentId(agentId)) return null;
   const path = await resolveTranscriptPath(sessionId);
   if (!path) return null;
-  let raw: string;
+  const agentPath = `${subagentsDir(path)}/agent-${agentId}.jsonl`;
+  const lines: string[] = [];
   try {
-    raw = await Bun.file(`${subagentsDir(path)}/agent-${agentId}.jsonl`).text();
+    for await (const line of jsonlLines(agentPath)) lines.push(line);
   } catch {
     return null; // missing/unreadable subagent jsonl
   }
-  const turns = slimTurns(parseTranscript(raw));
+  const turns = slimTurns(parseTranscript(lines));
   capOpeningTurn(turns);
   return { turns };
 }
@@ -835,8 +836,8 @@ export async function transcriptRevAt(sessionId: string): Promise<{ path: string
  * turn at turn-end, or `queued_command` attachment mid-turn), it was consumed — drop it.
  * A genuinely queued message has landed nowhere yet, so it always survives this check.
  */
-export function parseQueuedPending(jsonl: string): string[] {
-  const lines = jsonl.split("\n");
+export function parseQueuedPending(jsonl: string | string[]): string[] {
+  const lines = typeof jsonl === "string" ? jsonl.split("\n") : jsonl;
   const queue: { line: number; text: string }[] = [];
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
@@ -928,17 +929,21 @@ async function readActiveBranchCached(path: string): Promise<{
         queuedPending: hit.queuedPending,
         usage: hit.usage,
       };
-    const text = await file.text();
+    // One streamed pass builds the line array all four parsers share: no contiguous
+    // multi-MB string, and no re-splitting per parser (each split re-copies every line —
+    // on macOS the freed copies ratchet the process RSS permanently).
+    const lines: string[] = [];
+    for await (const line of jsonlLines(path)) lines.push(line);
     const entry = {
       size: stat.size,
       mtimeMs: stat.mtimeMs,
-      turns: parseActiveBranch(text),
+      turns: parseActiveBranch(lines),
       // Piggybacked on the same read: background tasks, the queued-message replay, and
       // context usage change only when the file does (all are transcript records), so
       // one cache covers all of them.
-      backgroundTasks: parseBackgroundTasks(text),
-      queuedPending: parseQueuedPending(text),
-      usage: contextUsageFromLines(text.split("\n")),
+      backgroundTasks: parseBackgroundTasks(lines),
+      queuedPending: parseQueuedPending(lines),
+      usage: contextUsageFromLines(lines),
     };
     branchCache.set(path, entry);
     return {

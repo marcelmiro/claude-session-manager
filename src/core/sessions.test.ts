@@ -8,7 +8,9 @@
  */
 
 import { test, expect } from "bun:test";
-import { slashCommandIntent, resolvePaneSessionId, pickRepoPath, groupSessions } from "./sessions";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { slashCommandIntent, resolvePaneSessionId, pickRepoPath, groupSessions, getLatestUserPrompt } from "./sessions";
 import type { Session } from "../types";
 
 test("extracts /implement-plan with its plan path", () => {
@@ -178,4 +180,40 @@ test("groupSessions: priority repos pin group order ahead of alphabetical", () =
     ["throxy", "customeros", "~", "csm"],
   );
   expect(groups.map((g) => g.name)).toEqual(["throxy", "csm", "alpha"]);
+});
+
+// --- getLatestUserPrompt: backward doubling-window scan over the transcript tail ---
+// The scan does its offset math on BYTES; multi-byte characters split at a window
+// edge must not lose or corrupt the record the doubling pass exists to recover.
+
+async function writeTranscript(lines: string[]): Promise<string> {
+  const path = join(tmpdir(), `csm-latest-prompt-${Date.now()}-${Math.random().toString(36).slice(2)}.jsonl`);
+  await Bun.write(path, lines.join("\n") + "\n");
+  return path;
+}
+
+test("finds the newest last-prompt record in the tail", async () => {
+  const path = await writeTranscript([
+    JSON.stringify({ type: "last-prompt", lastPrompt: "older" }),
+    JSON.stringify({ type: "user", message: { content: "hi" } }),
+    JSON.stringify({ type: "last-prompt", lastPrompt: "newest prompt" }),
+  ]);
+  expect(await getLatestUserPrompt(path)).toBe("newest prompt");
+});
+
+test("recovers a last-prompt buried past the first 64KB window, with multi-byte content at every boundary", async () => {
+  // The record sits deeper than the first window, so the scan must widen and
+  // re-position using byte offsets. Multi-byte padding makes UTF-16 math lie.
+  const pad = JSON.stringify({ type: "assistant", message: { content: "続き — ⚡日本語 🚀".repeat(200) } });
+  const lines = [
+    JSON.stringify({ type: "last-prompt", lastPrompt: "épreuve — 日本語のプロンプト 🚀" }),
+    ...Array.from({ length: 40 }, () => pad), // ~40 × ~4KB of multi-byte padding after the record
+  ];
+  const path = await writeTranscript(lines);
+  expect(await getLatestUserPrompt(path)).toBe("épreuve — 日本語のプロンプト 🚀");
+});
+
+test("empty result when no last-prompt record exists", async () => {
+  const path = await writeTranscript([JSON.stringify({ type: "user", message: { content: "hi" } })]);
+  expect(await getLatestUserPrompt(path)).toBe("");
 });

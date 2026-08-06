@@ -243,9 +243,9 @@ function foldBashTurns(turns: FoldableTurn[]): TranscriptTurn[] {
 }
 
 /** Parse a raw JSONL transcript into ordered turns (oldest first), in file order. */
-export function parseTranscript(raw: string): TranscriptTurn[] {
+export function parseTranscript(raw: string | string[]): TranscriptTurn[] {
   const turns: FoldableTurn[] = [];
-  for (const line of raw.split("\n")) {
+  for (const line of typeof raw === "string" ? raw.split("\n") : raw) {
     if (!line.trim()) continue;
     let record: RawRecord;
     try {
@@ -275,11 +275,11 @@ export function parseTranscript(raw: string): TranscriptTurn[] {
  * any sidechain record defensively. A broken parent link (missing uuid) just stops the
  * walk, yielding the deepest intact suffix rather than crashing.
  */
-export function parseActiveBranch(raw: string): TranscriptTurn[] {
+export function parseActiveBranch(raw: string | string[]): TranscriptTurn[] {
   const byId = new Map<string, RawRecord>();
   let leaf: string | null = null;
   let sawConversational = false;
-  for (const line of raw.split("\n")) {
+  for (const line of typeof raw === "string" ? raw.split("\n") : raw) {
     if (!line.trim()) continue;
     let record: RawRecord;
     try {

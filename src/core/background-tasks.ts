@@ -25,6 +25,7 @@
  */
 
 import { resolveVerdicts, runnersAlive, type RunnerProbe } from "./runner-verdicts";
+import { jsonlLines } from "./jsonl-reader";
 
 export type BackgroundTaskKind = "script" | "agent" | "workflow";
 export type BackgroundTaskStatus = "pending" | "completed" | "killed";
@@ -59,14 +60,35 @@ function blockText(content: unknown): string {
 }
 
 /** Parse one transcript's background tasks, launch-order preserved. Never throws. */
-export function parseBackgroundTasks(jsonl: string): BackgroundTask[] {
+export function parseBackgroundTasks(jsonl: string | string[]): BackgroundTask[] {
+  const parser = taskLineParser();
+  for (const line of typeof jsonl === "string" ? jsonl.split("\n") : jsonl) parser.feed(line);
+  return parser.tasks();
+}
+
+/**
+ * Same parse fed straight from disk via the streaming line reader, so a multi-MB
+ * live transcript never materializes as one contiguous string (macOS malloc keeps
+ * large freed blocks, so repeated full-file reads ratchet a long-lived process's
+ * RSS permanently). Throws on a missing/unreadable file — exactly like the
+ * `file.text()` it replaces — so callers' catch paths return their empty defaults
+ * WITHOUT caching a partial parse as if it were complete.
+ */
+export async function parseBackgroundTasksFile(path: string): Promise<BackgroundTask[]> {
+  const parser = taskLineParser();
+  for await (const line of jsonlLines(path)) parser.feed(line);
+  return parser.tasks();
+}
+
+/** The line-by-line parsing core shared by the string and streaming entry points. */
+function taskLineParser(): { feed: (line: string) => void; tasks: () => BackgroundTask[] } {
   const byToolUse = new Map<string, BackgroundTask>();
   const byTaskId = new Map<string, BackgroundTask>();
   // Background tool_uses awaiting their tool_result, so the launch can be confirmed
   // and labelled. Also drives the line prefilter (a result line carries its use's id).
   const candidates = new Map<string, { name: string; label: string }>();
 
-  for (const line of jsonl.split("\n")) {
+  const feed = (line: string): void => {
     // Cheap prefilter — a launch's tool_result may not contain any fixed marker
     // text, so lines carrying a known candidate tool_use id also pass.
     if (
@@ -82,13 +104,13 @@ export function parseBackgroundTasks(jsonl: string): BackgroundTask[] {
           break;
         }
       }
-      if (!carries) continue;
+      if (!carries) return;
     }
     let rec: Record<string, unknown>;
     try {
       rec = JSON.parse(line) as Record<string, unknown>;
     } catch {
-      continue; // torn/partial line
+      return; // torn/partial line
     }
     const content = (rec["message"] as { content?: unknown } | undefined)?.content;
     const ts = typeof rec["timestamp"] === "string" ? (rec["timestamp"] as string) : undefined;
@@ -150,9 +172,9 @@ export function parseBackgroundTasks(jsonl: string): BackgroundTask[] {
       const task = (taskId && byTaskId.get(taskId)) || (toolUseId && byToolUse.get(toolUseId)) || undefined;
       if (task) task.status = notifText.match(NOTIF_STATUS_RE)?.[1] === "killed" ? "killed" : "completed";
     }
-  }
+  };
 
-  return [...byToolUse.values()];
+  return { feed, tasks: () => [...byToolUse.values()] };
 }
 
 /**
@@ -208,7 +230,7 @@ export async function pendingScriptsAt(path: string): Promise<BackgroundTask[]> 
     if (!stat) return [];
     const hit = pathCache.get(path);
     if (hit && hit.size === stat.size && hit.mtimeMs === stat.mtimeMs) return liveScripts(hit.tasks);
-    const tasks = parseBackgroundTasks(await file.text());
+    const tasks = await parseBackgroundTasksFile(path);
     pathCache.set(path, { size: stat.size, mtimeMs: stat.mtimeMs, tasks });
     return liveScripts(tasks);
   } catch {

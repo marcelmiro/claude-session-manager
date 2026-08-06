@@ -15,6 +15,7 @@ import { processHookEvents, savePaneSessions, reconcilePaneFiles } from "./state
 import { eventSourcedStatus } from "./hook-events";
 import { nativeStatus, resolveStatus } from "./session-state";
 import { readLastTurnAt, resolveTranscriptPath, latestTranscriptCwd } from "./last-turn";
+import { jsonlLines } from "./jsonl-reader";
 
 const home = homedir();
 
@@ -932,22 +933,39 @@ interface JsonlMetadata {
   lastAssistantMessage: string;
 }
 
+// The archived-sessions fallback scan re-runs on every uncached discovery, and a full
+// metadata parse walks the whole file — cache per path keyed by (size, mtime), like
+// background-tasks' pathCache, so unchanged files cost one stat.
+const jsonlMetadataCache = new Map<string, { size: number; mtimeMs: number; meta: JsonlMetadata | null }>();
+
 /**
  * Parse a JSONL session file and extract metadata for archived session discovery.
  * Returns null if the session is a sidechain or the file is invalid.
+ * Streams the file line-by-line (never one contiguous string) — see jsonlLines.
  */
 async function parseJsonlMetadata(filePath: string): Promise<JsonlMetadata | null> {
   try {
-    const raw = await Bun.file(filePath).text();
-    const lines = raw.split("\n");
+    const stat = await Bun.file(filePath).stat();
+    if (!stat) return null;
+    const hit = jsonlMetadataCache.get(filePath);
+    if (hit && hit.size === stat.size && hit.mtimeMs === stat.mtimeMs) return hit.meta;
+    const meta = await parseJsonlMetadataUncached(filePath);
+    jsonlMetadataCache.set(filePath, { size: stat.size, mtimeMs: stat.mtimeMs, meta });
+    return meta;
+  } catch {
+    return null;
+  }
+}
 
+async function parseJsonlMetadataUncached(filePath: string): Promise<JsonlMetadata | null> {
+  try {
     let projectPath = "";
     let gitBranch = "";
     let messageCount = 0;
     let firstPrompt = "";
     let lastAssistantMessage = "";
 
-    for (const line of lines) {
+    for await (const line of jsonlLines(filePath)) {
       if (!line.trim()) continue;
       try {
         const parsed = JSON.parse(line);
@@ -1053,10 +1071,9 @@ export function slashCommandIntent(text: string): string | null {
  */
 async function getFirstUserPrompt(sessionPath: string): Promise<string> {
   try {
-    const raw = await Bun.file(sessionPath).text();
-    const lines = raw.split("\n");
-
-    for (const line of lines) {
+    // Stream and break at the first real prompt — it sits near the top, so this
+    // reads a few chunks of a multi-MB file instead of all of it.
+    for await (const line of jsonlLines(sessionPath)) {
       if (!line.trim()) continue;
       try {
         const parsed = JSON.parse(line);
@@ -1109,25 +1126,46 @@ async function getFirstUserPrompt(sessionPath: string): Promise<string> {
  * current conversation direction (unlike firstPrompt, which is frozen).
  * Returns a truncated string (first 200 chars) or empty string on failure.
  */
-async function getLatestUserPrompt(sessionPath: string): Promise<string> {
+export async function getLatestUserPrompt(sessionPath: string): Promise<string> {
   try {
-    const raw = await Bun.file(sessionPath).text();
-    const lines = raw.split("\n");
-    for (let i = lines.length - 1; i >= 0; i--) {
-      const line = lines[i];
-      if (!line || !line.includes('"type":"last-prompt"')) continue;
-      try {
-        const parsed = JSON.parse(line);
-        if (parsed.type !== "last-prompt") continue;
-        const text: string = parsed.lastPrompt || "";
-        if (!text) continue;
-        const clean = text.replace(/\s+/g, " ").trim();
-        return clean.length > 200 ? clean.slice(0, 200) + "..." : clean;
-      } catch {
-        continue;
+    const file = Bun.file(sessionPath);
+    const stat = await file.stat();
+    if (!stat) return "";
+    // Backward doubling-window scan (the readLastPromptAt pattern): the newest
+    // last-prompt record sits near the tail, so this reads KBs of a multi-MB file —
+    // and this runs for EVERY active session on EVERY discovery sweep. Offset math is
+    // done on BYTES (the raw slice), never on decoded text — a multi-byte character
+    // split at the window edge makes UTF-16 lengths lie about file positions.
+    let scannedTo = stat.size; // bytes at/after this offset were covered by a previous window
+    for (let window = 64 * 1024; ; window *= 2) {
+      const start = Math.max(0, stat.size - window);
+      const bytes = new Uint8Array(await file.slice(start, scannedTo).arrayBuffer());
+      // A mid-file slice starts inside some record — its remainder ends at the first
+      // newline. Skip it for parsing; its BYTE length positions the next window's end.
+      // No newline at all means the window sits inside one huge line: widen and retry
+      // with scannedTo unchanged, so the line is eventually captured whole.
+      const firstNl = start > 0 ? bytes.indexOf(0x0a) : -1;
+      if (start > 0 && firstNl === -1) continue;
+      const chunk = new TextDecoder().decode(start > 0 ? bytes.subarray(firstNl + 1) : bytes);
+      const lines = chunk.split("\n");
+      for (let i = lines.length - 1; i >= 0; i--) {
+        const line = lines[i];
+        if (!line || !line.includes('"type":"last-prompt"')) continue;
+        try {
+          const parsed = JSON.parse(line);
+          if (parsed.type !== "last-prompt") continue;
+          const text: string = parsed.lastPrompt || "";
+          if (!text) continue;
+          const clean = text.replace(/\s+/g, " ").trim();
+          return clean.length > 200 ? clean.slice(0, 200) + "..." : clean;
+        } catch {
+          continue;
+        }
       }
+      if (start === 0) return "";
+      // Re-scan overlap is bounded: the next pass reads [newStart, start+partial).
+      scannedTo = start + firstNl + 1;
     }
-    return "";
   } catch {
     return "";
   }
