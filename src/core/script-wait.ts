@@ -18,7 +18,7 @@
  * last-write-wins: it is a pure memo of the transcript, so the worst a lost entry can
  * do is force one re-read that reproduces exactly the same answer.
  */
-import { parseBackgroundTasks, pendingScripts, taskKey } from "./background-tasks";
+import { parseBackgroundTasksFile, pendingScripts, taskKey } from "./background-tasks";
 import { resolveVerdicts, runnersAlive, type ProbeTarget, type RunnerProbe } from "./runner-verdicts";
 import { resolveTranscriptPath } from "./last-turn";
 import { parkedJobSessions } from "./session-state";
@@ -110,7 +110,7 @@ export async function detectScriptWaits(
       if (!stat) continue;
       let entry = cache[id];
       if (!entry || entry.size !== stat.size || entry.mtimeMs !== stat.mtimeMs) {
-        const tasks = parseBackgroundTasks(await Bun.file(path).text());
+        const tasks = await parseBackgroundTasksFile(path);
         entry = {
           size: stat.size,
           mtimeMs: stat.mtimeMs,

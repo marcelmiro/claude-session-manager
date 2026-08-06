@@ -70,6 +70,35 @@ interface ContentBlock {
 }
 
 /**
+ * Stream a JSONL file line by line in bounded chunks, so multi-MB transcripts never
+ * materialize as one contiguous string. On macOS, malloc never returns large freed
+ * blocks to the OS, so every full-file `.text()` of a big transcript permanently
+ * ratchets the process RSS — a long-lived process (the bridge) re-reading live
+ * transcripts each refresh plateaued near 1GB from exactly that. Decoding goes
+ * through a streaming TextDecoder so a multi-byte character split across chunk
+ * boundaries survives intact. Early `break` by the consumer cancels the read.
+ */
+export async function* jsonlLines(path: string): AsyncGenerator<string> {
+  const reader = Bun.file(path).stream().getReader();
+  const decoder = new TextDecoder();
+  let carry = "";
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      carry += decoder.decode(value, { stream: true });
+      const parts = carry.split("\n");
+      carry = parts.pop() ?? "";
+      yield* parts;
+    }
+    carry += decoder.decode();
+    if (carry) yield carry;
+  } finally {
+    reader.cancel().catch(() => {});
+  }
+}
+
+/**
  * Read the last N conversation messages from a JSONL session file.
  * Reconstructs multi-entry assistant turns by grouping on message.id.
  * Returns messages in chronological order (oldest first).
