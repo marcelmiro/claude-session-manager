@@ -759,6 +759,7 @@ export function slimTurns(turns: TranscriptTurn[]): TranscriptTurn[] {
     if (t.queued) slim.queued = true;
     if (t.command) slim.command = t.command;
     if (t.bash) slim.bash = t.bash;
+    if (t.teammate) slim.teammate = t.teammate;
     out.push(slim);
   }
   return out;

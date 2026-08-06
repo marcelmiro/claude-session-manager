@@ -82,6 +82,11 @@ test("isPromptRecord: typed prompts yes; plumbing user records no", () => {
   expect(isPromptRecord(prompt("<command-message>/foo</command-message>", "t"))).toBe(false);
   expect(isPromptRecord(prompt("[Request interrupted by user]", "t"))).toBe(false);
   expect(
+    isPromptRecord(
+      prompt("Another Claude session sent a message:\n<teammate-message teammate_id=\"x\">", "t"),
+    ),
+  ).toBe(false);
+  expect(
     isPromptRecord({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "x" }] } }),
   ).toBe(false);
   expect(isPromptRecord({ ...prompt("hi", "t"), isMeta: true })).toBe(false);

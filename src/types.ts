@@ -316,6 +316,14 @@ export interface TranscriptTurn {
   // command turns, bash turns ARE rewind checkpoints — Claude's own /rewind picker
   // lists them (verified live), so prompt-counting walks must include them.
   bash?: { command: string; stdout: string; stderr: string };
+  // Set on a Claude-teams mailbox delivery: the harness injects a teammate session's
+  // message into this transcript as a `user` record ("Another Claude session sent a
+  // message:" + one or more `<teammate-message>` blocks). Not typed by the user — the
+  // UI renders dim teammate rows, not a user bubble. One entry per block; `summary` is
+  // the tag's summary attribute, else the payload JSON's `summary` field, else "".
+  // `content` is empty. These ARE real user-role API messages that start turns, so
+  // rewind-count walks treat them like typed prompts.
+  teammate?: Array<{ id: string; summary: string; body: string }>;
 }
 
 /**

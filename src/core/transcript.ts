@@ -60,6 +60,18 @@ const TASK_NOTIFICATION = /^\s*<task-notification>/;
 const BASH_INPUT = /^\s*<bash-input>([\s\S]*)<\/bash-input>\s*$/;
 const BASH_OUTPUT_OPEN = /^\s*<bash-(?:stdout|stderr)>/;
 
+/**
+ * Claude-teams mailbox delivery: a teammate session's message injected into this
+ * transcript as a `user` record — "Another Claude session sent a message:" followed by
+ * one or more `<teammate-message>` blocks and a trailing trust-boundary boilerplate.
+ * Gate on the injected PREFIX, not the tag alone: a user pasting a quoted teammate
+ * block mid-message must keep rendering as their own text. The summary lives either as
+ * a `summary` attribute on the tag or as a `summary` field in a JSON payload
+ * (idle_notification records use the latter).
+ */
+const TEAMMATE_PREFIX = /^\s*Another Claude session sent a message:/;
+const TEAMMATE_MESSAGE = /<teammate-message\b([^>]*)>([\s\S]*?)<\/teammate-message>/g;
+
 /** Internal pre-fold turn: `bashOutput` marks an output record and never leaves this module. */
 interface FoldableTurn extends TranscriptTurn {
   bashOutput?: { stdout: string; stderr: string };
@@ -151,6 +163,24 @@ function recordToTurn(record: RawRecord): FoldableTurn | null {
       const stdout = joined.match(/<bash-stdout>([\s\S]*?)<\/bash-stdout>/)?.[1] ?? "";
       const stderr = joined.match(/<bash-stderr>([\s\S]*?)<\/bash-stderr>/)?.[1] ?? "";
       return { role: "user", content: [], bashOutput: { stdout, stderr } };
+    }
+
+    // Teams mailbox delivery (see TEAMMATE_PREFIX above) → a teammate turn, one entry
+    // per <teammate-message> block. The surrounding boilerplate is plumbing and dropped.
+    if (TEAMMATE_PREFIX.test(joined)) {
+      const msgs: Array<{ id: string; summary: string; body: string }> = [];
+      for (const m of joined.matchAll(TEAMMATE_MESSAGE)) {
+        const body = m[2].trim();
+        let summary = m[1].match(/summary="([^"]*)"/)?.[1] ?? "";
+        if (!summary) {
+          try {
+            const payload = JSON.parse(body);
+            if (typeof payload?.summary === "string") summary = payload.summary;
+          } catch {} // non-JSON payload — no summary to lift
+        }
+        msgs.push({ id: m[1].match(/teammate_id="([^"]*)"/)?.[1] ?? "teammate", summary, body });
+      }
+      if (msgs.length) return { role: "user", content: [], teammate: msgs };
     }
   }
 

@@ -132,6 +132,11 @@ const NON_PROMPT_PREFIXES = [
   "<system-reminder>",
   "Caveat:",
   "[Request interrupted",
+  // Claude-teams mailbox delivery — a teammate session's message, not the human typing.
+  // Counting it would move the agents-sheet "since your last typed prompt" boundary
+  // every time a teammate pings. (It stays a rewind checkpoint on the phone — this list
+  // and isPromptTurn diverge deliberately here.)
+  "Another Claude session sent a message:",
 ];
 
 /**

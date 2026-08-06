@@ -272,13 +272,14 @@ test("slimTurns: keeps the byte-free image marker alongside text", () => {
   expect(t!.content).toEqual([{ type: "text", text: "[Image #1] look" }, { type: "image" }]);
 });
 
-test("slimTurns: per-turn flags (queued, compactSummary, command, bash) survive the rebuild", () => {
+test("slimTurns: per-turn flags (queued, compactSummary, command, bash, teammate) survive the rebuild", () => {
   const out = slimTurns([
     { role: "user", content: [{ type: "text", text: "queued msg" }], queued: true },
     { role: "user", content: [{ type: "text", text: "summary" }], compactSummary: true },
     { role: "user", content: [], command: "/pr-triage" },
     { role: "user", content: [{ type: "text", text: "plain" }] },
     { role: "user", content: [], bash: { command: "git pull", stdout: "ok", stderr: "" } },
+    { role: "user", content: [], teammate: [{ id: "p0-ui", summary: "2 findings", body: "{}" }] },
   ]);
   expect(out[0]!.queued).toBe(true);
   expect(out[1]!.compactSummary).toBe(true);
@@ -288,6 +289,11 @@ test("slimTurns: per-turn flags (queued, compactSummary, command, bash) survive 
     role: "user",
     content: [],
     bash: { command: "git pull", stdout: "ok", stderr: "" },
+  });
+  expect(out[5]).toEqual({
+    role: "user",
+    content: [],
+    teammate: [{ id: "p0-ui", summary: "2 findings", body: "{}" }],
   });
 });
 

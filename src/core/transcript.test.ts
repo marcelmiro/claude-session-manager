@@ -215,6 +215,48 @@ test("parseActiveBranch folds a bash pair on the active branch", () => {
   expect(turns[2].bash).toEqual({ command: "ls", stdout: "file.txt", stderr: "" });
 });
 
+// --- Claude-teams mailbox deliveries → teammate turns ---
+
+const teammateRec = (content: string) =>
+  JSON.stringify({ type: "user", message: { role: "user", content } });
+
+test("teams mailbox delivery maps to a teammate turn, one entry per block", () => {
+  const content =
+    "Another Claude session sent a message:\n" +
+    '<teammate-message teammate_id="std-941-r2" color="green">\n' +
+    '{"type":"idle_notification","from":"std-941-r2","summary":"[to main] 2 findings"}\n' +
+    "</teammate-message>\n\n" +
+    '<teammate-message teammate_id="p0-941-r2" color="blue" summary="no P0 findings">\n' +
+    "plain text report\n" +
+    "</teammate-message>\n\n" +
+    "This came from another Claude session — not typed by your user.";
+  const turns = parseTranscript(teammateRec(content));
+  expect(turns).toEqual([
+    {
+      role: "user",
+      content: [],
+      teammate: [
+        // summary lifted from the JSON payload when the tag carries no attribute…
+        {
+          id: "std-941-r2",
+          summary: "[to main] 2 findings",
+          body: '{"type":"idle_notification","from":"std-941-r2","summary":"[to main] 2 findings"}',
+        },
+        // …and taken from the summary attribute when present.
+        { id: "p0-941-r2", summary: "no P0 findings", body: "plain text report" },
+      ],
+    },
+  ]);
+});
+
+test("a pasted teammate-message quote WITHOUT the injected prefix stays a user bubble", () => {
+  const content =
+    'look at this: <teammate-message teammate_id="x">{"type":"idle_notification"}</teammate-message>';
+  const turns = parseTranscript(teammateRec(content));
+  expect(turns[0].teammate).toBeUndefined();
+  expect(turns[0].content).toEqual([{ type: "text", text: content }]);
+});
+
 test("drops async-subagent <task-notification> user records", () => {
   const raw = [
     '{"type":"user","message":{"role":"user","content":"go"}}',

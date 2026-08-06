@@ -127,11 +127,18 @@ const turnMarkerText = (turn) => {
 // prompt's upCount by one.
 // `bash` turns (`!cmd`, content empty) ARE included: Claude's picker lists them (verified
 // live — `! echo … · No code changes`), the deliberate opposite of slash-command turns.
+// `teammate` turns (teams mailbox deliveries, content empty) are included too: they are
+// real user-role API messages that start turns — before the parser gave them their own
+// kind they counted as plain text prompts, and excluding them now would shift every
+// earlier prompt's upCount. (The server-side lastPromptAt boundary DOES exclude them —
+// "since your last typed prompt" means the human.)
 const isPromptTurn = (turn) =>
   turn.role === "user" &&
   !turn.queued &&
   !turnMarkerText(turn) &&
-  (!!turn.bash || (turn.content || []).some((b) => b.type === "text" || b.type === "image"));
+  (!!turn.bash ||
+    !!turn.teammate ||
+    (turn.content || []).some((b) => b.type === "text" || b.type === "image"));
 
 // Ordered turn indices that are actual /rewind CHECKPOINTS. A typed prompt only becomes a
 // checkpoint once it starts producing output — i.e. an assistant turn follows it before the
@@ -1711,6 +1718,18 @@ function BashTurn({ bash, upCount, canCode }) {
   </div>`;
 }
 
+// One teammate mailbox message: a dim system-style row — teammate id + its summary —
+// tapping toggles the raw payload. An idle ping with no summary is just the id line.
+function TeammateRow({ msg }) {
+  const [open, setOpen] = useState(false);
+  return html`<div class="teammate" onClick=${() => setOpen(!open)}>
+    <div class="tm-head">
+      🤝 <span class="tm-id">${msg.id}</span>${msg.summary && html` — ${msg.summary}`}
+    </div>
+    ${open && html`<pre class="tm-body">${msg.body}</pre>`}
+  </div>`;
+}
+
 // A command-carrying chip (Bash) clamps its command to one ellipsized line — tapping
 // toggles the full command, wrapped, so the reader can check what actually ran.
 function CommandChip({ name, command }) {
@@ -1749,6 +1768,15 @@ function Turn({ turn, upCount, canCode }) {
   // and the prefill restores the literal `!cmd` the user typed.
   if (turn.bash) {
     return html`<${BashTurn} bash=${turn.bash} upCount=${upCount} canCode=${canCode} />`;
+  }
+
+  // Teams mailbox delivery — a teammate session's message injected as a user record.
+  // Rendered as dim rows (id + summary, tap for the raw payload), never a user bubble:
+  // the human didn't type it. No long-press handlers — there's no text to restore.
+  if (turn.teammate) {
+    return html`<div class="turn">
+      ${turn.teammate.map((m, i) => html`<${TeammateRow} key=${i} msg=${m} />`)}
+    </div>`;
   }
 
   // Interrupt / system markers ("[Request interrupted by user…]") render as a dim event
