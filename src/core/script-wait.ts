@@ -21,6 +21,7 @@
 import { parseBackgroundTasks, pendingScripts, taskKey } from "./background-tasks";
 import { resolveVerdicts, runnersAlive, type ProbeTarget, type RunnerProbe } from "./runner-verdicts";
 import { resolveTranscriptPath } from "./last-turn";
+import { parkedJobSessions } from "./session-state";
 import { PATHS, writeAtomic } from "./config";
 
 const CACHE_PATH = `${PATHS.dir}/script-wait.json`;
@@ -84,13 +85,24 @@ export async function detectScriptWaits(
   sessionIds: string[],
   probe: RunnerProbe = runnersAlive,
   projectsDir?: string,
+  jobs?: Map<string, string>,
 ): Promise<Set<string>> {
   const now = Date.now();
   const cache = await loadCache();
   const current = new Map<string, ScriptWaitEntry>();
   let dirty = false;
 
-  for (const id of sessionIds) {
+  // A parked job's script runs in the parent's pane but is recorded in the JOB's
+  // transcript, and the parent's own transcript goes quiet for the duration — so
+  // asking only about the parent's session id misses the wait entirely. Parse both
+  // and credit the job's verdict to the parent, since the pane is what gets badged.
+  const jobBySession = jobs ?? (await parkedJobSessions());
+  const lookupIds = [...new Set(sessionIds.flatMap((id) => {
+    const job = jobBySession.get(id);
+    return job ? [id, job] : [id];
+  }))];
+
+  for (const id of lookupIds) {
     try {
       const path = await resolveTranscriptPath(id, projectsDir);
       if (!path) continue;
@@ -121,8 +133,10 @@ export async function detectScriptWaits(
   // the whole set rather than one call per session.
   const verdicts = await resolveVerdicts(probeTargets([...current.values()]), now, probe);
   const out = new Set<string>();
-  for (const [id, entry] of current) {
-    if (isWaiting(entry, verdicts)) out.add(id);
+  for (const id of sessionIds) {
+    const job = jobBySession.get(id);
+    const entries = [current.get(id), job ? current.get(job) : undefined];
+    if (entries.some((e) => e && isWaiting(e, verdicts))) out.add(id);
   }
 
   // Re-read before writing: concurrent callers each hold a different slice, and a

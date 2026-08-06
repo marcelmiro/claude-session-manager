@@ -490,6 +490,31 @@ test("parseQueuedPending: tolerates torn lines and unknown ops", () => {
   expect(parseQueuedPending(raw)).toEqual(["kept"]);
 });
 
+test("parseQueuedPending: a desync survivor delivered later is not queued", () => {
+  const userRec = (text: string) =>
+    JSON.stringify({ type: "user", message: { role: "user", content: [{ type: "text", text }] } });
+  const attachRec = (text: string) =>
+    JSON.stringify({ type: "attachment", attachment: { type: "queued_command", commandMode: "prompt", prompt: text } });
+  // Real-history shape: Claude's dequeue took the NEWER entry (the op is content-less,
+  // the replay can't tell and shifts the head instead), then `remove` consumed the older
+  // one — so the modelled queue keeps "new msg" forever, though it landed as a user record.
+  expect(
+    parseQueuedPending(
+      [qop("enqueue", "old msg"), qop("enqueue", "new msg"), qop("dequeue", null), qop("remove", "old msg"), userRec("new msg")].join("\n"),
+    ),
+  ).toEqual([]);
+  // Mid-turn consumption lands as a queued_command attachment — also delivery evidence.
+  expect(
+    parseQueuedPending([qop("enqueue", "a"), qop("enqueue", "b"), qop("dequeue", null), attachRec("b")].join("\n")),
+  ).toEqual([]);
+  // A later queue-operation on identical re-sent text is NOT delivery.
+  expect(
+    parseQueuedPending([qop("enqueue", "again"), qop("dequeue", null), qop("enqueue", "again")].join("\n")),
+  ).toEqual(["again"]);
+  // A genuinely queued message (landed nowhere yet) still surfaces.
+  expect(parseQueuedPending([qop("enqueue", "still waiting")].join("\n"))).toEqual(["still waiting"]);
+});
+
 // --- readContextUsage (token usage for the status-bar readout) -----------------
 
 const txLine = (usage: object) =>

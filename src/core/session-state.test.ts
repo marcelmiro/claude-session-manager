@@ -10,7 +10,7 @@ import { test, expect, beforeEach, afterEach } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadNativeStatuses, nativeSessionIdByPid } from "./session-state";
+import { loadNativeStatuses, nativeSessionIdByPid, parkedJobSessions, resolveStatus } from "./session-state";
 
 let dir: string;
 
@@ -101,4 +101,61 @@ test("nativeSessionIdByPid: non-interactive kind → null", async () => {
 test("nativeSessionIdByPid: malformed file → null without throwing", async () => {
   writeFileSync(join(dir, "501.json"), "{ not json");
   expect(await nativeSessionIdByPid(501, dir)).toBeNull();
+});
+
+// --- resolveStatus — native › event › scraper, minus the frozen-file exception ---
+
+test("native wins over event and scraper", () => {
+  expect(resolveStatus("waiting", "running", "ready")).toEqual({ status: "waiting", source: "native" });
+  expect(resolveStatus("running", "ready", "ready")).toEqual({ status: "running", source: "native" });
+});
+
+test("without native, the event log wins over the scraper", () => {
+  expect(resolveStatus(null, "running", "ready")).toEqual({ status: "running", source: "event" });
+});
+
+test("with neither, the scraper is the verdict", () => {
+  expect(resolveStatus(null, null, "waiting")).toEqual({ status: "waiting", source: "scraper" });
+});
+
+test("a live spinner beats native 'ready' — the parked-job case", () => {
+  // While a parked job renders into the pane, the parent session is honestly idle
+  // → "ready", so only the viewport shows that the pane is working.
+  expect(resolveStatus("ready", null, "running")).toEqual({ status: "running", source: "scraper" });
+  expect(resolveStatus("ready", "ready", "running")).toEqual({ status: "running", source: "scraper" });
+});
+
+test("the override is narrow: scraper never demotes native, and only 'ready' is overridable", () => {
+  // Scrolled-away viewport scrapes as "ready" — native must still win.
+  expect(resolveStatus("running", null, "ready")).toEqual({ status: "running", source: "native" });
+  // A stale "waiting" is not the absence of activity, so it isn't second-guessed.
+  expect(resolveStatus("waiting", null, "running")).toEqual({ status: "waiting", source: "native" });
+  // Scraper "waiting" is pattern-matched text — not positive enough to beat native.
+  expect(resolveStatus("ready", null, "waiting")).toEqual({ status: "ready", source: "native" });
+});
+
+// --- parkedJobSessions — parent → the bg session rendering in its pane -----------
+
+test("parkedJobSessions joins parent.parkedJobId to the job's own sessionId", async () => {
+  writeFile("100.json", { ...base, pid: process.pid, sessionId: "parent", status: "idle", parkedJobId: "377d01ee" });
+  writeFile("101.json", { ...base, pid: process.pid, sessionId: "377d01ee-e1ca-4a5f", kind: "bg", jobId: "377d01ee", status: "shell" });
+  const map = await parkedJobSessions(dir);
+  expect(map.get("parent")).toBe("377d01ee-e1ca-4a5f");
+});
+
+test("parkedJobSessions ignores a job whose process is gone", async () => {
+  writeFile("100.json", { ...base, sessionId: "parent", status: "idle", parkedJobId: "deadjob" });
+  writeFile("101.json", { ...base, pid: 999999, sessionId: "dead-job-session", kind: "bg", jobId: "deadjob", status: "idle" });
+  expect((await parkedJobSessions(dir)).size).toBe(0);
+});
+
+test("parkedJobSessions: no parked job, or no matching job file → empty", async () => {
+  writeFile("100.json", { ...base, sessionId: "plain", status: "idle" });
+  writeFile("102.json", { ...base, sessionId: "orphan", status: "idle", parkedJobId: "nosuchjob" });
+  expect((await parkedJobSessions(dir)).size).toBe(0);
+});
+
+test("a bg job is still excluded from native statuses (its 'shell' state isn't a session status)", async () => {
+  writeFile("101.json", { ...base, sessionId: "job", kind: "bg", jobId: "j", status: "shell" });
+  expect((await loadNativeStatuses(dir)).has("job")).toBe(false);
 });

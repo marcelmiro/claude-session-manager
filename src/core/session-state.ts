@@ -54,6 +54,23 @@ function pidAlive(pid: unknown): boolean {
   }
 }
 
+/** Every readable `<pid>.json` in `dir`, parsed. Malformed files are skipped. */
+async function scanRecords(dir: string): Promise<Record<string, unknown>[]> {
+  const records: Record<string, unknown>[] = [];
+  try {
+    for await (const file of new Glob("*.json").scan({ cwd: dir, absolute: true })) {
+      try {
+        records.push(JSON.parse(await Bun.file(file).text()));
+      } catch {
+        // Malformed/unreadable file — skip without poisoning other entries.
+      }
+    }
+  } catch {
+    // Missing dir or scan failure — return whatever we have (empty).
+  }
+  return records;
+}
+
 /**
  * Scan `dir` for `<pid>.json` files and build sessionId → status. Keeps only
  * `kind === "interactive"` entries with a live pid and a known `status`. On
@@ -64,29 +81,55 @@ export async function loadNativeStatuses(
 ): Promise<Map<string, SessionStatus>> {
   const result = new Map<string, SessionStatus>();
   const updatedAtBySession = new Map<string, number>();
-  try {
-    for await (const file of new Glob("*.json").scan({ cwd: dir, absolute: true })) {
-      try {
-        const raw = await Bun.file(file).text();
-        const parsed = JSON.parse(raw);
-        if (parsed?.kind !== "interactive") continue;
-        const sessionId = parsed?.sessionId;
-        if (typeof sessionId !== "string" || !sessionId) continue;
-        const status = mapStatus(parsed?.status);
-        if (!status) continue;
-        if (!pidAlive(parsed?.pid)) continue;
+  for (const parsed of await scanRecords(dir)) {
+    if (parsed?.kind !== "interactive") continue;
+    const sessionId = parsed?.sessionId;
+    if (typeof sessionId !== "string" || !sessionId) continue;
+    const status = mapStatus(parsed?.status);
+    if (!status) continue;
+    if (!pidAlive(parsed?.pid)) continue;
 
-        const updatedAt = typeof parsed?.updatedAt === "number" ? parsed.updatedAt : 0;
-        const prev = updatedAtBySession.get(sessionId);
-        if (prev !== undefined && prev >= updatedAt) continue;
-        updatedAtBySession.set(sessionId, updatedAt);
-        result.set(sessionId, status);
-      } catch {
-        // Malformed/unreadable file — skip without poisoning other entries.
-      }
+    const updatedAt = typeof parsed?.updatedAt === "number" ? parsed.updatedAt : 0;
+    const prev = updatedAtBySession.get(sessionId);
+    if (prev !== undefined && prev >= updatedAt) continue;
+    updatedAtBySession.set(sessionId, updatedAt);
+    result.set(sessionId, status);
+  }
+  return result;
+}
+
+/**
+ * Parent sessionId → the sessionId of the parked job running in its pane.
+ *
+ * A parked job is a SEPARATE Claude session (`kind:"bg"`, own pid, own
+ * transcript, own `tasks/` dir) that renders into the parent pane's viewport.
+ * The parent session goes idle for its whole duration, so anything CSM asks
+ * about the pane's session — status, pending scripts, the transcript — answers
+ * for the wrong half of what's on screen. The two files join exactly: the
+ * parent carries `parkedJobId`, the job carries the matching `jobId` alongside
+ * its full `sessionId` (`parkedJobId` is only the id's 8-char stem, so the
+ * join must go through the job's own file rather than prefix-matching).
+ *
+ * Only live-pid jobs are returned: once the job process exits, its transcript's
+ * pending entries are orphans that no notification will ever retire.
+ */
+export async function parkedJobSessions(
+  dir: string = DEFAULT_DIR,
+): Promise<Map<string, string>> {
+  const records = await scanRecords(dir);
+  const jobSessions = new Map<string, string>();
+  for (const r of records) {
+    if (r?.kind !== "bg" || !pidAlive(r?.pid)) continue;
+    if (typeof r?.jobId === "string" && typeof r?.sessionId === "string" && r.sessionId) {
+      jobSessions.set(r.jobId, r.sessionId);
     }
-  } catch {
-    // Missing dir or scan failure — return whatever we have (empty).
+  }
+
+  const result = new Map<string, string>();
+  for (const r of records) {
+    if (r?.kind !== "interactive" || typeof r?.sessionId !== "string") continue;
+    const job = typeof r?.parkedJobId === "string" ? jobSessions.get(r.parkedJobId) : undefined;
+    if (job) result.set(r.sessionId, job);
   }
   return result;
 }
@@ -116,6 +159,34 @@ export async function nativeSessionIdByPid(
   } catch {
     return null;
   }
+}
+
+/**
+ * Fold the three status sources into a verdict + its provenance. Order is
+ * native › event-sourced › scraper, with ONE exception.
+ *
+ * Native status answers for a SESSION; CSM displays a PANE. Those diverge when
+ * the pane parks a job (`parkedJobs`): the job runs as its own `kind:"bg"`
+ * session, renders into the parent's viewport, and leaves the parent session
+ * honestly `idle` — so its `<pid>.json` sits unchanged, sometimes for hours,
+ * while the pane visibly churns. Every reader then sees a fresh-looking,
+ * permanently-wrong "ready": no 🔄 prefix, and — because attention fires on
+ * transitions — no turn-complete notification when the work does land.
+ * `ready` is the *absence* of activity, so it's the one verdict that survives
+ * this; a spinner anchored above the pane's prompt is positive evidence of the
+ * opposite, and wins that contradiction. Deliberately narrow: a native
+ * `waiting`/`running` still beats the scraper, and a scraper `ready` never
+ * overrides native.
+ */
+export function resolveStatus(
+  native: SessionStatus | null,
+  eventStatus: SessionStatus | null,
+  scraper: SessionStatus,
+): { status: SessionStatus; source: "native" | "event" | "scraper" } {
+  if (native === "ready" && scraper === "running") return { status: "running", source: "scraper" };
+  if (native) return { status: native, source: "native" };
+  if (eventStatus) return { status: eventStatus, source: "event" };
+  return { status: scraper, source: "scraper" };
 }
 
 // Short module-level TTL cache keyed off the default dir so one refresh cycle's

@@ -16,7 +16,7 @@ import { syncWindowPrefix, stripAllPrefixes, abbreviateRepo, ATTENTION_PREFIX } 
 import { findClaudeProcesses } from "./core/process";
 import { detectStatus } from "./core/status";
 import { eventSourcedStatus } from "./core/hook-events";
-import { nativeStatus } from "./core/session-state";
+import { nativeStatus, resolveStatus } from "./core/session-state";
 import { loadNameCache, slugify } from "./core/names";
 import { PATHS } from "./core/config";
 import { pickSavedCwd, resolveRestoreTarget } from "./core/resurrect";
@@ -328,6 +328,7 @@ export async function list(): Promise<void> {
         : paneSessions[pane.paneId];
       const native = sessionId ? await nativeStatus(sessionId) : null;
       const eventStatus = sessionId ? await eventSourcedStatus(sessionId) : null;
+      const resolved = resolveStatus(native, eventStatus, scraper.status);
 
       const name = stripAllPrefixes(pane.windowName);
       // A pane restored by tmux-resurrect comes back in $HOME, so its cwd would render every
@@ -346,8 +347,8 @@ export async function list(): Promise<void> {
 
       return {
         name,
-        status: native ?? eventStatus ?? scraper.status,
-        statusSource: native ? "native" : eventStatus ? "event" : "scraper",
+        status: resolved.status,
+        statusSource: resolved.source,
         contextPercent: scraper.contextPercent,
         repo,
         needsAttention: pane.windowName.startsWith(ATTENTION_PREFIX),

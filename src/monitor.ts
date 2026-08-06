@@ -10,7 +10,7 @@ import { listPanes, capturePane, renameWindow } from "./core/tmux";
 import { findClaudeProcesses } from "./core/process";
 import { detectStatus, type SessionStatus } from "./core/status";
 import { eventSourcedStatus } from "./core/hook-events";
-import { nativeStatus } from "./core/session-state";
+import { nativeStatus, resolveStatus } from "./core/session-state";
 import { reapDeadSessionFiles } from "./core/approval";
 import { loadConfig } from "./core/config";
 import { debugLog } from "./core/debug";
@@ -116,6 +116,7 @@ async function quickDiscoverActive(
         : (paneSessionMap[pane.paneId] ?? resumeIds[pane.paneId]);
       const native = sessionId ? await nativeStatus(sessionId) : null;
       const eventStatus = sessionId ? await eventSourcedStatus(sessionId) : null;
+      const resolved = resolveStatus(native, eventStatus, scraper.status);
 
       const baseRepoPath = await getBaseRepoPath(pane.currentPath);
       return {
@@ -124,8 +125,8 @@ async function quickDiscoverActive(
         repoPath: pane.currentPath,
         baseRepoPath,
         branch: "",
-        status: native ?? eventStatus ?? scraper.status,
-        statusSource: native ? "native" : eventStatus ? "event" : "scraper",
+        status: resolved.status,
+        statusSource: resolved.source,
         contextPercent: scraper.contextPercent ?? 0,
         messageCount: 0,
         summary: "",

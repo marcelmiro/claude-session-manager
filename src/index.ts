@@ -18,6 +18,7 @@ import { initWizard, renderWizard, renderWizardPreview, renderWizardStatusBar, h
 import { loadAllSessions, searchEntries, type SearchEntry } from "./core/search";
 import { recoverWorktreeTranscript } from "./core/recover";
 import { detectScriptWaits } from "./core/script-wait";
+import { parkedJobSessions } from "./core/session-state";
 import { renderSearchResults } from "./ui/search-list";
 import { createSpaceMenuState, renderSpaceMenu, handleSpaceMenuKey, getMenuDimensions, type SpaceMenuState } from "./ui/space-menu";
 import { createQuestionPicker, renderQuestionPicker, handleQuestionPickerKey, getPickerDimensions, type QuestionPickerState } from "./ui/question-picker";
@@ -739,15 +740,18 @@ async function handleFork() {
     return;
   }
 
+  // While a live parked job (kind:"bg") owns this session's pane, the on-screen
+  // conversation — the one being forked — is the JOB's; fork from its session id.
+  const sourceId = (await parkedJobSessions()).get(session.id) ?? session.id;
   // Relocate to the base repo if the session's worktree was deleted, so the fork resume lands.
-  const effectivePath = await recoverWorktreeTranscript(session.id, session.repoPath, session.baseRepoPath);
+  const effectivePath = await recoverWorktreeTranscript(sourceId, session.repoPath, session.baseRepoPath);
   const repoName = effectivePath.split("/").filter(Boolean).pop() ?? "claude";
   const forkName = buildBaseName(repoName, session.name ? slugify(session.name) || undefined : undefined, true);
 
   cleanup();
   try {
     const forkId = crypto.randomUUID();
-    const cmd = `claude --session-id ${forkId} --resume=${session.id} --fork-session; exec zsh -l`;
+    const cmd = `claude --session-id ${forkId} --resume=${sourceId} --fork-session; exec zsh -l`;
     await Bun.$`tmux new-window -a -t ${targetSession} -n ${forkName} -c ${effectivePath} zsh -c ${cmd}`.quiet();
   } catch (e) {
     console.error(`csm: failed to fork session: ${e instanceof Error ? e.message : e}`);

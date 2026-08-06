@@ -41,7 +41,7 @@ import {
   isEffortArg,
   type SendResult,
 } from "../core/session-api";
-import { nativeStatus } from "../core/session-state";
+import { nativeStatus, parkedJobSessions } from "../core/session-state";
 import { pendingScriptsAt } from "../core/background-tasks";
 import { resolveTranscriptPath } from "../core/last-turn";
 import { homedir } from "os";
@@ -570,9 +570,18 @@ async function computeSessionsPayload(): Promise<unknown> {
   const approvalIds = new Set(listPendingApprovals().map((a) => a.sessionId));
   const unread = await unreadPanes();
   const tracked = sessions.filter((s) => s.id); // untracked panes (no id) are unaddressable
+  // Parent sessionId → live parked-job sessionId, used twice below: a parked job's hook
+  // state (pending tool/question) and its scripts are both recorded under the JOB's id
+  // while the phone lists the parent.
+  const parkedJobs = await parkedJobSessions();
   // One event-log read per session per build: the waiting-session check below and
   // projectSession both need the pending tool call.
-  const pendingById = new Map(tracked.map((s) => [s.id, pendingToolCall(s.id)]));
+  const pendingById = new Map(
+    tracked.map((s): [string, ReturnType<typeof pendingToolCall>] => {
+      const job = parkedJobs.get(s.id);
+      return [s.id, pendingToolCall(s.id) ?? (job ? pendingToolCall(job) : null)];
+    }),
+  );
   // Attached sessions never get a pending-file (the PreToolUse hook exits neutral so the
   // instant desk prompt shows) — so a phone-approvable permission prompt must be sourced
   // from the live pane. For each WAITING session with no file-pending and no open question,
@@ -616,14 +625,19 @@ async function computeSessionsPayload(): Promise<unknown> {
   // task runner is gone, no notification can ever arrive, and a stale "pending" would
   // badge a dead session forever. Cached by (size, mtime) in pendingScriptsAt, so an
   // unchanged transcript costs one stat here.
+  // A parked job's scripts run in the session's pane but are recorded in the JOB's
+  // transcript, so both are counted against the session the phone lists.
   const scriptCounts = new Map<string, number>();
   await Promise.all(
     tracked
       .filter((s) => s.status === "running" || s.status === "ready" || s.status === "waiting")
       .map(async (s) => {
-        const path = await resolveTranscriptPath(s.id);
-        if (!path) return;
-        const n = (await pendingScriptsAt(path)).length;
+        const ids = [s.id, parkedJobs.get(s.id)].filter((id): id is string => !!id);
+        const counts = await Promise.all(ids.map(async (id) => {
+          const path = await resolveTranscriptPath(id);
+          return path ? (await pendingScriptsAt(path)).length : 0;
+        }));
+        const n = counts.reduce((a, b) => a + b, 0);
         if (n > 0) scriptCounts.set(s.id, n);
       }),
   );
@@ -909,13 +923,20 @@ async function route(req: Request): Promise<Response> {
   const transcript = path.match(/^\/sessions\/([^/]+)\/transcript$/);
   if (method === "GET" && transcript) {
     const id = decodeURIComponent(transcript[1]!);
+    // While a live parked job (kind:"bg") owns this session's pane, the conversation on
+    // screen — the composer sends type into, and the hooks that fire — belongs to the
+    // JOB session; this id's own transcript sits frozen for the duration. Answer with
+    // the job's transcript + hook state so the phone reads the half of the pane that is
+    // actually moving. Pane-scoped fields (capture, statusline) stay on the listed id,
+    // whose pane it is. Falls back to the id itself the moment the job's pid dies.
+    const txId = (await parkedJobSessions()).get(id) ?? id;
     // Real awaiting-decision approval (blocking hook), NOT the in-flight pendingTool —
     // so Allow/Deny only appears when a decision is genuinely required. Detached sessions
     // surface it via the pending-file; an ATTACHED session has no file, so confirm a
     // permission prompt is live on the pane and synthesize the same card shape from the
     // pending tool call (identical Allow/Deny UI; /decision drives the keys instead).
     const resolveApproval = (pt: ReturnType<typeof pendingToolCall>, pane: string | null, capture: string) => {
-      const blocked = listPendingApprovals().find((a) => a.sessionId === id) ?? null;
+      const blocked = listPendingApprovals().find((a) => a.sessionId === txId) ?? null;
       if (blocked || !pane || !pt) return blocked;
       if (pt.name === "AskUserQuestion" && pt.question) return null;
       if (!isPermissionPrompt(capture)) return null;
@@ -936,11 +957,11 @@ async function route(req: Request): Promise<Response> {
     // session file). The client merges these over its held turns.
     const wantRev = url.searchParams.get("rev");
     if (wantRev) {
-      const at = await transcriptRevAt(id);
+      const at = await transcriptRevAt(txId);
       if (at && at.rev === wantRev) {
         const [pane, subagents] = await Promise.all([resolveSessionPane(id), listSubagents(at.path)]);
         const capture = pane ? await capturePane(pane) : "";
-        const pt = pendingToolCall(id);
+        const pt = pendingToolCall(txId);
         const statusline = pane ? await readPaneStatusline(pane, capture) : {};
         return json({
           unchanged: true,
@@ -956,10 +977,10 @@ async function route(req: Request): Promise<Response> {
     // Full response: the whole active branch (reconstructed leaf→root) — a rewind can
     // shrink the conversation, so an append-only delta would leak abandoned-branch turns.
     // Transcript read and pane resolution share no state — overlap them.
-    const [tx, pane] = await Promise.all([getTranscript(id), resolveSessionPane(id)]);
+    const [tx, pane] = await Promise.all([getTranscript(txId), resolveSessionPane(id)]);
     // One capture serves both the permission-prompt check and the statusline scrape below.
     const capture = pane ? await capturePane(pane) : "";
-    const approval = resolveApproval(pendingToolCall(id), pane, capture);
+    const approval = resolveApproval(pendingToolCall(txId), pane, capture);
     // The live statusline + permission mode, scraped from the pane (the only faithful
     // source for the user's custom statusline and the auto/plan mode).
     const statusline = pane ? await readPaneStatusline(pane, capture) : {};
@@ -1057,9 +1078,13 @@ async function route(req: Request): Promise<Response> {
     const id = decodeURIComponent(decision[1]!);
     // Detached (blocking-hook) approvals resolve via the decision file; an attached
     // session has no such file, so drive its on-screen prompt with pane keystrokes.
-    const blocked = listPendingApprovals().find((a) => a.sessionId === id);
+    // A parked job's hook holds under the JOB's id (the transcript endpoint surfaced
+    // it from there), so the hold — and the decision file it polls — is keyed by
+    // whichever id the approval was recorded under.
+    const txId = (await parkedJobSessions()).get(id) ?? id;
+    const blocked = listPendingApprovals().find((a) => a.sessionId === id || a.sessionId === txId);
     if (blocked) {
-      decideApproval(id, body.decision, { reason, toolUseId: blocked.tool_use_id });
+      decideApproval(blocked.sessionId, body.decision, { reason, toolUseId: blocked.tool_use_id });
       markPortkeySource(id, { deviceId: deviceOf(req) });
       return json({ ok: true });
     }
@@ -1129,7 +1154,10 @@ async function route(req: Request): Promise<Response> {
       );
     if (!valid) return json({ ok: false, reason: "bad-selection" }, 400);
     const id = decodeURIComponent(answer[1]!);
-    const r = await answerSessionQuestion(id, sels as (number | number[])[], toolUseId);
+    // A parked job's open question lives in the JOB session's hook state; its pane
+    // resolves back through the parent (resolveSessionPane's parked-job join).
+    const txId = (await parkedJobSessions()).get(id) ?? id;
+    const r = await answerSessionQuestion(txId, sels as (number | number[])[], toolUseId);
     if (r.ok) markPortkeySource(id, { deviceId: deviceOf(req) }); // no text ⇒ anchors the current turn's prompt_id
     return sendResult(r);
   }
@@ -1140,7 +1168,8 @@ async function route(req: Request): Promise<Response> {
   const clarify = path.match(/^\/sessions\/([^/]+)\/clarify$/);
   if (method === "POST" && clarify) {
     const id = decodeURIComponent(clarify[1]!);
-    const r = await clarifySessionQuestion(id);
+    // Same parked-job routing as /answer: the held question is keyed by the job's id.
+    const r = await clarifySessionQuestion((await parkedJobSessions()).get(id) ?? id);
     if (r.ok) markPortkeySource(id, { deviceId: deviceOf(req) }); // no text ⇒ anchors the current turn's prompt_id
     return sendResult(r);
   }

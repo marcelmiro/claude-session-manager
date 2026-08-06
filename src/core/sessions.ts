@@ -13,7 +13,7 @@ import { stripAllPrefixes, extractAIName } from "./notifications";
 import { slugify } from "./names";
 import { processHookEvents, savePaneSessions, reconcilePaneFiles } from "./state";
 import { eventSourcedStatus } from "./hook-events";
-import { nativeStatus } from "./session-state";
+import { nativeStatus, resolveStatus } from "./session-state";
 import { readLastTurnAt, resolveTranscriptPath, latestTranscriptCwd } from "./last-turn";
 
 const home = homedir();
@@ -550,9 +550,11 @@ async function buildActiveSession(
   // Status resolution order: Claude's native status file › event-sourced hook log
   // › viewport scraper. Native is authoritative for live sessions and de-latches
   // the stuck-running case (revert/interrupt emit no hook). Events are correct
-  // regardless of pane scroll; the scraper is the last resort.
+  // regardless of pane scroll; the scraper is the last resort — and the tiebreak
+  // when a frozen native file claims "ready" over a live spinner (resolveStatus).
   const native = resolvedId ? await nativeStatus(resolvedId) : null;
   const eventStatus = resolvedId ? await eventSourcedStatus(resolvedId) : null;
+  const resolved = resolveStatus(native, eventStatus, statusResult.status);
 
   return {
     id: resolvedId,
@@ -560,8 +562,8 @@ async function buildActiveSession(
     repoPath,
     baseRepoPath,
     branch,
-    status: native ?? eventStatus ?? statusResult.status,
-    statusSource: native ? "native" : eventStatus ? "event" : "scraper",
+    status: resolved.status,
+    statusSource: resolved.source,
     contextPercent,
     messageCount: activeInfo?.messageCount ?? 0,
     summary: activeInfo?.summary ?? "",

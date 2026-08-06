@@ -272,3 +272,28 @@ test("a changed transcript is re-parsed", async () => {
   await detectScriptWaits(["sessA"], probeAll(false), PROJECTS);
   expect(readCache().sessA.pending[0].key).toBe("bsecond");
 });
+
+// --- parked jobs: the wait lives in the JOB's transcript, the badge on the pane ---
+
+test("a parked job's live script makes its PARENT session wait", async () => {
+  rmSync(PROJECTS, { recursive: true, force: true });
+  rmSync(CACHE, { force: true });
+  transcript("job", "bjob");
+  // The parent's own transcript is quiet — a parked job's turns land in the job's.
+  writeFileSync(join(PROJECTS, "proj", "parent.jsonl"), "");
+  const jobs = new Map([["parent", "job"]]);
+
+  expect(await detectScriptWaits(["parent"], probeAll(true), PROJECTS, jobs)).toEqual(new Set(["parent"]));
+  // The job id itself is never returned — callers badge the pane's session.
+  expect(await detectScriptWaits(["parent"], probeAll(true), PROJECTS, jobs).then((s) => s.has("job"))).toBe(false);
+
+  rmSync(VERDICTS_DIR, { recursive: true, force: true });
+  expect(await detectScriptWaits(["parent"], probeAll(false), PROJECTS, jobs)).toEqual(new Set());
+});
+
+test("without a parked job the parent's own transcript still decides", async () => {
+  rmSync(PROJECTS, { recursive: true, force: true });
+  rmSync(CACHE, { force: true });
+  transcript("solo", "bsolo");
+  expect(await detectScriptWaits(["solo"], probeAll(true), PROJECTS, new Map())).toEqual(new Set(["solo"]));
+});

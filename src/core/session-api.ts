@@ -40,6 +40,7 @@ import { buildBaseName } from "./notifications";
 import { slugify } from "./names";
 import { parseBackgroundTasks, liveScripts, type BackgroundTask } from "./background-tasks";
 import { decideQuestion, declineQuestion, buildAnswersMap } from "./approval";
+import { parkedJobSessions } from "./session-state";
 import type { PendingQuestion, PendingToolCall } from "./jsonl-reader";
 import type { RestoreState, TranscriptBlock, TranscriptTurn } from "../types";
 
@@ -266,12 +267,16 @@ export async function forkSession(
 ): Promise<SendResult> {
   const target = await getMainSession();
   if (!target) return { ok: false, reason: "no-session" };
-  if ((await resolveTranscriptPath(sessionId)) === null) return { ok: false, reason: "no-transcript" };
-  const effectivePath = await recoverWorktreeTranscript(sessionId, repoPath, baseRepoPath);
+  // While a live parked job (kind:"bg") owns this session's pane, the conversation the
+  // user sees — and means to fork — is the JOB's; this id's own transcript is frozen for
+  // the duration. Fork from the job's session so the fork resumes the on-screen history.
+  const sourceId = (await parkedJobSessions()).get(sessionId) ?? sessionId;
+  if ((await resolveTranscriptPath(sourceId)) === null) return { ok: false, reason: "no-transcript" };
+  const effectivePath = await recoverWorktreeTranscript(sourceId, repoPath, baseRepoPath);
   const repoName = effectivePath.split("/").filter(Boolean).pop() ?? "claude";
   const forkName = buildBaseName(repoName, name ? slugify(name) || undefined : undefined, true);
   const forkId = crypto.randomUUID();
-  const paneId = await launchForkWindow(target, effectivePath, forkName, forkId, sessionId);
+  const paneId = await launchForkWindow(target, effectivePath, forkName, forkId, sourceId);
   // We minted forkId and passed it via --session-id, so the fork's transcript lands under it;
   // write the pane→session map ourselves (like createSession) rather than wait on the hook,
   // which for a --fork-session pane records the PARENT id instead.
@@ -284,7 +289,7 @@ export async function forkSession(
   // turn — Claude has not created the file yet). Claude then treats the existing file as the
   // session history and APPENDS the first turn to it (verified: no duplication), which is
   // exactly fork semantics. Best-effort: a failed seed just falls back to empty-until-first-turn.
-  await seedForkTranscript(sessionId, forkId, effectivePath);
+  await seedForkTranscript(sourceId, forkId, effectivePath);
   return { ok: true, sessionId: forkId };
 }
 
@@ -819,10 +824,21 @@ export async function transcriptRevAt(sessionId: string): Promise<{ path: string
  * Task-notification payloads ride the same queue and must be replayed (a dequeue shifts
  * whatever is at the head) but are filtered from the returned survivors — they are
  * harness plumbing, not something the phone should show as a queued message.
+ *
+ * The op log is NOT self-contained: `dequeue` carries null, so when the queue holds more
+ * than one entry the replay cannot know which one Claude actually took (observed in real
+ * history: enqueue A, enqueue B, dequeue, then `remove A` — proving the dequeue consumed
+ * B, not the head). One such mismatch desyncs the model permanently and a long-delivered
+ * message survives as a phantom "queued" bubble. So each survivor is reconciled against
+ * delivery evidence: if its text later appears as a real conversational record (`user`
+ * turn at turn-end, or `queued_command` attachment mid-turn), it was consumed — drop it.
+ * A genuinely queued message has landed nowhere yet, so it always survives this check.
  */
 export function parseQueuedPending(jsonl: string): string[] {
-  const queue: string[] = [];
-  for (const line of jsonl.split("\n")) {
+  const lines = jsonl.split("\n");
+  const queue: { line: number; text: string }[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
     if (!line.includes('"queue-operation"')) continue;
     let rec: { type?: string; operation?: string; content?: unknown };
     try {
@@ -833,14 +849,14 @@ export function parseQueuedPending(jsonl: string): string[] {
     if (rec.type !== "queue-operation") continue;
     switch (rec.operation) {
       case "enqueue":
-        if (typeof rec.content === "string") queue.push(rec.content);
+        if (typeof rec.content === "string") queue.push({ line: i, text: rec.content });
         break;
       case "dequeue":
         queue.shift();
         break;
       case "remove": {
-        const i = typeof rec.content === "string" ? queue.indexOf(rec.content) : -1;
-        if (i >= 0) queue.splice(i, 1);
+        const i2 = queue.findIndex((e) => e.text === rec.content);
+        if (i2 >= 0) queue.splice(i2, 1);
         break;
       }
       case "popAll":
@@ -848,7 +864,30 @@ export function parseQueuedPending(jsonl: string): string[] {
         break;
     }
   }
-  return queue.filter((text) => !text.trimStart().startsWith("<task-notification>"));
+  return queue
+    .filter(({ text }) => !text.trimStart().startsWith("<task-notification>"))
+    .filter(({ line, text }) => !deliveredAfter(lines, line, text))
+    .map(({ text }) => text);
+}
+
+/**
+ * Did the enqueued text land as a real record after its enqueue line? Fast substring
+ * check with the JSON-escaped text first; only matching lines are parsed, and only
+ * conversational carriers count — a later queue-operation on identical re-sent text
+ * (or the torn tail of one) is not delivery.
+ */
+function deliveredAfter(lines: string[], afterLine: number, text: string): boolean {
+  const needle = JSON.stringify(text).slice(1, -1);
+  for (let i = afterLine + 1; i < lines.length; i++) {
+    if (!lines[i].includes(needle)) continue;
+    try {
+      const rec = JSON.parse(lines[i]) as { type?: string };
+      if (rec.type === "user" || rec.type === "attachment") return true;
+    } catch {
+      // torn/partial line
+    }
+  }
+  return false;
 }
 
 // Per-path cache of the parsed active branch, keyed by the file's size+mtime. Any change
@@ -1051,7 +1090,20 @@ export async function resolveSessionPane(sessionId: string): Promise<string | nu
   const fromHook = pickPane(sessionId, paneMap, livePaneIds);
   if (fromHook) return fromHook;
 
-  return paneFromCommandLine(sessionId, await findClaudeProcesses(), panes, paneMap);
+  const fromCommand = paneFromCommandLine(sessionId, await findClaudeProcesses(), panes, paneMap);
+  if (fromCommand) return fromCommand;
+
+  // A parked job (kind:"bg") renders into its PARENT's pane and never gets a pane of
+  // its own — no hook fires for it and its process carries no --resume id. Resolve
+  // through the parent so job-addressed actions (a held question's answer, sends
+  // retiring against the job transcript) land on the pane actually showing them.
+  for (const [parent, job] of await parkedJobSessions()) {
+    if (job === sessionId && parent !== sessionId) {
+      const parentPane = pickPane(parent, paneMap, livePaneIds);
+      if (parentPane) return parentPane;
+    }
+  }
+  return null;
 }
 
 /**
