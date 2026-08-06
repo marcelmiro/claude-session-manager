@@ -319,11 +319,12 @@ export interface TranscriptTurn {
   // Set on a Claude-teams mailbox delivery: the harness injects a teammate session's
   // message into this transcript as a `user` record ("Another Claude session sent a
   // message:" + one or more `<teammate-message>` blocks). Not typed by the user — the
-  // UI renders dim teammate rows, not a user bubble. One entry per block; `summary` is
-  // the tag's summary attribute, else the payload JSON's `summary` field, else "".
+  // UI renders teammate rows, not a user bubble. One entry per block; `summary` is the
+  // tag's summary attribute, else the payload JSON's `summary` field, else "" (a bare
+  // idle ping); `color` is the harness-assigned teammate color name, verbatim.
   // `content` is empty. These ARE real user-role API messages that start turns, so
   // rewind-count walks treat them like typed prompts.
-  teammate?: Array<{ id: string; summary: string; body: string }>;
+  teammate?: Array<{ id: string; color?: string; summary: string; body: string }>;
 }
 
 /**

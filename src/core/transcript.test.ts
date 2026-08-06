@@ -239,11 +239,12 @@ test("teams mailbox delivery maps to a teammate turn, one entry per block", () =
         // summary lifted from the JSON payload when the tag carries no attribute…
         {
           id: "std-941-r2",
+          color: "green",
           summary: "[to main] 2 findings",
           body: '{"type":"idle_notification","from":"std-941-r2","summary":"[to main] 2 findings"}',
         },
         // …and taken from the summary attribute when present.
-        { id: "p0-941-r2", summary: "no P0 findings", body: "plain text report" },
+        { id: "p0-941-r2", color: "blue", summary: "no P0 findings", body: "plain text report" },
       ],
     },
   ]);

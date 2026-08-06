@@ -1718,15 +1718,42 @@ function BashTurn({ bash, upCount, canCode }) {
   </div>`;
 }
 
-// One teammate mailbox message: a dim system-style row — teammate id + its summary —
-// tapping toggles the raw payload. An idle ping with no summary is just the id line.
+// The harness assigns each teammate a color name so multi-agent chatter scans by
+// sender; map the names onto the Vesper-adjacent tokens (unknown names → muted).
+const TM_COLORS = {
+  green: "var(--mint)",
+  yellow: "var(--yellow)",
+  red: "var(--red)",
+  orange: "var(--peach)",
+  pink: "var(--red)",
+  blue: "var(--tm-blue)",
+  cyan: "var(--tm-blue)",
+  purple: "var(--tm-purple)",
+};
+
+// A substantive teammate message (it carries a summary): a bylined left bubble —
+// colored sender id + chevron, the summary as the readable line, and the full payload
+// behind the chevron. JSON bodies pretty-print; anything else renders as markdown
+// (reports are agent prose, same trust level as assistant output). The toggle lives on
+// the byline+summary only, so selecting text in an expanded body can't collapse it.
 function TeammateRow({ msg }) {
   const [open, setOpen] = useState(false);
-  return html`<div class="teammate" onClick=${() => setOpen(!open)}>
-    <div class="tm-head">
-      🤝 <span class="tm-id">${msg.id}</span>${msg.summary && html` — ${msg.summary}`}
+  const tint = TM_COLORS[msg.color] || "var(--muted)";
+  let body = msg.body;
+  let isJson = false;
+  try {
+    body = JSON.stringify(JSON.parse(msg.body), null, 2);
+    isJson = true;
+  } catch {}
+  return html`<div class="tm-bubble" style=${`border-left-color:${open ? tint : "var(--border)"}`}>
+    <div class="tm-head" onClick=${() => setOpen(!open)}>
+      <div class="tm-byline"><span style=${`color:${tint}`}>🤝 ${msg.id}</span><span class="tm-chev">${open ? "▾" : "▸"}</span></div>
+      <div class="tm-sum">${msg.summary}</div>
     </div>
-    ${open && html`<pre class="tm-body">${msg.body}</pre>`}
+    ${open &&
+    (isJson
+      ? html`<pre class="tm-body">${body}</pre>`
+      : html`<div class="tm-body md" dangerouslySetInnerHTML=${{ __html: md(body) }}></div>`)}
   </div>`;
 }
 
@@ -1770,12 +1797,23 @@ function Turn({ turn, upCount, canCode }) {
     return html`<${BashTurn} bash=${turn.bash} upCount=${upCount} canCode=${canCode} />`;
   }
 
-  // Teams mailbox delivery — a teammate session's message injected as a user record.
-  // Rendered as dim rows (id + summary, tap for the raw payload), never a user bubble:
-  // the human didn't type it. No long-press handlers — there's no text to restore.
+  // Teams mailbox delivery — a teammate session's message injected as a user record,
+  // never a user bubble: the human didn't type it. Messages carrying a summary are
+  // reports worth reading (bylined bubble); bare idle pings are plumbing, collapsed to
+  // one near-invisible line per turn. No long-press handlers — no text to restore.
   if (turn.teammate) {
+    const reports = turn.teammate.filter((m) => m.summary);
+    const idle = turn.teammate.filter((m) => !m.summary);
     return html`<div class="turn">
-      ${turn.teammate.map((m, i) => html`<${TeammateRow} key=${i} msg=${m} />`)}
+      ${reports.map((m, i) => html`<${TeammateRow} key=${i} msg=${m} />`)}
+      ${idle.length > 0 &&
+      html`<div class="tm-idle">
+        ${idle.map(
+          (m, i) =>
+            html`<span style=${`color:${TM_COLORS[m.color] || "var(--dim)"}`}>${m.id}</span>${i < idle.length - 1 ? ", " : ""}`,
+        )}
+        ${" went idle"}
+      </div>`}
     </div>`;
   }
 

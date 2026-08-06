@@ -168,7 +168,7 @@ function recordToTurn(record: RawRecord): FoldableTurn | null {
     // Teams mailbox delivery (see TEAMMATE_PREFIX above) → a teammate turn, one entry
     // per <teammate-message> block. The surrounding boilerplate is plumbing and dropped.
     if (TEAMMATE_PREFIX.test(joined)) {
-      const msgs: Array<{ id: string; summary: string; body: string }> = [];
+      const msgs: Array<{ id: string; color?: string; summary: string; body: string }> = [];
       for (const m of joined.matchAll(TEAMMATE_MESSAGE)) {
         const body = m[2].trim();
         let summary = m[1].match(/summary="([^"]*)"/)?.[1] ?? "";
@@ -178,7 +178,12 @@ function recordToTurn(record: RawRecord): FoldableTurn | null {
             if (typeof payload?.summary === "string") summary = payload.summary;
           } catch {} // non-JSON payload — no summary to lift
         }
-        msgs.push({ id: m[1].match(/teammate_id="([^"]*)"/)?.[1] ?? "teammate", summary, body });
+        msgs.push({
+          id: m[1].match(/teammate_id="([^"]*)"/)?.[1] ?? "teammate",
+          color: m[1].match(/color="([^"]*)"/)?.[1],
+          summary,
+          body,
+        });
       }
       if (msgs.length) return { role: "user", content: [], teammate: msgs };
     }
