@@ -22,6 +22,23 @@ _Avoid_: resume (reserved for Claude's own CLI flag), reopen
 **Restore states**:
 *Restorable* — the session's original directory exists; restores in place. *Relocated* — its worktree is gone but the base repo exists; restores in the base repo. *Non-restorable* — base repo or transcript is gone; readable but not restorable.
 
+**Inbox**:
+A view over sessions grouped by lifecycle state. An inbox item *is* a session (keyed by its UUID) — there is no free-standing work-item object, and no item without a transcript.
+_Avoid_: work item, task, thread
+
+**Disposition**:
+The authored lifecycle state of a session in the Inbox: *snoozed* (carries an `until` date) or *blocked* (carries a free-text note). Absence of a disposition is the normal case. Orthogonal to activity status, which is always derived, never authored. Setting a disposition archives the pane: a live pane exists only for sessions actively working.
+_Avoid_: done (not a state — archiving is the done verb, History is the done pile)
+
+**Parked**:
+The Inbox section holding snoozed and blocked sessions, collapsed to a count by default. A snoozed session whose wake date arrives leaves Parked and resurfaces in Needs you, marked as returned-from-snooze.
+
+**Needs you**:
+The Inbox section for sessions awaiting a human response — blocked-on-approval, question asked, or turn complete with no reply. An item leaves it only by reply/approve (observed as a derived status transition), snooze/blocked, or archive — never by focus, glance, or notification tap. No silent decay.
+
+**Recently done**:
+Derived-archived sessions from the last 24h, shown muted at the bottom of the Inbox. Purely derived — no authored state.
+
 **Safeguard row**:
 An archived-labeled row kept on the live sessions list because it is pending or unread — covers discovery transiently mislabeling a live blocked session as archived.
 

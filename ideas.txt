@@ -37,11 +37,20 @@ CSM Ideas Backlog
 - Worktree path template
 - Configurable IDE command (not just Cursor)
 
-## Post-hoc Re-flag (mark session as needs-attention)
+## Session Inbox (IN FLIGHT — worktree ../csm-inbox, branch `inbox`, ADR 0013)
+Lifecycle model locked 2026-08-02 (see docs/adr/0013 + CONTEXT.md terms). Phase 1 = model + Mac CLI verbs + tmux sidebar prototype; Phase 2 = portkey Inbox UI. Upgrade-path ideas deferred during the grilling, to revisit AFTER living with v1:
+- Blocked-on links: point a blocked session at another session or Linear ticket, auto-resurface into Needs you when the blocker resolves (derived self-healing; v1 is free-text note only)
+- Repo chip filter on the inbox (narrow all sections to one repo) — compatible with sections-primary; repo *grouping* as primary axis is rejected
+- Auto-decay of ready-untouched sessions to muted after N days — rejected for v1 (silent decay is exactly the leak the inbox plugs); revisit only if the nags-forever invariant feels like chore, not discipline
+- Sidebar fallback variants if the per-window pane proves glitchy: dedicated always-first window, or toggleable split
+- Verbs on direct tmux bindings (prefix+z = snooze current window, etc.) if the prototype shows the sidebar is eyes-only and never focused
+- Portkey swipe-to-triage on inbox rows (swipe = snooze/archive, the mobile-email interaction)
+- Auto-archive candidates from derived signals (PR merged → suggest done) — the "derived wherever possible" principle applied to disposal
+
+## Post-hoc Re-flag (mark session as needs-attention) — SUPERSEDED by Session Inbox
 - Problem: once ⚡ clears on focus, a session that's STILL `waiting` never re-flags — the monitor flags on the running→waiting *transition*, not on standing state. So a glanced-at-but-deferred block loses its ⚡ for the rest of its life.
-- Idea: a key in the session list (or Space menu) that re-adds ⚡ to any session, pressable *whenever* you notice — no foresight required (unlike a pre-switch "keep unread" shortcut, which fails exactly when you forget).
-- Dead simple: just set `needsAttention` back on. No `attentionType` gating, no `!waiting` resolve predicate, no `next`-rotation redesign. `csm next` picks it up automatically (already sorts by `lastTransition`).
-- Only worth building IF parallel-block triage becomes a real recurring pain — native notification + phone push already give two redundant reminders per block, so the vanishing ⚡ isn't leaving you blind. Considered & deferred 2026-07 as polish, not a confirmed need.
+- The inbox disposal invariant (ADR 0013) dissolves this: Needs you membership never clears on focus/glance — only reply, park, or archive dispose. No manual re-flag needed; the flag can't vanish in the first place.
+- (Original 2026-07 sketch: a key to set `needsAttention` back on. Kept for reference; don't build.)
 
 ## Instant Prefix Updates via Claude Hooks
 - Use Claude Code hooks (UserPromptSubmit, Stop, Notification) to update ⚡/🔄 window prefixes instantly instead of waiting for poll cycle
