@@ -1,0 +1,16 @@
+[Unit]
+Description=CSM mobile bridge (portkey)
+After=network-online.target tailscaled.service
+# Default restart limits are 100ms×5-in-10s: five fast crashes (e.g. port already
+# bound) and systemd gives up permanently. Spaced retries never trip that way.
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+ExecStart=%h/.bun/bin/csm bridge
+EnvironmentFile=%h/.config/csm/bridge.env
+Restart=always
+RestartSec=5s
+
+[Install]
+WantedBy=default.target

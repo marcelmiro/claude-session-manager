@@ -1,0 +1,14 @@
+[Unit]
+Description=tmux server (hosts all Claude Code sessions)
+
+[Service]
+Type=forking
+ExecStart=/usr/bin/tmux new-session -d -s main
+# Save the pane→session map on the way down so restore-sessions can resume every
+# Claude session after the reboot. csm resolves via environment.d PATH.
+ExecStop=/bin/bash -c 'csm save-sessions; /usr/bin/tmux kill-server'
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=default.target
