@@ -175,8 +175,10 @@ Session rows display "TICKET · name" labels extracted from branch names (Linear
 4-tier system on status transitions (running→waiting = "blocked", running→ready = "turnComplete"):
 1. Status monitor update (tmux status-right)
 2. Window prefix: ⚡ added to tmux window name
-3. macOS native notification (terminal-notifier/osascript; sound-only while Ghostty is frontmost)
+3. macOS native notification (terminal-notifier/osascript; sound-only while Ghostty is frontmost; darwin-only by decision — [ADR 14](docs/adr/0014-presence-is-client-activity.md))
 4. Web Push to the portkey device that drove the turn (see below)
+
+**Presence** ("is the user at the terminal?") feeds tiers 2–4's suppression, the monitor's takeover (`clearSource`), the question hold's release, and the hook gates. On macOS it's frontmost-app probes (osascript/lsappinfo); on other hosts it's tmux `#{client_activity}` within a 60s window (`core/presence.ts`, tri-state — each site maps probe failure per its own polarity). Attached-but-idle counts as away off-macOS, because a remote tmux attach is permanent. Model and rejected alternatives: [ADR 14](docs/adr/0014-presence-is-client-activity.md).
 
 Window prefix priority: ⚡ (needs attention) > 🔄 (running) > ⏳ (waiting on background script) > none. Monitor syncs prefixes on each cycle. `stripAllPrefixes()` and `desiredPrefix()` in `notifications.ts` centralize prefix logic.
 

@@ -116,13 +116,30 @@ test("setup() repairs a stale timeout on an already-registered hook", async () =
   expect(csmEntries(after, "PreToolUse")).toHaveLength(2); // repaired, not duplicated
 });
 
-test("setup() writes the four hook scripts stamped CSM_HOOK_VERSION=14", async () => {
+test("setup() writes the four hook scripts stamped CSM_HOOK_VERSION=15", async () => {
   await setup();
   for (const name of ["session-start", "event", "pretooluse", "question-pretooluse"]) {
     const path = `${hooksDir}/${name}.sh`;
     expect(existsSync(path)).toBe(true);
-    expect(readFileSync(path, "utf8")).toContain("# CSM_HOOK_VERSION=14");
+    expect(readFileSync(path, "utf8")).toContain("# CSM_HOOK_VERSION=15");
   }
+});
+
+test("hook gates branch on uname: darwin keeps frontmost/attached probes, elsewhere reads client_activity", async () => {
+  // On a remote host a persistent SSH attach is the steady state, so "client
+  // attached" stops implying presence — both gates must consult keystroke recency
+  // there while leaving the macOS behavior byte-for-byte intact.
+  await setup();
+  const pre = readFileSync(`${hooksDir}/pretooluse.sh`, "utf8");
+  expect(pre).toContain('[ "$(uname)" = "Darwin" ]');
+  expect(pre).toContain("#{client_activity}");
+  const q = readFileSync(`${hooksDir}/question-pretooluse.sh`, "utf8");
+  expect(q).toContain('[ "$(uname)" = "Darwin" ]');
+  expect(q).toContain("#{client_activity}");
+  expect(q).toContain("lsappinfo"); // darwin branch intact
+  // The window constant is interpolated from core/presence.ts, not hand-copied.
+  expect(q).toMatch(/-le 60\b/);
+  expect(pre).toMatch(/-le 60\b/);
 });
 
 test("setup() registers hook commands as explicit quoted bash invocations", async () => {

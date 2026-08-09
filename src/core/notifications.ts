@@ -160,6 +160,10 @@ function sendNativeNotification(
   body: string,
   pane?: { sessionName: string; windowIndex: number; paneId: string },
 ): void {
+  // macOS-only by decision (ADR 14): on other hosts the desk surfaces are tmux-side
+  // (⚡ prefix, status-right) and the phone has web push — a VM-local notifier would
+  // notify the VM, not the human. Without this gate the spawns below no-op silently.
+  if (process.platform !== "darwin") return;
   try {
     // If Ghostty is frontmost: play sound only, skip visual notification.
     // Otherwise: full notification with sound (terminal-notifier or osascript).

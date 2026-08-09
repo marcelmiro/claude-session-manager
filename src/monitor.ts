@@ -17,6 +17,7 @@ import { debugLog } from "./core/debug";
 import { loadState, saveState, computeAggregate, buildSessionStates, loadPaneSessions, savePaneSessions, processHookEvents } from "./core/state";
 import { detectTransitions, dispatchNotifications, syncWindowPrefix, ATTENTION_PREFIX, RUNNING_PREFIX, SCRIPT_PREFIX, stripAllPrefixes, desiredPrefix, buildBaseName, abbreviateRepo, NAME_SEPARATOR } from "./core/notifications";
 import { clearSource } from "./core/input-source";
+import { classifyActivity } from "./core/presence";
 import { detectScriptWaits } from "./core/script-wait";
 import { getBaseRepoPath } from "./core/git";
 import { repoNameFromPath } from "./core/sessions";
@@ -173,22 +174,33 @@ async function main(): Promise<void> {
   try {
     const client = (await Bun.$`tmux list-clients -F '#{client_name}'`.quiet().text()).trim().split("\n")[0];
     if (client) {
-      const info = (await Bun.$`tmux display-message -c ${client} -p '#{pane_id}:#{window_index}:#{session_name}:#{window_name}'`.quiet().text()).trim();
-      const colonIdx1 = info.indexOf(":");
+      // client_activity leads the format (window_name may itself contain colons, so it
+      // must stay the greedy tail) and rides the same display-message call — no extra fork.
+      const info = (await Bun.$`tmux display-message -c ${client} -p '#{client_activity}:#{pane_id}:#{window_index}:#{session_name}:#{window_name}'`.quiet().text()).trim();
+      const colonIdx0 = info.indexOf(":");
+      const colonIdx1 = info.indexOf(":", colonIdx0 + 1);
       const colonIdx2 = info.indexOf(":", colonIdx1 + 1);
       const colonIdx3 = info.indexOf(":", colonIdx2 + 1);
-      activePaneId = info.slice(0, colonIdx1);
+      const clientActivity = info.slice(0, colonIdx0);
+      activePaneId = info.slice(colonIdx0 + 1, colonIdx1);
       activeWindow = info.slice(colonIdx1 + 1, colonIdx2);
       activeSession = info.slice(colonIdx2 + 1, colonIdx3);
       const activeWindowName = info.slice(colonIdx3 + 1);
 
-      // Check if the terminal is actually focused (Ghostty frontmost)
-      try {
-        const frontApp = (await Bun.$`osascript -e 'tell application "System Events" to return name of first application process whose frontmost is true'`.quiet().text()).trim().toLowerCase();
-        terminalFocused = frontApp === "ghostty";
-      } catch {
-        // Can't determine — assume focused to preserve existing behavior
-        terminalFocused = true;
+      if (process.platform === "darwin") {
+        // Check if the terminal is actually focused (Ghostty frontmost)
+        try {
+          const frontApp = (await Bun.$`osascript -e 'tell application "System Events" to return name of first application process whose frontmost is true'`.quiet().text()).trim().toLowerCase();
+          terminalFocused = frontApp === "ghostty";
+        } catch {
+          // Can't determine — assume focused to preserve existing behavior
+          terminalFocused = true;
+        }
+      } else {
+        // No frontmost probe off-macOS; presence = this client's last keystroke inside
+        // the window. "unknown" maps to focused — same failure direction as the darwin
+        // catch above (a broken probe must not spray attention/pushes at the active pane).
+        terminalFocused = classifyActivity([Number(clientActivity)], Date.now()) !== "absent";
       }
 
       // Only auto-clear ⚡ when the user is actually looking at the terminal

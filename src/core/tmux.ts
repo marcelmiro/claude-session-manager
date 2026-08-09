@@ -2,6 +2,7 @@ import type { PaneInfo } from "../types.ts";
 import { isPermissionPrompt } from "./status";
 import { retryOnDeadline } from "./deadline";
 import { USER_SHELL } from "./launch-command";
+import { clientActivityPresence } from "./presence";
 
 /**
  * Get the "main" tmux session name (i.e. not the popup session).
@@ -411,6 +412,11 @@ export async function atMacFocus(paneId: string): Promise<boolean> {
     if (!session) return false;
     const clients = (await Bun.$`tmux list-clients -t ${session}`.quiet().text()).trim();
     if (!clients) return false;
+    if (process.platform !== "darwin") {
+      // No frontmost probe off-macOS: presence = a client of this session typed within
+      // the window. Only a positive "present" releases — "unknown" keeps holding.
+      return (await clientActivityPresence(session)) === "present";
+    }
     const front = (await Bun.$`lsappinfo front`.quiet().text()).trim();
     if (!front) return false;
     const name = (await Bun.$`lsappinfo info -only name ${front}`.quiet().text()).trim();
