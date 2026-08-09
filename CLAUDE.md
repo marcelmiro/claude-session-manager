@@ -23,6 +23,8 @@ Entry: `bin/csm.ts` (CLI router) → `src/index.ts` (TUI) or `src/cli.ts` (subco
 
 The mobile bridge (`csm bridge`) runs as a long-lived detached daemon on `127.0.0.1:8473` (proxied to the phone via `tailscale serve`). **When a change needs a restart, restart it yourself — don't just tell the user.** This is a routine, durably-authorized action on the local machine; treat it as approved.
 
+> On a Linux VM host the bridge is a systemd user unit instead: `systemctl --user restart csm-bridge`, logs via `journalctl --user -u csm-bridge` ([ADR 16](docs/adr/0016-systemd-units-replace-launchd.md), `deploy/`). The procedure below is the darwin-hosted form.
+
 - **When a restart IS needed:** any change to `src/bridge/server.ts` or the `core/` functions it imports — the server code is loaded into the running Bun process.
 - **When it is NOT needed:** changes to `src/bridge/public/*` (`app.js`, `index.html`/CSS). Those are served fresh (`cache-control: no-cache`); the user just refreshes/reopens the page on the phone.
 - **How to restart** (preserve the token + the loopback bind so `tailscale serve` keeps working):
@@ -322,6 +324,8 @@ set -g @resurrect-hook-post-restore-all 'csm restore-sessions'
 ```
 
 If using tmux-continuum for auto-save, the save hook runs automatically on each periodic save. The restore hook runs when `@continuum-restore 'on'` triggers a restore on server start.
+
+`@resurrect-processes` must never include `claude`: resurrect's process restore spawns a *fresh* claude while `csm restore-sessions` resumes the real one — two processes fighting over one transcript ([ADR 16](docs/adr/0016-systemd-units-replace-launchd.md)). On a VM host, tmux itself runs as a systemd user unit whose `ExecStop` triggers `csm save-sessions` (`deploy/units/tmux.service`).
 
 ### Commands
 
