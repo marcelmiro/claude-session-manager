@@ -75,8 +75,8 @@ export async function findClaudeProcesses(): Promise<ClaudeProcess[]> {
       // Filter out the grep process itself (if somehow captured)
       if (command.includes("grep")) continue;
 
-      // Skip entries with no associated TTY
-      if (tty === "??") continue;
+      // Skip entries with no associated TTY (macOS ps prints "??", Linux prints "?")
+      if (tty === "??" || tty === "?") continue;
 
       // Prefer an id CSM dictated with `--session-id` — authoritative and instant for
       // both a CSM fork (whose hook records the PARENT id) and a CSM-created session,

@@ -466,7 +466,7 @@ function isSubsequence(sub: string, str: string): boolean {
 // csm setup
 // ---------------------------------------------------------------------------
 
-const HOOK_VERSION = 13;
+const HOOK_VERSION = 14;
 
 // SessionStart pane→session mapper. Writes one file per pane (panes/<paneId> → sessionId)
 // atomically (temp+rename) — the hook OWNS the map, so there's no shared-file write race and
@@ -622,7 +622,7 @@ SESS=$(tmux display-message -p -t "\$TMUX_PANE" '#{session_name}' 2>/dev/null)
 # 2. Live bridge consumer: marker mtime <=40s (tolerates one missed 15s heartbeat).
 #    Stale/absent → nobody can answer → native widget, no long stall.
 M="\$HOME/.config/csm/bridge-consumer"
-MT=$(stat -f %m "\$M" 2>/dev/null || echo 0)
+MT=$(stat -c %Y "\$M" 2>/dev/null || stat -f %m "\$M" 2>/dev/null || echo 0)
 if [ "\$MT" = 0 ] || [ $(( $(date +%s) - MT )) -ge 40 ]; then exit 0; fi
 # 3. Focus (three-part): active window + attached client (cheap tmux), and only then
 #    the frontmost app (lsappinfo — no TCC prompt, unlike osascript). All three true
@@ -743,19 +743,30 @@ export async function setup(): Promise<void> {
     const existing = settings.hooks[event]
       .flatMap((entry: any) => (Array.isArray(entry.hooks) ? entry.hooks : []))
       .find((h: any) => typeof h.command === "string" && h.command.includes(path));
+    // Explicit `bash` + quoted path: Claude runs hook commands via `/bin/sh -c`, which is
+    // dash on Debian-family hosts — the scripts are bash, and a bare shebang-reliant path
+    // has been seen to fail there. Quoting keeps a path with spaces from silently exiting 127.
+    const desiredCommand = `bash "${path}"`;
     if (!existing) {
-      const hook: Record<string, unknown> = { type: "command", command: path };
+      const hook: Record<string, unknown> = { type: "command", command: desiredCommand };
       if (timeout !== undefined) hook.timeout = timeout;
       const entry: Record<string, unknown> = { hooks: [hook] };
       if (matcher !== undefined) entry.matcher = matcher; // omit matcher → all events/tools
       settings.hooks[event].push(entry);
       settingsChanged = true;
-    } else if (timeout !== undefined && existing.timeout !== timeout) {
+    } else {
       // Reconcile, don't just add: the registration is matched on command path, so an
-      // install from an older version keeps its stale timeout forever otherwise — and that
-      // timeout is the kill deadline the hook's own poll window has to stay inside.
-      existing.timeout = timeout;
-      settingsChanged = true;
+      // install from an older version keeps its stale command form / timeout forever
+      // otherwise — and that timeout is the kill deadline the hook's own poll window
+      // has to stay inside.
+      if (existing.command !== desiredCommand) {
+        existing.command = desiredCommand;
+        settingsChanged = true;
+      }
+      if (timeout !== undefined && existing.timeout !== timeout) {
+        existing.timeout = timeout;
+        settingsChanged = true;
+      }
     }
   }
 

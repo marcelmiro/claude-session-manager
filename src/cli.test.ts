@@ -1,7 +1,7 @@
 /**
  * `setup()` idempotency (Inc setup). Two runs under a temp $HOME must leave exactly
  * one CSM registration per event, preserve pre-existing user hooks + other settings
- * keys, and write the hook scripts stamped CSM_HOOK_VERSION=12.
+ * keys, and write the hook scripts stamped with the current CSM_HOOK_VERSION.
  *
  * `home` helper first — cli → hook-events → config freezes paths from $HOME; setup
  * itself re-reads homedir() at call time, so it targets the same temp HOME.
@@ -116,13 +116,49 @@ test("setup() repairs a stale timeout on an already-registered hook", async () =
   expect(csmEntries(after, "PreToolUse")).toHaveLength(2); // repaired, not duplicated
 });
 
-test("setup() writes the four hook scripts stamped CSM_HOOK_VERSION=13", async () => {
+test("setup() writes the four hook scripts stamped CSM_HOOK_VERSION=14", async () => {
   await setup();
   for (const name of ["session-start", "event", "pretooluse", "question-pretooluse"]) {
     const path = `${hooksDir}/${name}.sh`;
     expect(existsSync(path)).toBe(true);
-    expect(readFileSync(path, "utf8")).toContain("# CSM_HOOK_VERSION=13");
+    expect(readFileSync(path, "utf8")).toContain("# CSM_HOOK_VERSION=14");
   }
+});
+
+test("setup() registers hook commands as explicit quoted bash invocations", async () => {
+  // Claude runs hook commands via /bin/sh -c — dash on Debian-family hosts — so the
+  // registration must name bash itself, and quote the path against spaces.
+  await setup();
+  const settings = JSON.parse(readFileSync(settingsPath, "utf8"));
+  for (const event of EVENTS) {
+    for (const entry of csmEntries(settings, event)) {
+      for (const h of entry.hooks) {
+        expect(h.command).toMatch(/^bash "[^"]+\.sh"$/);
+      }
+    }
+  }
+});
+
+test("setup() upgrades a bare-path command from an older install to the bash form", async () => {
+  await setup();
+  const settings = JSON.parse(readFileSync(settingsPath, "utf8"));
+  const entry = csmEntry(settings, "SessionStart", "/session-start.sh");
+  entry.hooks[0].command = `${hooksDir}/session-start.sh`; // as an older version registered it
+  writeFileSync(settingsPath, JSON.stringify(settings, null, 2));
+
+  await setup();
+  const after = JSON.parse(readFileSync(settingsPath, "utf8"));
+  const upgraded = csmEntry(after, "SessionStart", "/session-start.sh");
+  expect(upgraded.hooks[0].command).toBe(`bash "${hooksDir}/session-start.sh"`);
+  expect(csmEntries(after, "SessionStart")).toHaveLength(1); // upgraded, not duplicated
+});
+
+test("question hook reads marker mtime via the GNU→BSD stat fallback chain", async () => {
+  // `stat -f %m` is BSD-only; on GNU hosts it fails to `echo 0`, which reads as a
+  // dead bridge consumer and silently disables the question intercept entirely.
+  await setup();
+  const q = readFileSync(`${hooksDir}/question-pretooluse.sh`, "utf8");
+  expect(q).toContain('stat -c %Y "$M" 2>/dev/null || stat -f %m "$M" 2>/dev/null || echo 0');
 });
 
 test("AskUserQuestion is delegated: pretooluse.sh exits for it, question-pretooluse.sh intercepts", async () => {

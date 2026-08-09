@@ -13,7 +13,7 @@ import { loadState, saveState, loadPaneSessions } from "./core/state";
 import { listPendingApprovals, decideApproval, decideQuestion, buildAnswersMap } from "./core/approval";
 import { syncWindowPrefix, buildBaseName, abbreviateRepo } from "./core/notifications";
 import { discoverRepos, listBranches, fetchRepo, getDefaultBranch, branchCheckedOutPath } from "./core/git";
-import { buildLaunchCommand } from "./core/launch-command";
+import { buildLaunchCommand, USER_SHELL } from "./core/launch-command";
 import { initWizard, renderWizard, renderWizardPreview, renderWizardStatusBar, handleWizardKey, setWizardBranches } from "./ui/wizard";
 import { loadAllSessions, searchEntries, type SearchEntry } from "./core/search";
 import { recoverWorktreeTranscript } from "./core/recover";
@@ -658,8 +658,8 @@ async function handleResume() {
   const repoName = effectivePath.split("/").filter(Boolean).pop() ?? "claude";
   cleanup();
   try {
-    const cmd = `claude --resume=${session.id}; exec zsh -l`;
-    await Bun.$`tmux new-window -a -t ${targetSession} -n ${repoName} -c ${effectivePath} zsh -c ${cmd}`.quiet();
+    const cmd = `claude --resume=${session.id}; exec ${USER_SHELL} -l`;
+    await Bun.$`tmux new-window -a -t ${targetSession} -n ${repoName} -c ${effectivePath} ${USER_SHELL} -c ${cmd}`.quiet();
   } catch (e) {
     console.error(`csm: failed to resume session: ${e instanceof Error ? e.message : e}`);
     process.exit(1);
@@ -751,8 +751,8 @@ async function handleFork() {
   cleanup();
   try {
     const forkId = crypto.randomUUID();
-    const cmd = `claude --session-id ${forkId} --resume=${sourceId} --fork-session; exec zsh -l`;
-    await Bun.$`tmux new-window -a -t ${targetSession} -n ${forkName} -c ${effectivePath} zsh -c ${cmd}`.quiet();
+    const cmd = `claude --session-id ${forkId} --resume=${sourceId} --fork-session; exec ${USER_SHELL} -l`;
+    await Bun.$`tmux new-window -a -t ${targetSession} -n ${forkName} -c ${effectivePath} ${USER_SHELL} -c ${cmd}`.quiet();
   } catch (e) {
     console.error(`csm: failed to fork session: ${e instanceof Error ? e.message : e}`);
     process.exit(1);
@@ -1219,8 +1219,8 @@ async function handleSearchEnter() {
   globalSearch = null;
   cleanup();
   try {
-    const cmd = `claude --resume=${entry.sessionId}; exec zsh -l`;
-    await Bun.$`tmux new-window -a -t ${targetSession} -n ${repoName} -c ${effectivePath} zsh -c ${cmd}`.quiet();
+    const cmd = `claude --resume=${entry.sessionId}; exec ${USER_SHELL} -l`;
+    await Bun.$`tmux new-window -a -t ${targetSession} -n ${repoName} -c ${effectivePath} ${USER_SHELL} -c ${cmd}`.quiet();
   } catch (e) {
     console.error(`csm: failed to resume session: ${e instanceof Error ? e.message : e}`);
     process.exit(1);
@@ -1584,10 +1584,11 @@ async function handleWizardLaunch(
       // Simple case: launch claude directly as the window command (no shell race)
       await Bun.$`tmux new-window -a -t ${targetSession} -n ${windowName} -c ${repo.path} claude`.quiet();
     } else {
-      // Compound command: run via zsh -c to avoid send-keys race with shell init
-      // (oh-my-zsh prompts can swallow keystrokes). exec zsh -l keeps shell open after claude exits.
-      const wrapped = `${cmd}; exec zsh -l`;
-      await Bun.$`tmux new-window -a -t ${targetSession} -n ${windowName} -c ${repo.path} zsh -c ${wrapped}`.quiet();
+      // Compound command: run via the user's shell (`-c`) to avoid send-keys race with shell
+      // init (prompt frameworks can swallow keystrokes). The trailing exec keeps the shell
+      // open after claude exits.
+      const wrapped = `${cmd}; exec ${USER_SHELL} -l`;
+      await Bun.$`tmux new-window -a -t ${targetSession} -n ${windowName} -c ${repo.path} ${USER_SHELL} -c ${wrapped}`.quiet();
     }
   } catch {
     // ignore — window may already exist
