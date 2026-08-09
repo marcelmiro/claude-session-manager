@@ -1,0 +1,16 @@
+[Unit]
+Description=Alert when EBS snapshots go stale
+
+[Service]
+Type=oneshot
+# Newest snapshot of any csm-backup volume must be younger than the staleness
+# window (5h ≈ one missed 4-hourly slot + margin). Region/instance discovered via
+# IMDSv2. A silent snapshot failure is the standard way backups die — this pushes.
+ExecStart=/bin/bash -c '\
+  TOK=$(curl -sX PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 60"); \
+  REGION=$(curl -s -H "X-aws-ec2-metadata-token: $TOK" http://169.254.169.254/latest/meta-data/placement/region); \
+  LATEST=$(aws ec2 describe-snapshots --region "$REGION" --owner-ids self \
+    --filters Name=tag:csm-backup,Values=true --query "max_by(Snapshots,&StartTime).StartTime" --output text); \
+  if [ "$LATEST" = "None" ] || [ -z "$LATEST" ]; then csm notify "EBS snapshots: none found for csm-backup volumes"; exit 0; fi; \
+  AGE=$(( $(date +%s) - $(date -d "$LATEST" +%s) )); \
+  if [ "$AGE" -gt 18000 ]; then csm notify "EBS snapshots stale: newest is $((AGE/3600))h old"; fi'

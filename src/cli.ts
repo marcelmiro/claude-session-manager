@@ -1113,3 +1113,30 @@ export async function questionHook(): Promise<void> {
   rmSync(pendingFile, { force: true });
   process.exit(0); // timeout → neutral → native-widget floor
 }
+
+// ---------------------------------------------------------------------------
+// csm notify <message> — broadcast a web push to every subscribed device
+// ---------------------------------------------------------------------------
+
+/**
+ * Operational alert channel for headless automation (e.g. a systemd OnFailure /
+ * staleness timer pushing "backups are stale" to the phone). Broadcasts to ALL
+ * subscribed devices — deliberately unlike session pushes, which target only the
+ * device that drove the turn: an ops failure has no driving device.
+ */
+export async function notify(message: string): Promise<void> {
+  if (!message.trim()) {
+    console.error("usage: csm notify <message>");
+    process.exit(2);
+  }
+  const { listDeviceIds, sendWebPush } = await import("./core/web-push");
+  const ids = listDeviceIds();
+  if (ids.length === 0) {
+    console.error("csm: no push subscriptions — nothing to notify");
+    process.exit(1);
+  }
+  // sessionId doubles as the notification tag: a stable value collapses repeats of
+  // the same alert instead of stacking them.
+  await Promise.all(ids.map((id) => sendWebPush(id, { title: "CSM", body: message, sessionId: "csm-notify" })));
+  console.log(`csm: pushed to ${ids.length} device(s)`);
+}
