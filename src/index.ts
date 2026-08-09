@@ -14,6 +14,7 @@ import { listPendingApprovals, decideApproval, decideQuestion, buildAnswersMap }
 import { syncWindowPrefix, buildBaseName, abbreviateRepo } from "./core/notifications";
 import { discoverRepos, listBranches, fetchRepo, getDefaultBranch, branchCheckedOutPath } from "./core/git";
 import { buildLaunchCommand, USER_SHELL } from "./core/launch-command";
+import { copyToClipboard } from "./core/clipboard";
 import { initWizard, renderWizard, renderWizardPreview, renderWizardStatusBar, handleWizardKey, setWizardBranches } from "./ui/wizard";
 import { loadAllSessions, searchEntries, type SearchEntry } from "./core/search";
 import { recoverWorktreeTranscript } from "./core/recover";
@@ -210,13 +211,10 @@ async function handleCopy() {
     flashStatusMessage(`{${C.dim}-fg}Nothing to copy{/${C.dim}-fg}`);
     return;
   }
-  try {
-    const proc = Bun.spawn(["pbcopy"], { stdin: "pipe" });
-    proc.stdin.write(text);
-    proc.stdin.end();
-    await proc.exited;
+  const ok = await copyToClipboard(text);
+  if (ok) {
     flashStatusMessage(`{${C.mint}-fg}Copied to clipboard{/${C.mint}-fg}`);
-  } catch {
+  } else {
     flashStatusMessage(`{${C.red}-fg}Copy failed{/${C.red}-fg}`);
   }
 }
