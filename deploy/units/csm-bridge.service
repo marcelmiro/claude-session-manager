@@ -7,6 +7,9 @@ StartLimitIntervalSec=300
 StartLimitBurst=5
 
 [Service]
+# csm's shebang resolves bun via env — the unit must carry the PATH itself (see
+# tmux.service for why environment.d can't be trusted here).
+Environment=PATH=%h/.bun/bin:%h/.local/bin:/usr/local/bin:/usr/bin:/bin
 ExecStart=%h/.bun/bin/csm bridge
 EnvironmentFile=%h/.config/csm/bridge.env
 Restart=always

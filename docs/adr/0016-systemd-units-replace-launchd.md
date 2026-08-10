@@ -36,9 +36,11 @@ nobody watching.
 - The CLAUDE.md "bridge restarts" procedure becomes
   `systemctl --user restart csm-bridge` on the VM; the nohup/token-recovery dance
   applies only to a darwin-hosted bridge.
-- User units get no login-shell PATH; `provision.sh` writes
-  `~/.config/environment.d/50-csm-path.conf` with the literal expanded PATH
-  (environment.d has no variable expansion).
+- User units get no login-shell PATH, and `environment.d` is only read when the
+  user manager starts — a file written mid-provisioning is invisible until reboot
+  (hit live: the bridge crash-looped on `env: 'bun': No such file`). The units
+  carry `Environment=PATH=%h/.bun/bin:…` themselves, so install order can't
+  break them.
 
 ## Rejected
 

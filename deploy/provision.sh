@@ -163,17 +163,6 @@ if [ -d /run/systemd/system ]; then
     fi
   done
 
-  # User units get none of the login shell's PATH. environment.d has no variable
-  # expansion, so the PATH is written out literally for this user's home.
-  ENVD="$HOME/.config/environment.d"
-  mkdir -p "$ENVD"
-  ENV_FILE="$ENVD/50-csm-path.conf"
-  DESIRED_PATH="PATH=$HOME/.bun/bin:$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin"
-  if [ ! -f "$ENV_FILE" ] || [ "$(cat "$ENV_FILE")" != "$DESIRED_PATH" ]; then
-    note "writing $ENV_FILE"
-    printf '%s\n' "$DESIRED_PATH" > "$ENV_FILE"
-  fi
-
   # Bridge token: generated once, consumed by csm-bridge.service via EnvironmentFile.
   BRIDGE_ENV="$HOME/.config/csm/bridge.env"
   if [ ! -f "$BRIDGE_ENV" ]; then

@@ -3,6 +3,10 @@ Description=tmux server (hosts all Claude Code sessions)
 
 [Service]
 Type=forking
+# User units get no login-shell PATH, and environment.d is only read when the user
+# manager starts — a file written later is invisible until reboot. The units carry
+# their PATH themselves so install order can never break them (%h = user home).
+Environment=PATH=%h/.bun/bin:%h/.local/bin:/usr/local/bin:/usr/bin:/bin
 ExecStart=/usr/bin/tmux new-session -d -s main
 # Save the pane→session map on the way down so restore-sessions can resume every
 # Claude session after the reboot. csm resolves via environment.d PATH.
