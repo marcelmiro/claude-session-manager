@@ -7,7 +7,15 @@ Type=forking
 # manager starts — a file written later is invisible until reboot. The units carry
 # their PATH themselves so install order can never break them (%h = user home).
 Environment=PATH=%h/.bun/bin:%h/.local/bin:/usr/local/bin:/usr/bin:/bin
-ExecStart=/usr/bin/tmux new-session -d -s main
+# has-session guard: Ubuntu's tmux is systemd-aware and a server surviving a failed
+# start attempt escapes into its own scope — a bare new-session then fails with
+# "duplicate session" forever.
+ExecStart=/bin/bash -c 'tmux has-session -t main 2>/dev/null || tmux new-session -d -s main'
+# Restore is owned HERE, not by continuum's restore-on-server-start: that path races
+# the forking handshake under systemd (tmux-continuum #110) and killed the server.
+# resurrect recreates the saved layout, then its post-restore hook runs
+# `csm restore-sessions` to resume each pane's Claude session.
+ExecStartPost=/bin/bash -c 'sleep 1; %h/.tmux/plugins/tmux-resurrect/scripts/restore.sh || true'
 # Save the pane→session map on the way down so restore-sessions can resume every
 # Claude session after the reboot. csm resolves via environment.d PATH.
 ExecStop=/bin/bash -c 'csm save-sessions; /usr/bin/tmux kill-server'

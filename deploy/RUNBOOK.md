@@ -7,8 +7,11 @@ table in the plan (copy vs regenerate vs discard); decisions: ADRs 14–16.
 ## A. Launch (AWS, eu-central-1)
 
 1. Instance: **r7i.2xlarge**, Ubuntu 24.04 LTS x86 AMI, EBS-only (no instance
-   store). gp3 **800 GB**, 6,000 IOPS / 250 MB/s. Security group: **no inbound**
-   except UDP 41641 (Tailscale direct); all egress open.
+   store). gp3 sized ~3× the measured data (63 GB → **200 GB**, baseline IOPS;
+   growth is one online `modify-volume`, shrink is impossible). Security group:
+   **no inbound** except UDP 41641 (Tailscale direct); all egress open — plus a
+   TEMPORARY tcp/22 rule from your current IP for phases A–C, revoked once
+   Tailscale SSH works.
 2. IMDSv2: `--metadata-options "HttpTokens=required,HttpPutResponseHopLimit=2"`
    (plain-API r7i launches still default to optional).
 3. First boot, as `ubuntu`:

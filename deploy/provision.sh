@@ -191,6 +191,19 @@ if [ ! -f "$HOME/.tmux.conf" ] || ! grep -qF "$SOURCE_LINE" "$HOME/.tmux.conf"; 
   printf '\n%s\n' "$SOURCE_LINE" >> "$HOME/.tmux.conf"
 fi
 
+# ── 9b. tmux persistence plugins ───────────────────────────────────────────────
+# resurrect (layout save/restore) + continuum (restore on server start). The csm
+# save/restore hooks are wired in tmux-vm.conf; restore fires when the systemd
+# unit starts the server after a reboot.
+PLUGIN_DIR="$HOME/.tmux/plugins"
+mkdir -p "$PLUGIN_DIR"
+for plugin in tmux-resurrect tmux-continuum; do
+  if [ ! -d "$PLUGIN_DIR/$plugin" ]; then
+    note "cloning $plugin"
+    git clone -q --depth 1 "https://github.com/tmux-plugins/$plugin" "$PLUGIN_DIR/$plugin"
+  fi
+done
+
 # ── 10. Tailscale ──────────────────────────────────────────────────────────────
 if ! have tailscale; then
   note "installing tailscale"
