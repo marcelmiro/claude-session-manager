@@ -8,7 +8,9 @@
  * wake with no terminal open would silently not fire from there.
  */
 import type { DispositionRow, InboxStore } from "./inbox-store";
-import { wakeBanner } from "./inbox-model";
+import { loadConfig } from "./config";
+import { snoozeSpan, wakeBanner } from "./inbox-model";
+import { sendNativeNotification } from "./notifications";
 import { resolveRestoreTarget } from "./resurrect";
 import { loadState, saveState, loadPaneSessions } from "./state";
 import { detectStatus } from "./status";
@@ -143,6 +145,8 @@ async function spawnWakeWindow(
  */
 export async function wakePass(store: InboxStore, now = Date.now()): Promise<void> {
   const due = dueWakes(store.dispositions(), store.archivedAt(), await liveSessionIds(), now);
+  if (!due.length) return;
+  const config = await loadConfig();
   for (const w of due) {
     if (!store.markAutoResumed(w.sessionId, now)) continue; // another waker claimed it
     try {
@@ -156,7 +160,18 @@ export async function wakePass(store: InboxStore, now = Date.now()): Promise<voi
         wakeBanner(w.snoozedAt, now),
       );
       if (!win) continue;
-      await stampWakeAttention(win.paneId);
+      const stamped = await stampWakeAttention(win.paneId);
+      // banner tier: a wake is an alarm the user set, so it alerts like any
+      // attention event. Only once the session is genuinely ready — a resume
+      // that never boots must not announce itself. No Web Push (ADR 0013
+      // addendum 2: deferred until an inbox surface exists in portkey).
+      if (stamped && config.nativeNotification) {
+        sendNativeNotification(
+          `☾ Woke — ${row.name ?? row.repo ?? w.sessionId.slice(0, 8)}`,
+          `snoozed ${snoozeSpan(w.snoozedAt, now)} ago — due now`,
+          win,
+        );
+      }
     } catch {
       // best-effort per session; the claim stands (no wake retry storm), the
       // row still resurfaces in Needs You via the sidebar's woken derivation

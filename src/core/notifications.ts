@@ -155,7 +155,7 @@ function hasTerminalNotifier(): boolean {
  *  Ghostty and switch to the correct tmux window/pane.
  *  Falls back to osascript (no click action).
  *  When Ghostty is frontmost, plays sound only (no visual notification). */
-function sendNativeNotification(
+export function sendNativeNotification(
   title: string,
   body: string,
   pane?: { sessionName: string; windowIndex: number; paneId: string },
