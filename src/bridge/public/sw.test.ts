@@ -113,7 +113,9 @@ test("a push shows a notification tagged with its session", async () => {
   await h.dispatch("push", push("s1"));
 
   expect(h.shown).toHaveLength(1);
-  expect(h.shown[0]!.tag).toBe("s1");
+  // Session id prefix + "|ts" uniquifier: unique so iOS always presents (same-tag
+  // replacement is silent), prefixed so the page can attribute taps.
+  expect(h.shown[0]!.tag).toMatch(/^s1\|\d+$/);
   expect(h.shown[0]!.data).toEqual({ sessionId: "s1" });
 });
 
