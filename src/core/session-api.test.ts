@@ -434,6 +434,15 @@ test("flattenStyled: dim persists across a wrapped line until reset", () => {
   expect(flattenStyled("❯ \x1b[2mlong ghost\nwrapped tail\x1b[0m end", true)).toBe("❯ \n end");
 });
 
+test("flattenStyled: extended-color sub-params never read as dim", () => {
+  // 38;2;r;g;b (truecolor) and 38;5;2 (256-color) both contain a literal "2"
+  // param that is a color component, not SGR dim — text after them must survive
+  // the dropDim view, and a component of 22 must not end a real dim span.
+  expect(flattenStyled("\x1b[38;2;255;199;153mheader\x1b[39m\n❯ typed draft", true)).toBe("header\n❯ typed draft");
+  expect(flattenStyled("\x1b[48;5;2mstatus\x1b[0m\n❯ typed draft", true)).toBe("status\n❯ typed draft");
+  expect(flattenStyled("❯ \x1b[2mghost \x1b[38;5;22mstill ghost\x1b[0m typed", true)).toBe("❯  typed");
+});
+
 test("flattenStyled strips OSC 8 hyperlinks without eating following text", () => {
   const cap = "\x1b]8;id=1;https://example.com\x1b\\/rc\x1b]8;;\x1b\\ tail";
   expect(flattenStyled(cap, true)).toBe("/rc tail");

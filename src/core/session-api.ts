@@ -1446,10 +1446,15 @@ export function flattenStyled(styled: string, dropDim: boolean): string {
       const rest = styled.slice(i);
       const sgr = rest.match(/^\x1b\[([0-9;]*)m/);
       if (sgr) {
-        for (const p of sgr[1]!.split(";")) {
+        const params = sgr[1]!.split(";");
+        for (let j = 0; j < params.length; j++) {
+          const p = params[j]!;
           if (p === "" || p === "0") dim = false;
           else if (p === "2") dim = true;
           else if (p === "22") dim = false; // "normal intensity" — ends dim without a full reset
+          // Extended color: 38/48 consume sub-params (5;n or 2;r;g;b). Without
+          // skipping them, the "2" in a truecolor sequence reads as SGR dim.
+          else if (p === "38" || p === "48") j += params[j + 1] === "2" ? 4 : params[j + 1] === "5" ? 2 : 0;
         }
         i += sgr[0].length - 1;
         continue;
