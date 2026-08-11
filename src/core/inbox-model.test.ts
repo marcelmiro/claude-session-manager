@@ -55,3 +55,90 @@ describe("wakeBanner", () => {
     );
   });
 });
+
+// ── section derivation ─────────────────────────────────────────────────────
+
+import { deriveSections, effectiveSince, isWoken, sectionOf, type InboxSession } from "./inbox-model";
+
+const M = 60_000;
+const H = 3_600_000;
+const D = 86_400_000;
+
+function sess(over: Partial<InboxSession>): InboxSession {
+  return { id: "x", repo: "csm", name: "n", reason: "turn-done", since: NOW - H, ...over };
+}
+
+describe("sectionOf", () => {
+  test("archived <24h = done, >24h = off the sidebar", () => {
+    expect(sectionOf(sess({ archivedAt: NOW - H }), NOW)).toBe("done");
+    expect(sectionOf(sess({ archivedAt: NOW - D - 1 }), NOW)).toBeNull();
+  });
+
+  test("disposition parks; a due snooze reads as needs-you (woken)", () => {
+    expect(sectionOf(sess({ disposition: { kind: "blocked", note: "" } }), NOW)).toBe("parked");
+    expect(sectionOf(sess({ disposition: { kind: "snoozed", until: NOW + H } }), NOW)).toBe("parked");
+    expect(sectionOf(sess({ disposition: { kind: "snoozed", until: NOW - M } }), NOW)).toBe("needs-you");
+  });
+
+  test("running until finishAt passes, then needs-you", () => {
+    expect(sectionOf(sess({ running: { finishAt: NOW + M } }), NOW)).toBe("running");
+    expect(sectionOf(sess({ running: { finishAt: NOW - M } }), NOW)).toBe("needs-you");
+  });
+
+  test("archived wins over disposition", () => {
+    expect(sectionOf(sess({ archivedAt: NOW - M, disposition: { kind: "snoozed", until: NOW - M } }), NOW)).toBe("done");
+  });
+});
+
+describe("effectiveSince", () => {
+  test("ages from the derived flip, not the stale since", () => {
+    expect(effectiveSince(sess({ running: { finishAt: NOW - 5 * M } }), NOW)).toBe(NOW - 5 * M);
+    expect(effectiveSince(sess({ disposition: { kind: "snoozed", until: NOW - 2 * M } }), NOW)).toBe(NOW - 2 * M);
+    expect(effectiveSince(sess({}), NOW)).toBe(NOW - H);
+  });
+});
+
+describe("isWoken", () => {
+  test("due snooze only, never archived", () => {
+    expect(isWoken(sess({ disposition: { kind: "snoozed", until: NOW - 1 } }), NOW)).toBe(true);
+    expect(isWoken(sess({ disposition: { kind: "snoozed", until: NOW + 1 } }), NOW)).toBe(false);
+    expect(isWoken(sess({ archivedAt: NOW, disposition: { kind: "snoozed", until: NOW - 1 } }), NOW)).toBe(false);
+  });
+});
+
+describe("deriveSections", () => {
+  test("needs-you oldest-ignored first; running longest first (script anchor)", () => {
+    const sections = deriveSections(
+      [
+        sess({ id: "young", since: NOW - M }),
+        sess({ id: "old", since: NOW - D }),
+        sess({ id: "run-new", since: NOW - 2 * M, running: { finishAt: NOW + H } }),
+        sess({ id: "run-script", since: NOW - M, running: { finishAt: NOW + H }, script: true, scriptSince: NOW - H }),
+      ],
+      NOW,
+    );
+    expect(sections.needsYou.map((s) => s.id)).toEqual(["old", "young"]);
+    expect(sections.running.map((s) => s.id)).toEqual(["run-script", "run-new"]);
+  });
+
+  test("parked: snoozed before blocked; wake soonest first; blocked least-blocked first", () => {
+    const sections = deriveSections(
+      [
+        sess({ id: "blk-old", since: NOW - 3 * D, disposition: { kind: "blocked", note: "" } }),
+        sess({ id: "blk-new", since: NOW - D, disposition: { kind: "blocked", note: "" } }),
+        sess({ id: "snz-late", disposition: { kind: "snoozed", until: NOW + 3 * D } }),
+        sess({ id: "snz-soon", disposition: { kind: "snoozed", until: NOW + H } }),
+      ],
+      NOW,
+    );
+    expect(sections.parked.map((s) => s.id)).toEqual(["snz-soon", "snz-late", "blk-new", "blk-old"]);
+  });
+
+  test("done newest first", () => {
+    const sections = deriveSections(
+      [sess({ id: "d1", archivedAt: NOW - 3 * H }), sess({ id: "d2", archivedAt: NOW - H })],
+      NOW,
+    );
+    expect(sections.done.map((s) => s.id)).toEqual(["d2", "d1"]);
+  });
+});
