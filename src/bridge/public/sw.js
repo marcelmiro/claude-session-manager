@@ -20,12 +20,20 @@ self.addEventListener("push", (event) => {
   const sessionId = p.sessionId || "";
   event.waitUntil(
     (async () => {
+      const tag = sessionId || "csm";
+      // One notification per session — but never via same-tag REPLACEMENT: WebKit
+      // ignores `renotify` (Chromium-only), so a replaced notification updates the
+      // shade silently — no banner, no sound — and only the session's first push
+      // ever alerts. Close the old one, then show fresh: a fresh show always
+      // presents.
+      try {
+        for (const n of await self.registration.getNotifications({ tag })) n.close();
+      } catch {
+        /* worst case: iOS replaces silently, as before */
+      }
       await self.registration.showNotification(p.title || "portkey", {
         body: p.body || "",
-        // One notification per session — a later push replaces the earlier one, so
-        // the shade always shows each session's LATEST state (still buzzes via renotify).
-        tag: sessionId || "csm",
-        renotify: true,
+        tag,
         data: { sessionId },
       });
       // Badge = sessions currently notified (tag-deduped). Cleared by the app on focus.
