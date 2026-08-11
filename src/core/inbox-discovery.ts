@@ -168,6 +168,8 @@ export async function discoveryTick(store: InboxStore): Promise<void> {
  * until the chassis swap retires it.
  */
 export async function prototypeRefresherAlive(): Promise<boolean> {
+  // CSM_HOME = test seam: a scratch home never defers to the real prototype.
+  if (process.env.CSM_HOME) return false;
   try {
     const pid = Number(await Bun.file("/tmp/csm-sidebar-refresher-default.pid").text());
     if (pid > 0) {

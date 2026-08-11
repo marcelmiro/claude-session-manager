@@ -1222,6 +1222,11 @@ export async function daemon(): Promise<void> {
     return;
   }
 
+  // The sidebar renderer runs inside this process (own 1s loop + unix
+  // socket); it stands down by itself while the prototype chassis is live.
+  const { runSidebarRenderer } = await import("./sidebar/renderer");
+  runSidebarRenderer();
+
   let tick = 0;
   while (true) {
     try {
@@ -1251,4 +1256,83 @@ export async function daemon(): Promise<void> {
     tick++;
     await Bun.sleep(3_000);
   }
+}
+
+// ---------------------------------------------------------------------------
+// csm sidebar-pane / sidebar-ctl  (M2 single-renderer chassis)
+// ---------------------------------------------------------------------------
+
+/**
+ * Dumb sidebar pane stub. The daemon's renderer paints this pane's tty from
+ * outside; all this process does is raw-mode the tty so keys pass through
+ * unrendered, and relay every stdin byte to the renderer's unix socket
+ * (retry-connect forever — the daemon may restart under us).
+ */
+export async function sidebarPane(): Promise<void> {
+  // the renderer passes its socket via -e on split-window — the tmux server's
+  // env (which we otherwise inherit) may disagree with the daemon's
+  const sock = process.env.CSM_SIDEBAR_SOCK ?? `${PATHS.dir}/sidebar.sock`;
+  const paneId = process.env.TMUX_PANE ?? "";
+  Bun.spawnSync(["stty", "raw", "-echo"], { stdin: "inherit" });
+
+  let conn: Awaited<ReturnType<typeof Bun.connect>> | null = null;
+  const connect = async () => {
+    while (!conn) {
+      try {
+        conn = await Bun.connect({
+          unix: sock,
+          socket: {
+            data() {},
+            error() {},
+            close() {
+              conn = null;
+              void connect();
+            },
+          },
+        });
+        conn.write(`hello ${paneId}\n`);
+      } catch {
+        await Bun.sleep(1000);
+      }
+    }
+  };
+  void connect();
+
+  process.stdin.on("data", (chunk: Buffer) => {
+    try {
+      conn?.write(`in ${chunk.toString("base64")}\n`);
+    } catch {}
+  });
+  // keep alive; the renderer kills this pane when the sidebar goes away
+  setInterval(() => {}, 1 << 30);
+}
+
+/** One-shot control message to the renderer (M-s focus / M-S toggle bindings). */
+export async function sidebarCtl(cmd: string | undefined, paneId: string | undefined): Promise<void> {
+  if ((cmd !== "focus" && cmd !== "toggle") || !paneId) return;
+  const sock = `${PATHS.dir}/sidebar.sock`;
+  try {
+    await new Promise<void>((resolve) => {
+      Bun.connect({
+        unix: sock,
+        socket: {
+          open(s) {
+            s.write(`${cmd} ${paneId}\n`);
+            s.flush();
+            setTimeout(() => {
+              s.end();
+              resolve();
+            }, 50);
+          },
+          data() {},
+          error() {
+            resolve();
+          },
+          close() {
+            resolve();
+          },
+        },
+      }).catch(() => resolve());
+    });
+  } catch {}
 }
