@@ -172,7 +172,15 @@ async function main(): Promise<void> {
   let activeSession: string | undefined;
   let terminalFocused = false;
   try {
-    const client = (await Bun.$`tmux list-clients -F '#{client_name}'`.quiet().text()).trim().split("\n")[0];
+    // Most recently active client decides presence AND supplies the viewed window.
+    // With 2+ clients attached (desk + a stray phone SSH), an arbitrary pick could
+    // read an idle client's activity as the user's — presence is max across clients.
+    const clients = (await Bun.$`tmux list-clients -F '#{client_activity} #{client_name}'`.quiet().text())
+      .trim()
+      .split("\n")
+      .filter(Boolean)
+      .sort((a, b) => Number(b.split(" ")[0]) - Number(a.split(" ")[0]));
+    const client = clients[0]?.slice(clients[0].indexOf(" ") + 1);
     if (client) {
       // client_activity leads the format (window_name may itself contain colons, so it
       // must stay the greedy tail) and rides the same display-message call — no extra fork.

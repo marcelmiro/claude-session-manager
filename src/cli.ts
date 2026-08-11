@@ -467,7 +467,7 @@ function isSubsequence(sub: string, str: string): boolean {
 // csm setup
 // ---------------------------------------------------------------------------
 
-const HOOK_VERSION = 15;
+export const HOOK_VERSION = 16;
 
 // SessionStart pane→session mapper. Writes one file per pane (panes/<paneId> → sessionId)
 // atomically (temp+rename) — the hook OWNS the map, so there's no shared-file write race and
@@ -559,7 +559,10 @@ if [ -n "\$CL" ]; then
     exit 0
   else
     ACT=$(tmux list-clients -t "\$SESS" -F '#{client_activity}' 2>/dev/null | sort -rn | head -1)
-    if [ -z "\$ACT" ] || [ \$(( \$(date +%s) - ACT )) -le ${PRESENCE_WINDOW_S} ]; then
+    # Empty OR non-numeric activity is unreadable, not stale — arithmetic on a
+    # non-number would read as a huge age and flip the polarity to "away".
+    case "\$ACT" in ''|*[!0-9]*) exit 0 ;; esac
+    if [ \$(( \$(date +%s) - ACT )) -le ${PRESENCE_WINDOW_S} ]; then
       exit 0
     fi
   fi
@@ -659,7 +662,9 @@ if [ "\$WA" = "1" ] && [ -n "\$CL" ]; then
     ACT=$(tmux list-clients -t "\$SESS" -F '#{client_activity}' 2>/dev/null | sort -rn | head -1)
     # Fail toward native: unreadable activity ⇒ treat as focused (exit 0). Only
     # confirmed-stale input (user demonstrably away) lets the intercept proceed.
-    if [ -z "\$ACT" ] || [ \$(( \$(date +%s) - ACT )) -le ${PRESENCE_WINDOW_S} ]; then
+    # Non-numeric is unreadable, not stale — arithmetic on it reads as a huge age.
+    case "\$ACT" in ''|*[!0-9]*) exit 0 ;; esac
+    if [ \$(( \$(date +%s) - ACT )) -le ${PRESENCE_WINDOW_S} ]; then
       exit 0
     fi
   fi

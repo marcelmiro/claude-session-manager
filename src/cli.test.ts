@@ -11,7 +11,7 @@ import "../test/helpers/home";
 import { TEST_HOME } from "../test/helpers/home";
 import { test, expect, beforeEach } from "bun:test";
 import { mkdirSync, rmSync, writeFileSync, readFileSync, existsSync } from "node:fs";
-import { setup } from "./cli";
+import { setup, HOOK_VERSION } from "./cli";
 import { HOLD_WINDOW_MS } from "./core/approval";
 
 const claudeDir = `${TEST_HOME}/.claude`;
@@ -116,12 +116,12 @@ test("setup() repairs a stale timeout on an already-registered hook", async () =
   expect(csmEntries(after, "PreToolUse")).toHaveLength(2); // repaired, not duplicated
 });
 
-test("setup() writes the four hook scripts stamped CSM_HOOK_VERSION=15", async () => {
+test("setup() writes the four hook scripts stamped with the current CSM_HOOK_VERSION", async () => {
   await setup();
   for (const name of ["session-start", "event", "pretooluse", "question-pretooluse"]) {
     const path = `${hooksDir}/${name}.sh`;
     expect(existsSync(path)).toBe(true);
-    expect(readFileSync(path, "utf8")).toContain("# CSM_HOOK_VERSION=15");
+    expect(readFileSync(path, "utf8")).toContain(`# CSM_HOOK_VERSION=${HOOK_VERSION}`);
   }
 });
 
