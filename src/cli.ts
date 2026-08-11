@@ -1194,19 +1194,61 @@ export async function questionHook(): Promise<void> {
  */
 export async function daemon(): Promise<void> {
   const { InboxStore } = await import("./core/inbox-store");
-  const { wakePass } = await import("./core/inbox-wake");
-  const once = process.argv.includes("--once");
-  do {
+
+  // Internal: one discovery pass in a fresh process (the long-lived loop only
+  // spawns and reaps — in-process discovery leaks; see inbox-discovery.ts).
+  if (process.argv.includes("--discover-once")) {
+    const { discoveryTick } = await import("./core/inbox-discovery");
+    const store = new InboxStore();
     try {
-      const store = new InboxStore();
-      try {
-        await wakePass(store);
-      } finally {
-        store.close();
-      }
-    } catch {
-      // tmux down (server not started yet) or db busy — next pass retries
+      await discoveryTick(store);
+    } finally {
+      store.close();
     }
-    if (!once) await Bun.sleep(15_000);
-  } while (!once);
+    return;
+  }
+
+  const { wakePass } = await import("./core/inbox-wake");
+  const { prototypeRefresherAlive } = await import("./core/inbox-discovery");
+
+  // `--once`: a single wake pass (debugging / manual catch-up).
+  if (process.argv.includes("--once")) {
+    const store = new InboxStore();
+    try {
+      await wakePass(store);
+    } finally {
+      store.close();
+    }
+    return;
+  }
+
+  let tick = 0;
+  while (true) {
+    try {
+      if (!(await prototypeRefresherAlive())) {
+        const child = Bun.spawn(
+          [process.execPath, process.argv[1]!, "daemon", "--discover-once"],
+          { stdin: "ignore", stdout: "ignore", stderr: "ignore" },
+        );
+        // a wedged tmux/ps call must not pile up children behind it
+        const killer = setTimeout(() => child.kill(), 15_000);
+        await child.exited;
+        clearTimeout(killer);
+      }
+    } catch {}
+    if (tick % 5 === 0) {
+      try {
+        const store = new InboxStore();
+        try {
+          await wakePass(store);
+        } finally {
+          store.close();
+        }
+      } catch {
+        // tmux down (server not started yet) or db busy — next pass retries
+      }
+    }
+    tick++;
+    await Bun.sleep(3_000);
+  }
 }
