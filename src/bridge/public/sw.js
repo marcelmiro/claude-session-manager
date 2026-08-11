@@ -20,20 +20,33 @@ self.addEventListener("push", (event) => {
   const sessionId = p.sessionId || "";
   event.waitUntil(
     (async () => {
+      // Show FIRST, and with a UNIQUE tag. Reusing the session's tag makes iOS
+      // REPLACE the shade entry silently — WebKit ignores `renotify`, so only a
+      // session's first push ever bannered — and presentation must never wait on
+      // another SW API first (an in-worker getNotifications that stalls would
+      // swallow the push entirely). The tag keeps the session id as a prefix for
+      // tap attribution; the page splits on "|".
+      const ts = Date.now();
+      const tag = `${sessionId || "csm"}|${ts}`;
       await self.registration.showNotification(p.title || "portkey", {
         body: p.body || "",
-        // One notification per session — a later push replaces the earlier one, so
-        // the shade always shows each session's LATEST state (still buzzes via renotify).
-        tag: sessionId || "csm",
-        renotify: true,
+        tag,
         data: { sessionId },
       });
-      // Badge = sessions currently notified (tag-deduped). Cleared by the app on focus.
+      // Cleanup AFTER: close the session's older notifications so the shade still
+      // converges to one per session, then badge = sessions currently notified.
       try {
-        const shown = await self.registration.getNotifications();
-        await navigator.setAppBadge(shown.length);
+        const prefix = tag.slice(0, tag.indexOf("|") + 1);
+        for (const n of await self.registration.getNotifications()) {
+          // Strictly-older only: two same-session pushes whose cleanups interleave
+          // would otherwise close each other and empty the shade — which the tap
+          // attributor reads as a tap.
+          if ((n.tag || "").startsWith(prefix) && Number((n.tag || "").slice(prefix.length)) < ts) n.close();
+        }
+        const left = await self.registration.getNotifications();
+        await navigator.setAppBadge(new Set(left.map((n) => (n.tag || "").split("|")[0])).size);
       } catch {
-        /* badge unsupported — fine */
+        /* cleanup/badge best-effort — the notification is already up */
       }
     })(),
   );

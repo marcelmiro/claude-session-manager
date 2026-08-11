@@ -14,6 +14,7 @@ function help() {
     \x1b[36mstatus\x1b[0m              Tmux status-right monitor (⚡3 🔄2)
     \x1b[36mlist\x1b[0m                Print sessions with status, repo, and context %
     \x1b[36mswitch <name>\x1b[0m       Fuzzy-match a session by name and switch to it
+    \x1b[36mnotify <message>\x1b[0m    Web-push a message to every subscribed device
     \x1b[36msetup\x1b[0m               Install SessionStart hook for session tracking
     \x1b[36msave-sessions\x1b[0m       Snapshot pane→session map for tmux-resurrect
     \x1b[36mrestore-sessions\x1b[0m    Restore Claude sessions after tmux-resurrect restore
@@ -70,6 +71,9 @@ switch (cmd) {
       console.error(err instanceof Error ? err.message : String(err));
       process.exit(1);
     }
+    break;
+  case "notify":
+    await import("../src/cli").then((m) => m.notify(process.argv.slice(3).join(" ")));
     break;
   default:
     console.error(`Unknown command: ${cmd}`);

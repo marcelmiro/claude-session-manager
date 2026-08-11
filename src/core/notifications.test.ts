@@ -9,14 +9,16 @@
 
 import "../../test/helpers/home";
 import { test, expect, beforeEach, afterEach } from "bun:test";
-import { mkdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
-import { pushLabel, pushAction, deviceConnected, pushPayloadFor } from "./notifications";
+import { mkdirSync, rmSync, utimesSync, writeFileSync, readFileSync, existsSync } from "node:fs";
+import { pushLabel, pushAction, deviceConnected, pushPayloadFor, dispatchHeldApprovalPushes } from "./notifications";
 import { CONSUMERS_DIR } from "./web-push";
+import { PENDING_DIR } from "./approval";
+import { markPortkeySource, SOURCE_DIR } from "./input-source";
 import { EVENTS_DIR, eventLogPath } from "./hook-events";
 import type { HookEvent, Session, TransitionEvent } from "../types";
 
 beforeEach(() => {
-  for (const dir of [EVENTS_DIR, CONSUMERS_DIR]) {
+  for (const dir of [EVENTS_DIR, CONSUMERS_DIR, PENDING_DIR, SOURCE_DIR]) {
     rmSync(dir, { recursive: true, force: true });
     mkdirSync(dir, { recursive: true });
   }
@@ -122,6 +124,89 @@ test("turnComplete payload: title only — iOS adds its own attribution line", (
   expect(p.title).toBe("✅ csm · Fix Auth");
   expect(p.body).toBe("");
   expect(p.sessionId).toBe("sess-1");
+});
+
+// --- dispatchHeldApprovalPushes (hook-held approvals never transition) -----------
+// A held approval renders no pane picker, so the status stays `running` and the
+// transition dispatch can't fire. These pin the gating: once per hold, source-device
+// only, suppressed-while-watching re-arms on background. The sidecar write doubles as
+// the observable "push path taken" signal (no subscription exists under temp HOME, so
+// sendWebPush itself no-ops).
+
+function writeHold(sessionId: string, toolUseId: string, ts = Date.now()): void {
+  mkdirSync(PENDING_DIR, { recursive: true });
+  writeFileSync(
+    `${PENDING_DIR}/${sessionId}.json`,
+    JSON.stringify({ sessionId, ts, pid: process.pid, tool: "Write", tool_use_id: toolUseId }),
+  );
+}
+
+const sidecar = (sessionId: string) => `${PENDING_DIR}/${sessionId}.pushed`;
+
+/** A phone-driven turn: the UserPromptSubmit event + a text-matching source marker. */
+function driveFromPhone(sessionId: string, deviceId: string): void {
+  writeFileSync(
+    eventLogPath(sessionId),
+    JSON.stringify({ hook_event_name: "UserPromptSubmit", session_id: sessionId, prompt: "do it" }) + "\n",
+  );
+  markPortkeySource(sessionId, { deviceId, text: "do it" });
+}
+
+test("held approval from a portkey turn pushes once and remembers the hold", async () => {
+  writeHold("sess-1", "tu_1");
+  driveFromPhone("sess-1", "dev-1");
+  await dispatchHeldApprovalPushes([mkSession()]);
+  expect(readFileSync(sidecar("sess-1"), "utf8")).toMatch(/^tu_1:\d+$/);
+  // Same hold again: sidecar unchanged (mtime not what we pin — content is).
+  const first = readFileSync(sidecar("sess-1"), "utf8");
+  await dispatchHeldApprovalPushes([mkSession()]);
+  expect(readFileSync(sidecar("sess-1"), "utf8")).toBe(first);
+});
+
+test("a NEW hold (different tool_use_id) pushes again", async () => {
+  writeHold("sess-1", "tu_1");
+  driveFromPhone("sess-1", "dev-1");
+  await dispatchHeldApprovalPushes([mkSession()]);
+  writeHold("sess-1", "tu_2");
+  await dispatchHeldApprovalPushes([mkSession()]);
+  expect(readFileSync(sidecar("sess-1"), "utf8")).toMatch(/^tu_2:\d+$/);
+});
+
+test("a new hold with an EMPTY tool_use_id still pushes (ts disambiguates)", async () => {
+  // The shell-side tool_use_id grep can miss; an id-only dedupe key would match
+  // every later hold on the session and mute it permanently.
+  const t1 = Date.now() - 1000;
+  const t2 = Date.now();
+  writeHold("sess-1", "", t1);
+  driveFromPhone("sess-1", "dev-1");
+  await dispatchHeldApprovalPushes([mkSession()]);
+  expect(readFileSync(sidecar("sess-1"), "utf8")).toBe(`:${t1}`);
+  writeHold("sess-1", "", t2);
+  await dispatchHeldApprovalPushes([mkSession()]);
+  expect(readFileSync(sidecar("sess-1"), "utf8")).toBe(`:${t2}`);
+});
+
+test("watching device suppresses the push but does NOT spend the hold", async () => {
+  writeHold("sess-1", "tu_1");
+  driveFromPhone("sess-1", "dev-1");
+  mkdirSync(CONSUMERS_DIR, { recursive: true });
+  writeFileSync(`${CONSUMERS_DIR}/dev-1`, ""); // fresh SSE marker = watching
+  await dispatchHeldApprovalPushes([mkSession()]);
+  expect(existsSync(sidecar("sess-1"))).toBe(false);
+  // Device backgrounds (marker gone) → next tick pushes.
+  rmSync(`${CONSUMERS_DIR}/dev-1`);
+  await dispatchHeldApprovalPushes([mkSession()]);
+  expect(readFileSync(sidecar("sess-1"), "utf8")).toMatch(/^tu_1:\d+$/);
+});
+
+test("no push for desk-driven turns or unknown sessions", async () => {
+  writeHold("sess-1", "tu_1"); // no source marker at all (desk turn)
+  await dispatchHeldApprovalPushes([mkSession()]);
+  expect(existsSync(sidecar("sess-1"))).toBe(false);
+  writeHold("sess-gone", "tu_9");
+  driveFromPhone("sess-gone", "dev-1");
+  await dispatchHeldApprovalPushes([mkSession()]); // sess-gone not in the list
+  expect(existsSync(sidecar("sess-gone"))).toBe(false);
 });
 
 afterEach(() => {

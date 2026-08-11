@@ -91,6 +91,11 @@ export function getSubscription(deviceId: string): StoredSubscription | null {
   return readSubscriptions()[deviceId] ?? null;
 }
 
+/** Every subscribed device id — for broadcast pushes (`csm notify`). */
+export function listDeviceIds(): string[] {
+  return Object.keys(readSubscriptions());
+}
+
 export function removeSubscription(deviceId: string): void {
   try {
     const subs = readSubscriptions();

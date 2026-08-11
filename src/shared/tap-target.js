@@ -26,7 +26,8 @@
  * app later, and that single vanished push still reads as a tap until it ages out.
  *
  * @param {Record<string, number>} pushed  sessionId → epoch ms the push was shown
- * @param {Iterable<string>} shownTags     tags still in the shade (tag === sessionId)
+ * @param {Iterable<string>} shownTags     session ids of notifications still in the shade
+ *                                         (the page strips the tag's `|ts` uniquifier)
  * @param {number} now                     epoch ms
  * @param {number} [ttlMs]                 how long a recorded push stays attributable
  * @returns {string | null}                sessionId to open, or null
