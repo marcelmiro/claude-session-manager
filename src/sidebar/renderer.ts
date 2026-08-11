@@ -937,11 +937,32 @@ export function runSidebarRenderer(): void {
     },
   });
 
+  // ── tmux wiring (bindings + bounce hook) ────────────────────────────────
+  //
+  // Installed on every stand-up, idempotently: tmux server state dies with
+  // the server, and the daemon outliving it is exactly the point — a fresh
+  // server gets rebound within a tick, no tmux.conf hook needed. The
+  // after-new-window hook the prototype needed is gone too: ensure() splits
+  // a missing stub within a second.
+  async function installTmuxWiring(): Promise<void> {
+    const ctl = (cmd: string) =>
+      `${process.execPath} ${process.argv[1]} sidebar-ctl ${cmd} '#{pane_id}'`;
+    try {
+      await Bun.$`tmux bind-key -n M-s run-shell ${ctl("focus")}`.quiet();
+      await Bun.$`tmux bind-key -n M-S run-shell ${ctl("toggle")}`.quiet();
+      // cycling windows never lands you inside a sidebar — bounce to the pane
+      // right of it (pure tmux, alt+[ / ] untouched)
+      await Bun.$`tmux set-hook -g after-select-window ${`if -F "#{&&:#{m:*${STUB_MARK}*,#{pane_start_command}},#{e|>:#{window_panes},1}}" "select-pane -t '{right-of}'"`}`.quiet();
+    } catch {}
+  }
+
   // ── main loop ────────────────────────────────────────────────────────────
 
   reloadSessions();
+  let tickCount = 0;
   setInterval(async () => {
     try {
+      tickCount++;
       // stand down while the prototype chassis owns the panes or M-S hides them
       const active =
         (await Bun.file(AUTOSTART).exists()) &&
@@ -953,6 +974,9 @@ export function runSidebarRenderer(): void {
       }
       const firstTick = !standing;
       standing = true;
+      // periodic re-install, not just first tick: a tmux SERVER restart wipes
+      // bindings while the daemon (and its `standing` flag) live on
+      if (firstTick || tickCount % 30 === 0) await installTmuxWiring();
       await ensure();
       syncTopology(await listAllPanes());
 
