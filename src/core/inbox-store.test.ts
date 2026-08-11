@@ -62,6 +62,16 @@ describe("event log", () => {
   });
 });
 
+describe("latestEvent", () => {
+  test("returns the newest event with parsed meta, null when none", () => {
+    const s = fresh();
+    expect(s.latestEvent("a")).toBeNull();
+    s.snooze("a", 1000, 1);
+    s.clearDisposition("a", 2, "manual");
+    expect(s.latestEvent("a")).toEqual({ type: "unpark", meta: { reason: "manual", was: "snoozed" } });
+  });
+});
+
 describe("snapshot + kv", () => {
   test("snapshot is replace-wholesale and opaque", () => {
     const s = fresh();

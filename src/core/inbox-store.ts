@@ -232,6 +232,24 @@ export class InboxStore {
     return new Map(rows.map((r) => [r.session_id, r.archived_at]));
   }
 
+  /**
+   * The newest event for a session, meta parsed. Drives the refresher's
+   * preserve rule: a row restored by explicit user action (unarchive, manual
+   * unpark) has neither disposition nor pane, and would otherwise vanish on
+   * the next snapshot replace.
+   */
+  latestEvent(sessionId: string): { type: string; meta: unknown } | null {
+    const r = this.db
+      .query("SELECT type, meta FROM events WHERE session_id = ? ORDER BY at DESC, id DESC LIMIT 1")
+      .get(sessionId) as { type: string; meta: string | null } | null;
+    if (!r) return null;
+    let meta: unknown = null;
+    try {
+      meta = r.meta === null ? null : JSON.parse(r.meta);
+    } catch {}
+    return { type: r.type, meta };
+  }
+
   events(sessionId?: string, limit = 100): InboxEvent[] {
     const rows = (
       sessionId
