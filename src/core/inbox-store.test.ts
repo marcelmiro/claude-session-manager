@@ -9,7 +9,8 @@ describe("verbs", () => {
   test("snooze parks with a wake time and re-arms auto_resumed", () => {
     const s = fresh();
     expect(s.snooze("a", 1000, 1)).toBe(true);
-    s.markAutoResumed("a", 2);
+    expect(s.markAutoResumed("a", 2)).toBe(true);
+    expect(s.markAutoResumed("a", 3)).toBe(false); // claim is at-most-once per stretch
     expect(s.dispositions().get("a")!.autoResumed).toBe(true);
     // re-snooze re-arms the wake
     expect(s.snooze("a", 2000, 3)).toBe(true);

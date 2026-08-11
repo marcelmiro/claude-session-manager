@@ -141,3 +141,19 @@ test("AskUserQuestion is delegated: pretooluse.sh exits for it, question-pretool
   // No claude-version gate (dropped 2026-07-18) — updatedInput is assumed forward-compatible.
   expect(q).not.toContain("claude --version");
 });
+
+test("setup() writes the daemon LaunchAgent plist idempotently (no launchctl under CSM_HOME)", async () => {
+  const plistPath = `${TEST_HOME}/Library/LaunchAgents/com.csm.daemon.plist`;
+  rmSync(plistPath, { force: true });
+
+  await setup();
+  const plist = readFileSync(plistPath, "utf8");
+  expect(plist).toContain("<string>com.csm.daemon</string>");
+  expect(plist).toContain("<string>daemon</string>");
+  expect(plist).toContain(process.execPath);
+  expect(plist).toContain("<key>KeepAlive</key><true/>");
+
+  // Second run leaves it byte-identical (the change check gates launchctl reloads).
+  await setup();
+  expect(readFileSync(plistPath, "utf8")).toBe(plist);
+});

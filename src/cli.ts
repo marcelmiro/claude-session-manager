@@ -764,15 +764,87 @@ export async function setup(): Promise<void> {
     await Bun.write(settingsPath, JSON.stringify(settings, null, 2) + "\n");
   }
 
-  if (!scriptsWritten && !settingsChanged) {
+  const daemonResult = await installDaemonAgent(home);
+
+  if (!scriptsWritten && !settingsChanged && daemonResult === "unchanged") {
     console.log("CSM hooks already configured.");
     return;
   }
 
-  console.log(scriptsUpdated ? "CSM hooks updated." : "CSM hooks installed.");
-  console.log(`  Hook scripts: ${hookDir}/{session-start,event,pretooluse,question-pretooluse}.sh`);
-  console.log(`  Settings: ${settingsPath}`);
+  if (scriptsWritten || settingsChanged) {
+    console.log(scriptsUpdated ? "CSM hooks updated." : "CSM hooks installed.");
+    console.log(`  Hook scripts: ${hookDir}/{session-start,event,pretooluse,question-pretooluse}.sh`);
+    console.log(`  Settings: ${settingsPath}`);
+  }
+  if (daemonResult !== "unchanged") {
+    console.log(`Inbox daemon ${daemonResult} (launchd: com.csm.daemon — snooze wakes fire without a terminal open).`);
+  }
   console.log("\nNew Claude Code sessions will now emit status/transcript events.");
+}
+
+/**
+ * Install/refresh the launchd agent that keeps `csm daemon` alive. launchd
+ * (KeepAlive + RunAtLoad) is what makes a snooze survive reboots: the wake
+ * pass must run with no tmux client attached and no terminal open. The plist
+ * pins the bun binary and the csm entry script that ran this setup, plus a
+ * PATH that reaches tmux — launchd's default PATH doesn't include homebrew.
+ */
+async function installDaemonAgent(home: string): Promise<"installed" | "updated" | "unchanged"> {
+  const { resolve } = await import("node:path");
+  const agentDir = `${home}/Library/LaunchAgents`;
+  const plistPath = `${agentDir}/com.csm.daemon.plist`;
+  const entry = resolve(process.argv[1] ?? "");
+  const logPath = `${home}/.config/csm/daemon.log`;
+  const plist = `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.csm.daemon</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>${process.execPath}</string>
+    <string>--env-file=/dev/null</string>
+    <string>${entry}</string>
+    <string>daemon</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+  <key>StandardOutPath</key><string>${logPath}</string>
+  <key>StandardErrorPath</key><string>${logPath}</string>
+</dict>
+</plist>
+`;
+
+  let existing = "";
+  try {
+    existing = await Bun.file(plistPath).text();
+  } catch {}
+  const changed = existing !== plist;
+  if (changed) {
+    await Bun.$`mkdir -p ${agentDir}`.quiet();
+    await Bun.write(plistPath, plist);
+  }
+
+  // CSM_HOME is the test seam — never touch the real launchd from tests.
+  if (!process.env.CSM_HOME) {
+    const uid = process.getuid?.() ?? 501;
+    const target = `gui/${uid}/com.csm.daemon`;
+    if (changed) {
+      await Bun.$`launchctl bootout ${target}`.quiet().nothrow();
+      await Bun.$`launchctl bootstrap gui/${uid} ${plistPath}`.quiet().nothrow();
+    } else {
+      // plist unchanged but the agent may not be loaded (fresh boot of an old
+      // install, manual bootout) — bootstrap is a cheap no-op when it is.
+      const loaded = (await Bun.$`launchctl print ${target}`.quiet().nothrow()).exitCode === 0;
+      if (!loaded) await Bun.$`launchctl bootstrap gui/${uid} ${plistPath}`.quiet().nothrow();
+    }
+  }
+
+  return changed ? (existing ? "updated" : "installed") : "unchanged";
 }
 
 // ---------------------------------------------------------------------------
@@ -1076,4 +1148,34 @@ export async function questionHook(): Promise<void> {
 
   rmSync(pendingFile, { force: true });
   process.exit(0); // timeout → neutral → native-widget floor
+}
+
+// ---------------------------------------------------------------------------
+// csm daemon
+// ---------------------------------------------------------------------------
+
+/**
+ * Long-lived inbox daemon (launchd-kept-alive, installed by `csm setup`).
+ * Owns the snooze wake pass — the status-right monitor can't: tmux only
+ * evaluates the status line while a client is attached, so a midnight wake
+ * with no terminal open would never fire from there. `--once` runs a single
+ * pass and exits (debugging / manual catch-up).
+ */
+export async function daemon(): Promise<void> {
+  const { InboxStore } = await import("./core/inbox-store");
+  const { wakePass } = await import("./core/inbox-wake");
+  const once = process.argv.includes("--once");
+  do {
+    try {
+      const store = new InboxStore();
+      try {
+        await wakePass(store);
+      } finally {
+        store.close();
+      }
+    } catch {
+      // tmux down (server not started yet) or db busy — next pass retries
+    }
+    if (!once) await Bun.sleep(15_000);
+  } while (!once);
 }

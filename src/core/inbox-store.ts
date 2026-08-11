@@ -183,12 +183,20 @@ export class InboxStore {
     })();
   }
 
-  /** The wake auto-reopen fired for this snooze stretch. */
-  markAutoResumed(sessionId: string, now: number): void {
-    this.db
-      .query("UPDATE dispositions SET auto_resumed = 1 WHERE session_id = ? AND kind = 'snoozed'")
-      .run(sessionId);
+  /**
+   * Claim the wake auto-reopen for this snooze stretch — at most one caller
+   * wins (the WHERE is the lock), so overlapping wakers can't double-spawn a
+   * pane. Returns false when already claimed. A re-snooze re-arms the claim.
+   */
+  markAutoResumed(sessionId: string, now: number): boolean {
+    const hit = this.db
+      .query(
+        "UPDATE dispositions SET auto_resumed = 1 WHERE session_id = ? AND kind = 'snoozed' AND auto_resumed = 0",
+      )
+      .run(sessionId).changes;
+    if (!hit) return false;
     this.event(sessionId, now, "auto_resume");
+    return true;
   }
 
   // ── reads ────────────────────────────────────────────────────────────────
