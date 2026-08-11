@@ -874,6 +874,24 @@ interface ResurrectSessionMap {
   sessions: Record<string, ResurrectSessionEntry>;
 }
 
+
+/**
+ * Resurrect save/restore must only ever run against the DEFAULT tmux server.
+ * The resurrect/continuum hooks live in global tmux.conf, so they fire on ANY
+ * server start — a scratch server (`tmux -L whatever`) would restore the real
+ * layout and resume every mapped Claude session a second time (two processes
+ * appending to one transcript), or overwrite the coordinate map with scratch
+ * coordinates.
+ */
+async function onDefaultTmuxServer(): Promise<boolean> {
+  try {
+    const path = (await Bun.$`tmux display-message -p '#{socket_path}'`.quiet().text()).trim();
+    return path.split("/").pop() === "default";
+  } catch {
+    return false; // no server reachable — nothing to save/restore anyway
+  }
+}
+
 /**
  * Snapshot current pane→Claude session mappings using tmux coordinates
  * (session:window.pane_index) that survive a tmux server restart.
@@ -882,6 +900,7 @@ interface ResurrectSessionMap {
  * Can also be run manually before a planned restart.
  */
 export async function saveSessions(): Promise<void> {
+  if (!(await onDefaultTmuxServer())) return; // scratch server — see onDefaultTmuxServer
   const paneSessions = await loadPaneSessions();
   if (Object.keys(paneSessions).length === 0) {
     // Nothing tracked — skip silently (hook context)
@@ -953,6 +972,7 @@ export async function saveSessions(): Promise<void> {
  * Can also be run manually after a restore.
  */
 export async function restoreSessions(): Promise<void> {
+  if (!(await onDefaultTmuxServer())) return; // scratch server — see onDefaultTmuxServer
   // Read saved mapping
   let map: ResurrectSessionMap;
   try {
