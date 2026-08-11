@@ -4032,7 +4032,9 @@ async function followNotificationTap() {
       const shown = await reg.getNotifications();
       tapped = tapTarget(
         pushed,
-        shown.map((n) => n.tag),
+        // Tags are `${sessionId}|${ts}` (unique per push, see sw.js) — strip to
+        // the session id, which is what the pushed ledger is keyed by.
+        shown.map((n) => (n.tag || "").split("|")[0]),
         Date.now(),
       );
     }

@@ -20,28 +20,29 @@ self.addEventListener("push", (event) => {
   const sessionId = p.sessionId || "";
   event.waitUntil(
     (async () => {
-      const tag = sessionId || "csm";
-      // One notification per session — but never via same-tag REPLACEMENT: WebKit
-      // ignores `renotify` (Chromium-only), so a replaced notification updates the
-      // shade silently — no banner, no sound — and only the session's first push
-      // ever alerts. Close the old one, then show fresh: a fresh show always
-      // presents.
-      try {
-        for (const n of await self.registration.getNotifications({ tag })) n.close();
-      } catch {
-        /* worst case: iOS replaces silently, as before */
-      }
+      // Show FIRST, and with a UNIQUE tag. Reusing the session's tag makes iOS
+      // REPLACE the shade entry silently — WebKit ignores `renotify`, so only a
+      // session's first push ever bannered — and presentation must never wait on
+      // another SW API first (an in-worker getNotifications that stalls would
+      // swallow the push entirely). The tag keeps the session id as a prefix for
+      // tap attribution; the page splits on "|".
+      const tag = `${sessionId || "csm"}|${Date.now()}`;
       await self.registration.showNotification(p.title || "portkey", {
         body: p.body || "",
         tag,
         data: { sessionId },
       });
-      // Badge = sessions currently notified (tag-deduped). Cleared by the app on focus.
+      // Cleanup AFTER: close the session's older notifications so the shade still
+      // converges to one per session, then badge = sessions currently notified.
       try {
-        const shown = await self.registration.getNotifications();
-        await navigator.setAppBadge(shown.length);
+        const prefix = tag.slice(0, tag.indexOf("|") + 1);
+        for (const n of await self.registration.getNotifications()) {
+          if (n.tag !== tag && (n.tag || "").startsWith(prefix)) n.close();
+        }
+        const left = await self.registration.getNotifications();
+        await navigator.setAppBadge(new Set(left.map((n) => (n.tag || "").split("|")[0])).size);
       } catch {
-        /* badge unsupported — fine */
+        /* cleanup/badge best-effort — the notification is already up */
       }
     })(),
   );
