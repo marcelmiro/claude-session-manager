@@ -26,7 +26,8 @@ self.addEventListener("push", (event) => {
       // another SW API first (an in-worker getNotifications that stalls would
       // swallow the push entirely). The tag keeps the session id as a prefix for
       // tap attribution; the page splits on "|".
-      const tag = `${sessionId || "csm"}|${Date.now()}`;
+      const ts = Date.now();
+      const tag = `${sessionId || "csm"}|${ts}`;
       await self.registration.showNotification(p.title || "portkey", {
         body: p.body || "",
         tag,
@@ -37,7 +38,10 @@ self.addEventListener("push", (event) => {
       try {
         const prefix = tag.slice(0, tag.indexOf("|") + 1);
         for (const n of await self.registration.getNotifications()) {
-          if (n.tag !== tag && (n.tag || "").startsWith(prefix)) n.close();
+          // Strictly-older only: two same-session pushes whose cleanups interleave
+          // would otherwise close each other and empty the shade — which the tap
+          // attributor reads as a tap.
+          if ((n.tag || "").startsWith(prefix) && Number((n.tag || "").slice(prefix.length)) < ts) n.close();
         }
         const left = await self.registration.getNotifications();
         await navigator.setAppBadge(new Set(left.map((n) => (n.tag || "").split("|")[0])).size);

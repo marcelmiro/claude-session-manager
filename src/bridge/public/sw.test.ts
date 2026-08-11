@@ -15,7 +15,7 @@ const SW_PATH = `${import.meta.dir}/sw.js`;
 function makeScope() {
   const listeners = new Map<string, ((ev: unknown) => void)[]>();
   const store = new Map<string, string>();
-  const shown: { title: string; tag: string; data: unknown }[] = [];
+  const shown: { title: string; tag: string; data: unknown; close(): void }[] = [];
   const posted: unknown[] = [];
   const opened: string[] = [];
 
@@ -43,9 +43,19 @@ function makeScope() {
     skipWaiting() {},
     registration: {
       async showNotification(title: string, o: { tag: string; data: unknown }) {
-        // Real tag semantics: one notification per tag, latest wins.
+        // Real tag semantics: one notification per tag, latest wins; close() removes
+        // from the shade (without it the worker's cleanup loop throws and is never
+        // actually under test).
         const i = shown.findIndex((n) => n.tag === o.tag);
-        const rec = { title, tag: o.tag, data: o.data };
+        const rec = {
+          title,
+          tag: o.tag,
+          data: o.data,
+          close() {
+            const idx = shown.indexOf(rec);
+            if (idx >= 0) shown.splice(idx, 1);
+          },
+        };
         if (i >= 0) shown[i] = rec;
         else shown.push(rec);
       },
@@ -122,10 +132,38 @@ test("a push shows a notification tagged with its session", async () => {
 test("re-push for the same session replaces, never stacks", async () => {
   const h = await loadWorker();
   await h.dispatch("push", push("s1", "⚡ first"));
+  // Force distinct tag timestamps — same-millisecond pushes produce identical tags,
+  // which the fake replaces by tag and the cleanup path never runs.
+  await Bun.sleep(2);
   await h.dispatch("push", push("s1", "✅ second"));
 
   expect(h.shown).toHaveLength(1);
   expect(h.shown[0]!.title).toBe("✅ second");
+});
+
+test("cleanup never closes a newer same-session notification", async () => {
+  // Two concurrent pushes for one session: the slower cleanup must not close the
+  // newer notification (mutual close would empty the shade, which tap attribution
+  // reads as a tap). Pre-seed a notification whose tag timestamp is in the future
+  // relative to the incoming push.
+  const h = await loadWorker();
+  const future = { title: "✅ newer", tag: `s1|${Date.now() + 60_000}`, data: { sessionId: "s1" }, close: () => {} };
+  h.shown.push(future);
+  await h.dispatch("push", push("s1", "⚡ older"));
+
+  expect(h.shown).toContain(future);
+});
+
+test("pre-deploy bare-session tags are left alone by prefix cleanup", async () => {
+  // The old worker tagged notifications with the bare session id; those never match
+  // the "id|" prefix and are only cleared by the page's dismiss-on-focus backstop.
+  const h = await loadWorker();
+  const legacy = { title: "⚡ legacy", tag: "s1", data: { sessionId: "s1" }, close: () => {} };
+  h.shown.push(legacy);
+  await h.dispatch("push", push("s1", "✅ fresh"));
+
+  expect(h.shown).toContain(legacy);
+  expect(h.shown).toHaveLength(2);
 });
 
 test("a malformed payload still shows something — iOS drops silent subscriptions", async () => {
