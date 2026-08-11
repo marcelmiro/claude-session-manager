@@ -15,7 +15,7 @@ import { reapDeadSessionFiles } from "./core/approval";
 import { loadConfig } from "./core/config";
 import { debugLog } from "./core/debug";
 import { loadState, saveState, computeAggregate, buildSessionStates, loadPaneSessions, savePaneSessions, processHookEvents } from "./core/state";
-import { detectTransitions, dispatchNotifications, syncWindowPrefix, ATTENTION_PREFIX, RUNNING_PREFIX, SCRIPT_PREFIX, stripAllPrefixes, desiredPrefix, buildBaseName, abbreviateRepo, NAME_SEPARATOR } from "./core/notifications";
+import { detectTransitions, dispatchNotifications, dispatchHeldApprovalPushes, syncWindowPrefix, ATTENTION_PREFIX, RUNNING_PREFIX, SCRIPT_PREFIX, stripAllPrefixes, desiredPrefix, buildBaseName, abbreviateRepo, NAME_SEPARATOR } from "./core/notifications";
 import { clearSource } from "./core/input-source";
 import { classifyActivity } from "./core/presence";
 import { detectScriptWaits } from "./core/script-wait";
@@ -324,6 +324,11 @@ async function main(): Promise<void> {
   if (notableWithAttention.length > 0) {
     await dispatchNotifications(notableWithAttention, config);
   }
+
+  // Approvals HELD by the PreToolUse hook never render the pane picker, so the
+  // status stays `running` and no transition can push for them — tell the driving
+  // phone directly (once per hold, skipped while it watches via SSE).
+  await dispatchHeldApprovalPushes(sessions);
 
   // Script-wait detection: a ready session may still be driving a run_in_background
   // script (the turn genuinely ends while the runner lives — pr-triage waits this way

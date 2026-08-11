@@ -1,10 +1,11 @@
-import { statSync } from "node:fs";
+import { statSync, readFileSync, writeFileSync } from "node:fs";
 import type { NotificationConfig, Session, TransitionEvent } from "../types";
 import type { SessionStatus } from "./status";
 import { getAbovePrompt } from "./status";
 import { renameWindow, getWindowName } from "./tmux";
 import { sourceForSession } from "./input-source";
 import { pendingToolCall } from "./hook-events";
+import { listPendingApprovals, PENDING_DIR } from "./approval";
 import { CONSUMERS_DIR, sendWebPush } from "./web-push";
 import type { PushPayload } from "../types";
 
@@ -250,6 +251,44 @@ export async function dispatchNotifications(
       if (src.source === "portkey" && src.deviceId && !deviceConnected(src.deviceId)) {
         await sendWebPush(src.deviceId, pushPayloadFor(event, session));
       }
+    }
+  }
+}
+
+/**
+ * Push for approvals the PreToolUse hook is HOLDING for the phone. A held approval
+ * never renders the pane picker, so the status stays `running` and the transition
+ * dispatch above can never fire for it — the phone was the intended approval surface
+ * yet nothing told it. Runs every monitor tick over the live `pending/*.json` markers:
+ * push once per hold (sidecar remembers the tool_use_id), only to the device that
+ * drove the turn, and only while that device isn't watching via SSE. The
+ * watching-then-backgrounded case heals itself: the sidecar is only written when a
+ * push is actually sent, so backgrounding mid-hold pushes on the next tick.
+ */
+export async function dispatchHeldApprovalPushes(sessions: Session[]): Promise<void> {
+  for (const hold of listPendingApprovals()) {
+    const session = sessions.find((s) => s.id === hold.sessionId);
+    if (!session) continue;
+    const src = sourceForSession(hold.sessionId);
+    if (src.source !== "portkey" || !src.deviceId || deviceConnected(src.deviceId)) continue;
+    const sidecar = `${PENDING_DIR}/${hold.sessionId}.pushed`;
+    try {
+      if (readFileSync(sidecar, "utf8") === hold.tool_use_id) continue; // this hold already pushed
+    } catch {
+      /* no sidecar — not pushed yet */
+    }
+    const event: TransitionEvent = {
+      sessionKey: session.tmuxPane?.paneId ?? hold.sessionId,
+      previousStatus: "running",
+      currentStatus: "waiting",
+      classification: "blocked",
+      session,
+    };
+    await sendWebPush(src.deviceId, pushPayloadFor(event, session));
+    try {
+      writeFileSync(sidecar, hold.tool_use_id);
+    } catch {
+      /* worst case: a duplicate push next tick */
     }
   }
 }
