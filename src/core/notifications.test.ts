@@ -133,11 +133,11 @@ test("turnComplete payload: title only — iOS adds its own attribution line", (
 // the observable "push path taken" signal (no subscription exists under temp HOME, so
 // sendWebPush itself no-ops).
 
-function writeHold(sessionId: string, toolUseId: string): void {
+function writeHold(sessionId: string, toolUseId: string, ts = Date.now()): void {
   mkdirSync(PENDING_DIR, { recursive: true });
   writeFileSync(
     `${PENDING_DIR}/${sessionId}.json`,
-    JSON.stringify({ sessionId, ts: Date.now(), pid: process.pid, tool: "Write", tool_use_id: toolUseId }),
+    JSON.stringify({ sessionId, ts, pid: process.pid, tool: "Write", tool_use_id: toolUseId }),
   );
 }
 
@@ -156,10 +156,11 @@ test("held approval from a portkey turn pushes once and remembers the hold", asy
   writeHold("sess-1", "tu_1");
   driveFromPhone("sess-1", "dev-1");
   await dispatchHeldApprovalPushes([mkSession()]);
-  expect(readFileSync(sidecar("sess-1"), "utf8")).toBe("tu_1");
+  expect(readFileSync(sidecar("sess-1"), "utf8")).toMatch(/^tu_1:\d+$/);
   // Same hold again: sidecar unchanged (mtime not what we pin — content is).
+  const first = readFileSync(sidecar("sess-1"), "utf8");
   await dispatchHeldApprovalPushes([mkSession()]);
-  expect(readFileSync(sidecar("sess-1"), "utf8")).toBe("tu_1");
+  expect(readFileSync(sidecar("sess-1"), "utf8")).toBe(first);
 });
 
 test("a NEW hold (different tool_use_id) pushes again", async () => {
@@ -168,7 +169,21 @@ test("a NEW hold (different tool_use_id) pushes again", async () => {
   await dispatchHeldApprovalPushes([mkSession()]);
   writeHold("sess-1", "tu_2");
   await dispatchHeldApprovalPushes([mkSession()]);
-  expect(readFileSync(sidecar("sess-1"), "utf8")).toBe("tu_2");
+  expect(readFileSync(sidecar("sess-1"), "utf8")).toMatch(/^tu_2:\d+$/);
+});
+
+test("a new hold with an EMPTY tool_use_id still pushes (ts disambiguates)", async () => {
+  // The shell-side tool_use_id grep can miss; an id-only dedupe key would match
+  // every later hold on the session and mute it permanently.
+  const t1 = Date.now() - 1000;
+  const t2 = Date.now();
+  writeHold("sess-1", "", t1);
+  driveFromPhone("sess-1", "dev-1");
+  await dispatchHeldApprovalPushes([mkSession()]);
+  expect(readFileSync(sidecar("sess-1"), "utf8")).toBe(`:${t1}`);
+  writeHold("sess-1", "", t2);
+  await dispatchHeldApprovalPushes([mkSession()]);
+  expect(readFileSync(sidecar("sess-1"), "utf8")).toBe(`:${t2}`);
 });
 
 test("watching device suppresses the push but does NOT spend the hold", async () => {
@@ -181,7 +196,7 @@ test("watching device suppresses the push but does NOT spend the hold", async ()
   // Device backgrounds (marker gone) → next tick pushes.
   rmSync(`${CONSUMERS_DIR}/dev-1`);
   await dispatchHeldApprovalPushes([mkSession()]);
-  expect(readFileSync(sidecar("sess-1"), "utf8")).toBe("tu_1");
+  expect(readFileSync(sidecar("sess-1"), "utf8")).toMatch(/^tu_1:\d+$/);
 });
 
 test("no push for desk-driven turns or unknown sessions", async () => {
