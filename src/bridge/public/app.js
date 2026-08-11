@@ -4040,8 +4040,12 @@ async function followNotificationTap() {
     /* no registration (plain tab) — the stashed path may still have a target */
   }
   const id = stashed || tapped;
-  if (id && selectedId.value !== id) open(id);
-  else if (id) markRead(id); // already open — still consume the ⚡ this tap answered
+  // Only navigate to a session the list can actually resolve: a tap attributed to an
+  // ops alert's sentinel or a since-vanished session would open a paneless, sendless
+  // detail view. Unknown id ⇒ stay put (the tap still counts as "looking": dismiss).
+  const known = id && sessions.value.some((s) => s.id === id);
+  if (known && selectedId.value !== id) open(id);
+  else if (known) markRead(id); // already open — still consume the ⚡ this tap answered
   dismissNotifications(); // you're looking now — clear the shade + badge
 }
 

@@ -1135,8 +1135,9 @@ export async function notify(message: string): Promise<void> {
     console.error("csm: no push subscriptions — nothing to notify");
     process.exit(1);
   }
-  // sessionId doubles as the notification tag: a stable value collapses repeats of
-  // the same alert instead of stacking them.
-  await Promise.all(ids.map((id) => sendWebPush(id, { title: "CSM", body: message, sessionId: "csm-notify" })));
+  // Empty sessionId on purpose: it keeps the push out of the tap-attribution ledger
+  // (a tap must NOT navigate to a session — there is none behind an ops alert; the
+  // service worker falls back to a shared "csm" tag so repeats still collapse).
+  await Promise.all(ids.map((id) => sendWebPush(id, { title: "CSM", body: message, sessionId: "" })));
   console.log(`csm: pushed to ${ids.length} device(s)`);
 }
