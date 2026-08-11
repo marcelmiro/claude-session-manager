@@ -794,6 +794,10 @@ async function installDaemonAgent(home: string): Promise<"installed" | "updated"
   const agentDir = `${home}/Library/LaunchAgents`;
   const plistPath = `${agentDir}/com.csm.daemon.plist`;
   const entry = resolve(process.argv[1] ?? "");
+  // The PATH symlink, not process.execPath: execPath resolves to the
+  // versioned Cellar binary, which a brew upgrade deletes — silently killing
+  // the daemon that snoozes depend on.
+  const bunBin = Bun.which("bun") ?? process.execPath;
   const logPath = `${home}/.config/csm/daemon.log`;
   const plist = `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -802,7 +806,7 @@ async function installDaemonAgent(home: string): Promise<"installed" | "updated"
   <key>Label</key><string>com.csm.daemon</string>
   <key>ProgramArguments</key>
   <array>
-    <string>${process.execPath}</string>
+    <string>${bunBin}</string>
     <string>--env-file=/dev/null</string>
     <string>${entry}</string>
     <string>daemon</string>
@@ -835,7 +839,14 @@ async function installDaemonAgent(home: string): Promise<"installed" | "updated"
     const target = `gui/${uid}/com.csm.daemon`;
     if (changed) {
       await Bun.$`launchctl bootout ${target}`.quiet().nothrow();
-      await Bun.$`launchctl bootstrap gui/${uid} ${plistPath}`.quiet().nothrow();
+      // bootstrap right after bootout races the old service's teardown and
+      // fails with I/O error — verify and retry until the daemon is actually
+      // loaded (a silently-unloaded agent means snoozes never wake).
+      for (let i = 0; i < 5; i++) {
+        await Bun.$`launchctl bootstrap gui/${uid} ${plistPath}`.quiet().nothrow();
+        if ((await Bun.$`launchctl print ${target}`.quiet().nothrow()).exitCode === 0) break;
+        await Bun.sleep(1000);
+      }
     } else {
       // plist unchanged but the agent may not be loaded (fresh boot of an old
       // install, manual bootout) — bootstrap is a cheap no-op when it is.

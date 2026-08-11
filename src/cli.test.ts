@@ -150,7 +150,7 @@ test("setup() writes the daemon LaunchAgent plist idempotently (no launchctl und
   const plist = readFileSync(plistPath, "utf8");
   expect(plist).toContain("<string>com.csm.daemon</string>");
   expect(plist).toContain("<string>daemon</string>");
-  expect(plist).toContain(process.execPath);
+  expect(plist).toContain(`<string>${Bun.which("bun") ?? process.execPath}</string>`);
   expect(plist).toContain("<key>KeepAlive</key><true/>");
 
   // Second run leaves it byte-identical (the change check gates launchctl reloads).
