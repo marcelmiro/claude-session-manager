@@ -4,8 +4,8 @@ After=network-online.target tailscaled.service
 # The bridge drives panes in the tmux server, and pulling tmux in here also
 # sidesteps an observed oddity where tmux.service's own enable symlink got
 # removed at shutdown while this unit's reliably survived — Wants= makes the
-# bridge's enablement carry both.
-Wants=tmux.service
+# bridge's enablement carry the whole stack.
+Wants=tmux.service csm-monitor.service
 # Default restart limits are 100ms×5-in-10s: five fast crashes (e.g. port already
 # bound) and systemd gives up permanently. Spaced retries never trip that way.
 StartLimitIntervalSec=300
