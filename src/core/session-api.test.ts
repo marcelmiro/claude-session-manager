@@ -29,6 +29,7 @@ import {
   composeMessageSteps,
   buildSendPlan,
   inputPending,
+  flattenStyled,
   shellModeInput,
   parseQueuedPending,
   getTranscript,
@@ -400,6 +401,47 @@ test("inputPending: false once the input cleared (last ❯ line empty)", () => {
   // An earlier ❯ echo of the submitted message must NOT count — only the LAST ❯ line does.
   const cap = ["❯ [Image #1] what color", "  ⎿ [Image #1]", "⏺ Purple.", "❯ ", "────"].join("\n");
   expect(inputPending(cap)).toBe(false);
+});
+
+// --- flattenStyled (ghost-text discrimination on styled captures) ---------------
+// Lab capture (VM pane, CC queued-message ghost): the EMPTY input box renders the
+// held message dim — `❯ ESC[2mcommit that batchESC[0m` — which a plain capture
+// flattens into a phantom draft (killInput then "fails" on an already-empty box).
+
+test("flattenStyled drops a dim queued-message ghost; inputPending reads the box empty", () => {
+  const cap = [
+    "\x1b[38;5;246m✻\x1b[39m \x1b[38;5;246mBrewed for 38s\x1b[39m",
+    "\x1b[38;5;244m" + "─".repeat(80),
+    "\x1b[39m❯ \x1b[2mcommit that batch\x1b[0m",
+    "\x1b[38;5;244m" + "─".repeat(80),
+    "\x1b[39m  \x1b[38;5;246m⏸ manual mode on\x1b[39m",
+  ].join("\n");
+  expect(inputPending(flattenStyled(cap, true))).toBe(false);
+  // The undropped view keeps the text (what a plain capture used to show).
+  expect(inputPending(flattenStyled(cap, false))).toBe(true);
+});
+
+test("flattenStyled keeps real typed input (never rendered dim)", () => {
+  const cap = ["\x1b[38;5;244m" + "─".repeat(80), "\x1b[39m❯ commit that batch", "\x1b[38;5;244m" + "─".repeat(80)].join("\n");
+  expect(inputPending(flattenStyled(cap, true))).toBe(true);
+});
+
+test("flattenStyled: dim ended by SGR 22 (normal intensity), not only full reset", () => {
+  expect(flattenStyled("❯ \x1b[2mghost\x1b[22m typed", true)).toBe("❯  typed");
+});
+
+test("flattenStyled: dim persists across a wrapped line until reset", () => {
+  expect(flattenStyled("❯ \x1b[2mlong ghost\nwrapped tail\x1b[0m end", true)).toBe("❯ \n end");
+});
+
+test("flattenStyled strips OSC 8 hyperlinks without eating following text", () => {
+  const cap = "\x1b]8;id=1;https://example.com\x1b\\/rc\x1b]8;;\x1b\\ tail";
+  expect(flattenStyled(cap, true)).toBe("/rc tail");
+});
+
+test("flattenStyled(…, false) preserves the dim shell-mode hint for shellModeInput", () => {
+  const cap = ["! ", "  \x1b[2m! for shell mode\x1b[0m"].join("\n");
+  expect(shellModeInput(flattenStyled(cap, false))).toEqual({ text: "" });
 });
 
 // --- shellModeInput (send-path shell-mode guard) --------------------------------
