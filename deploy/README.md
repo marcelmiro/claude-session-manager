@@ -12,6 +12,7 @@ clients over Tailscale. The cutover itself (state copy, auth, PWA reinstall) is
 | `provision.sh` | Idempotent host setup — packages, inotify sysctl, swap, TZ, journald cap, needrestart list-only, bubblewrap AppArmor profile, linger + user units, bridge token, tmux snippet, tailscale install/serve. Re-run any time. |
 | `units/tmux.service` | User unit: tmux server at boot (linger), `csm save-sessions` on stop. |
 | `units/csm-bridge.service` | User unit: the bridge, `Restart=always` with spaced retries, token via 0600 `EnvironmentFile`. |
+| `units/csm-monitor.service` | User unit: fallback monitor tick + resurrect autosave while no tmux client is attached (status-right — and continuum riding it — only runs for attached clients). |
 | `tmux-vm.conf` | Remote-client tmux settings (escape-time, window-size, OSC 52). Sourced from `~/.tmux.conf`. |
 | `aws/dlm-policies.sh` | DLM snapshot schedules (4-hourly/3d + daily/14d on `csm-backup=true` volumes) + budget-stop guardrail pointer. CLI-only — the console can't do sub-daily. |
 | `units/snapshot-check.{service,timer}` | Hourly staleness probe: newest `csm-backup` snapshot older than 5h → `csm notify` pushes to the phone. Needs the aws CLI and an instance role with `ec2:DescribeSnapshots`. |
@@ -42,6 +43,7 @@ Prerequisites the script checks but cannot create:
 ## After a reboot
 
 Everything must come back with no SSH login (linger): `systemctl --user status
-tmux csm-bridge` from an SSH one-liner, `tailscale serve status` shows 8473, and
-the phone reaches the bridge. That's verification scenario 4; scenario 8 covers
-session restore (`csm restore-sessions` via tmux-continuum pairing).
+tmux csm-bridge csm-monitor` from an SSH one-liner, `tailscale serve status` shows
+8473, and the phone reaches the bridge. That's verification scenario 4; scenario 8
+covers session restore (resurrect's restore from tmux.service's `ExecStartPost`,
+whose post-restore hook runs `csm restore-sessions`).

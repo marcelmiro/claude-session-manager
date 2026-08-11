@@ -76,7 +76,7 @@ Then on the VM: `csm setup`.
 ## E. Bring up + verify
 
 ```sh
-systemctl --user daemon-reload && systemctl --user start tmux csm-bridge
+systemctl --user daemon-reload && systemctl --user start tmux csm-bridge csm-monitor snapshot-check.timer
 ```
 
 Run verification scenarios **4** (reboot with no SSH → everything back), **5/6**
@@ -103,4 +103,5 @@ clipboard), **7** (phone lists sessions, resume works, push round-trips).
 Stop VM units → restart Mac monitor/bridge (old instructions) → reinstall the PWA
 at the Mac origin → rsync back only `~/.claude/projects/` deltas for sessions
 touched on the VM. The Mac's untouched `~/.config/csm` does the rest. After the
-window, restore from the VM's snapshots instead (inc-6).
+window, restore from the VM's EBS snapshots instead (the DLM schedules in
+`aws/dlm-policies.sh`).

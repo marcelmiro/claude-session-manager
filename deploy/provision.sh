@@ -156,7 +156,7 @@ if [ -d /run/systemd/system ]; then
 
   UNIT_DIR="$HOME/.config/systemd/user"
   mkdir -p "$UNIT_DIR"
-  for unit in tmux.service csm-bridge.service; do
+  for unit in tmux.service csm-bridge.service csm-monitor.service snapshot-check.service snapshot-check.timer; do
     if ! cmp -s "$here/units/$unit" "$UNIT_DIR/$unit" 2>/dev/null; then
       note "installing user unit $unit"
       cp "$here/units/$unit" "$UNIT_DIR/$unit"
@@ -173,7 +173,7 @@ if [ -d /run/systemd/system ]; then
   fi
 
   systemctl --user daemon-reload
-  systemctl --user enable tmux.service csm-bridge.service >/dev/null 2>&1 || true
+  systemctl --user enable tmux.service csm-bridge.service csm-monitor.service snapshot-check.timer >/dev/null 2>&1 || true
 else
   skip "no systemd — skipping linger, user units, bridge token"
 fi

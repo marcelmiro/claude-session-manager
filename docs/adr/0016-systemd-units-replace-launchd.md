@@ -25,8 +25,10 @@ nobody watching.
   `StartLimitIntervalSec=300`: the systemd defaults (100ms × 5-in-10s) give up
   permanently after five fast crashes, e.g. a port-in-use loop.
 - **Restore pairing**: `tmux.service` `ExecStop` runs `csm save-sessions` before
-  `kill-server`; tmux-continuum restores layout on server start, then
-  `csm restore-sessions` resumes each pane's Claude session by id.
+  `kill-server`; `ExecStartPost` runs resurrect's restore script (NOT continuum's
+  restore-on-server-start, which races the forking handshake under systemd —
+  tmux-continuum #110 — and killed the server), whose post-restore hook then runs
+  `csm restore-sessions` to resume each pane's Claude session by id.
   `@resurrect-processes` must NOT include claude — resurrect's `ps`-derived
   restore spawns a *fresh* claude while csm's `--resume` starts the real one: two
   processes fighting over one transcript.
