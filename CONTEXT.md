@@ -31,10 +31,14 @@ The authored lifecycle state of a session in the Inbox: *snoozed* (carries an `u
 _Avoid_: done (not a state — archiving is the done verb, History is the done pile)
 
 **Parked**:
-The Inbox section holding snoozed and blocked sessions, collapsed to a count by default. A snoozed session whose wake date arrives leaves Parked and resurfaces in Needs you, marked as returned-from-snooze.
+The Inbox section holding snoozed and blocked sessions, always expanded (a collapse toggle existed in the prototype, was never used, and was removed). A snoozed session whose wake date arrives leaves Parked and resurfaces in Needs you, marked as returned-from-snooze.
 
 **Needs you**:
-The Inbox section for sessions awaiting a human response — blocked-on-approval, question asked, or turn complete with no reply. An item leaves it only by reply/approve (observed as a derived status transition), snooze/blocked, or archive — never by focus, glance, or notification tap. No silent decay.
+The Inbox section for sessions awaiting a human response. Admission is transition-gated: an OBSERVED transition into ready/waiting, a snooze wake, a live approval prompt, or a turn that finished while unattended — a session merely found sitting at a prompt does not qualify (it files under Open). An item leaves only by reply/approve (observed as a derived status transition), snooze/blocked, or archive — never by focus, glance, or notification tap. No silent decay.
+
+**Open**:
+The neutral Inbox section for live sessions with nothing unhandled — visible, dim, not nagging. Being here is fine; Needs you is the inbox. All verbs still apply (parking an idle session is legitimate).
+_Avoid_: idle (that's an activity status, not a section)
 
 **Recently done**:
 Derived-archived sessions from the last 24h, shown muted at the bottom of the Inbox. Purely derived — no authored state.

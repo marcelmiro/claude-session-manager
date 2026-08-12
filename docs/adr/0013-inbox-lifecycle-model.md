@@ -69,3 +69,42 @@ A week of daily-driving revised two earlier calls and settled the rest of the in
 **Wake notifications: banner now, push deferred.** A wake raises the macOS banner and the ⚡/status-right/`csm next` tiers. Web Push does *not* fire — refining this ADR's "push routed to the device that set the snooze": until an inbox surface exists in portkey, every snooze is Mac-set and a push tier is dead code. The recorded design for when that surface lands: route to the setter device when the snooze was set from portkey; for Mac-set snoozes, broadcast to subscribed devices whose SSE liveness is stale (a scheduled wake is an alarm the user set, not ambient noise).
 
 **Self-heal is part of the contract.** A per-pane chassis dies with the single renderer, but what the week proved must survive productionization as `csm setup`-installed pieces: autostart on client attach (marker-gated so an explicit hide wins), reclamation of resurrect-restored corpse panes, and per-window heal of missing/mispositioned/mis-sized sidebars. A sidebar that only works until the next reboot reads as broken, not as a prototype.
+
+## Addendum 3: shipped semantics + direction (2026-08-12)
+
+M1–M3 are in production (wake daemon, single-renderer sidebar, transition
+gating). Decisions made while shipping, and the roadmap decisions that
+followed:
+
+**Needs You admission rules (M3, as built).** Admission = an OBSERVED
+transition (discovery watches a session go running→ready/waiting and stamps
+the row + writes a `transition` event), a snooze wake, a LIVE approval
+prompt (present-tense evidence, unlike sitting at a ready prompt), or a
+derived finish (a `finishAt` passing IS the transition). A reply — the
+session observed running again — resets admission. A one-time seed from the
+monitor's ⚡ flags aligned inbox and attention system on day one. Everything
+else files under **OPEN**: a neutral, dim, one-line section — visible, not
+nagging, all verbs still apply. Measured motivation: before gating, 9 of 9
+Needs You rows existed but only 1 was backed by a real event.
+
+**Claude0 scoreboard.** status-right is `⚡N 🔄N ✓N`; ✓ counts DISTINCT
+sessions archived since local midnight from archive events, so an undo
+doesn't take the point back — the clearing motion happened. Known
+refinement: ⚡ (state.json flags) and Needs You (admissions) don't share an
+event source yet and can briefly disagree.
+
+**The sidebar is the popup TUI's replacement, not a companion.** Confirmed
+(this ADR's rollout section guessed "likely obsoleted"): triage logic lives
+in ONE surface. Rejected on those grounds: verbs in the TUI space-menu
+(dead surface) and standalone CLI verbs (`csm snooze <fuzzy>` — clutter;
+if provenance work needs a programmatic verb entry point, it ships as that
+feature's plumbing, not as a user command).
+
+**Portkey migrates to an inbox system eventually, not now.** When it does,
+wake Web Push un-defers with the routing rule from addendum 2 (setter
+device when portkey-set, stale-liveness broadcast when Mac-set).
+
+**Remaining, in order:** live with the honest inbox (does Needs You earn
+trust; does clearing pull); ⚡/Needs-You event-source convergence; then
+provenance (fork/handoff links table already exists, `↳` grouping,
+handoff wake rule: child archived → parent wakes).
