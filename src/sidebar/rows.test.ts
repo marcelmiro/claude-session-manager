@@ -65,13 +65,13 @@ describe("renderView", () => {
 
   test("unfocused = glance surface: no selection bg, empty hint row", () => {
     const view = renderView(SAMPLE, vs({ selectedId: "n1" }), DIMS, NOW);
-    expect(view.rows.join("")).not.toContain("\x1b[48;2;51;51;51m");
+    expect(view.rows.join("")).not.toContain("\x1b[48;2;64;64;64m");
     expect(view.rows[view.rows.length - 1]).toBe("");
   });
 
   test("focused: selection bg present, section hints in the bottom row", () => {
     const view = renderView(SAMPLE, vs({ focused: true, selectedId: "n1" }), DIMS, NOW);
-    expect(view.rows.join("")).toContain("\x1b[48;2;51;51;51m");
+    expect(view.rows.join("")).toContain("\x1b[48;2;64;64;64m");
     expect(view.rows[view.rows.length - 1]).toContain("s b e f");
   });
 
@@ -113,13 +113,27 @@ describe("renderView", () => {
     // n0 is the YOUNGEST (needs-you sorts oldest first → last row); it must be visible
     expect(view.scrollTop).toBeGreaterThan(0);
     const contentRows = view.rows.slice(0, 9);
-    expect(contentRows.join("")).toContain("\x1b[48;2;51;51;51m");
+    expect(contentRows.join("")).toContain("\x1b[48;2;64;64;64m");
   });
 
   test("pin bar marks the window's active pane session", () => {
     const view = renderView(SAMPLE, vs({ activePaneId: "%1" }), DIMS, NOW);
     expect(view.rows.join("")).toContain("▎");
   });
+});
+
+test("needs-you age escalates: muted <1d, peach 1-3d, red >3d", () => {
+  const D = 24 * H;
+  const view = renderView(
+    [sess({ id: "fresh", since: NOW - H }), sess({ id: "day", since: NOW - 30 * H }), sess({ id: "old", since: NOW - 4 * D })],
+    vs(),
+    DIMS,
+    NOW,
+  );
+  const out = view.rows.join("");
+  expect(out).toContain("\x1b[38;2;255;128;128m4d"); // red past 3d
+  expect(out).toContain("\x1b[38;2;255;199;153m1d"); // peach at 1-3d
+  expect(out).toContain("\x1b[38;2;160;160;160m1h"); // muted under 1d
 });
 
 test("prompt-sitters render under NEEDS YOU", () => {

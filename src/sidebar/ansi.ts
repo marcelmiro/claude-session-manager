@@ -11,9 +11,10 @@ export const C = {
   muted: "#A0A0A0",
   dim: "#505050",
   surface: "#1C1C1C",
-  // selection bg: surface (#1C1C1C) on bg (#101010) was near-invisible —
-  // the selector needs to read at a glance from the main pane
-  sel: "#333333",
+  // selection bg: surface (#1C1C1C) on bg (#101010) was near-invisible, and
+  // #333333 still washed out on lesser displays — the selector needs to read
+  // at a glance from the main pane
+  sel: "#404040",
   peach: "#FFC799",
   mint: "#99FFE4",
   red: "#FF8080",

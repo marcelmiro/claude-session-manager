@@ -193,12 +193,14 @@ export function renderView(
     const age = fmtAge(now - effectiveSince(s, now));
     const glyph = woken ? "↺ " : s.reason === "question" ? "? " : s.reason === "approval" ? "! " : "";
     // names stay white — peach is reserved for signal: the reason glyph, and
-    // a stale (>1d) age. The whole point is not losing these.
-    const stale = now - effectiveSince(s, now) >= 86_400_000;
+    // a stale (>1d) age, escalating to red past 3d (ignored debt should
+    // burn). The whole point is not losing these.
+    const ignored = now - effectiveSince(s, now);
+    const ageColor = ignored >= 3 * 86_400_000 ? C.red : ignored >= 86_400_000 ? C.peach : C.muted;
     push(s, "needs-you", sessionLine(s, vs, width, C.fg, {
       right: `${glyph}${age}`,
       rightColor: C.muted,
-      rightRendered: (glyph ? fg(C.peach, glyph) : "") + fg(stale ? C.peach : C.muted, age),
+      rightRendered: (glyph ? fg(C.peach, glyph) : "") + fg(ageColor, age),
     }));
   }
 
@@ -221,7 +223,9 @@ export function renderView(
   for (const s of parked) {
     const d = s.disposition!;
     const right = d.kind === "snoozed" ? `☾ ${fmtWake(d.until, now)}` : `✗ ${d.note}`;
-    push(s, "parked", sessionLine(s, vs, width, C.dim, { right: truncate(right, 12), rightColor: C.dim, oneLine: true }));
+    // muted, not dim: parked is deliberately shelved (has a wake/note),
+    // which deserves more presence than RECENT's leaving-the-building dim
+    push(s, "parked", sessionLine(s, vs, width, C.muted, { right: truncate(right, 12), rightColor: C.dim, oneLine: true }));
   }
 
   if (done.length) {
