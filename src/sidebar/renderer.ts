@@ -1052,6 +1052,14 @@ export function runSidebarRenderer(): void {
       // cycling windows never lands you inside a sidebar — bounce to the pane
       // right of it (pure tmux, alt+[ / ] untouched)
       await Bun.$`tmux set-hook -g after-select-window ${`if -F "#{&&:#{m:*${STUB_MARK}*,#{pane_start_command}},#{e|>:#{window_panes},1}}" "select-pane -t '{right-of}'"`}`.quiet();
+      // copy mode on a sidebar is only ever accidental (wheel racing the
+      // mouse-mode preamble, habitual prefix-[): it freezes the frame and
+      // hijacks j/k, and the renderer scrolls wheel itself — eject instantly.
+      // after-copy-mode, NOT pane-mode-changed: the latter doesn't fire on
+      // mode ENTER (tmux 3.7b, verified). No -t on the cancel — if-shell
+      // format-expands only its condition, and the hook context already
+      // targets the pane the copy-mode command ran in.
+      await Bun.$`tmux set-hook -g after-copy-mode ${`if -F "#{&&:#{m:*${STUB_MARK}*,#{pane_start_command}},#{pane_in_mode}}" "send-keys -X cancel"`}`.quiet();
     } catch {}
   }
 
