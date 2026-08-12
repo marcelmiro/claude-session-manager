@@ -23,7 +23,6 @@ note() { printf '[dlm] %s\n' "$*"; }
 
 ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
 ROLE_NAME="AWSDataLifecycleManagerDefaultRole"
-ROLE_ARN="arn:aws:iam::${ACCOUNT}:role/service-role/${ROLE_NAME}"
 
 # The DLM service role: AWS's managed default, created once per account.
 if ! aws iam get-role --role-name "$ROLE_NAME" >/dev/null 2>&1; then
@@ -35,6 +34,10 @@ if ! aws iam get-role --role-name "$ROLE_NAME" >/dev/null 2>&1; then
       --policy-arn arn:aws:iam::aws:policy/service-role/AWSDataLifecycleManagerServiceRole
   }
 fi
+# Read the ARN from the role itself: `dlm create-default-role` makes it at path `/`,
+# the manual fallback at `/service-role/` — a hardcoded path points policies at a
+# role that doesn't exist, which only surfaces when the first snapshot fails.
+ROLE_ARN=$(aws iam get-role --role-name "$ROLE_NAME" --query Role.Arn --output text)
 
 create_policy() {
   local desc="$1" interval="$2" unit="$3" keep="$4" times="$5"
