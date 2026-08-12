@@ -67,10 +67,6 @@ switch (cmd) {
   case "daemon":
     await import("../src/cli").then((m) => m.daemon());
     break;
-  case "sidebar-pane":
-    // Internal — dumb pane stub painted by the daemon's sidebar renderer.
-    await import("../src/cli").then((m) => m.sidebarPane());
-    break;
   case "sidebar-ctl":
     // Internal — M-s/M-S bindings send focus/toggle to the renderer.
     await import("../src/cli").then((m) => m.sidebarCtl(process.argv[3], process.argv[4]));

@@ -41,9 +41,16 @@ const STUB_MARK = "sidebar-pane";
  * go LAST so a separator collision inside them can't shift the fixed fields.
  */
 const SEP = "<|>";
-/** Spawn stubs from the SAME entry script this process runs — the globally
- *  installed `csm` may be older and not know the subcommand yet. */
-const STUB_CMD = `${process.execPath} ${process.argv[1]} sidebar-pane`;
+/**
+ * The pane stub is a SHELL line, not a bun process: a bun runtime per pane
+ * costs ~30MB — more than the blessed chassis this replaces; sh+nc+cat is
+ * ~1MB. Raw-mode the tty so keys pass through unrendered, greet with the
+ * pane id, then relay stdin bytes to the renderer socket verbatim. The
+ * reconnect loop survives daemon restarts (nc dies with the socket, the
+ * next keypress SIGPIPEs cat, the loop reconnects). `: sidebar-pane` is the
+ * discovery marker in pane_start_command.
+ */
+const STUB_CMD = `: sidebar-pane; stty raw -echo; while :; do (printf 'hello %s\\n' "$TMUX_PANE"; exec cat) | nc -U ${SIDEBAR_SOCK} 2>/dev/null; sleep 1; done`;
 
 interface WinState extends ViewState {
   windowId: string;
@@ -831,9 +838,7 @@ export function runSidebarRenderer(): void {
           }
           if (!stub) {
             const created = (
-              // the socket path travels via -e: the stub's env comes from the
-              // tmux SERVER, not from this process, so it can't be inherited
-              await Bun.$`tmux split-window -f -h -b -d -l ${COLS} -t ${winId} -e ${`CSM_SIDEBAR_SOCK=${SIDEBAR_SOCK}`} -P -F ${`#{pane_id}${SEP}#{pane_tty}`} ${STUB_CMD}`
+              await Bun.$`tmux split-window -f -h -b -d -l ${COLS} -t ${winId} -P -F ${`#{pane_id}${SEP}#{pane_tty}`} ${STUB_CMD}`
                 .quiet()
                 .text()
             )
@@ -913,32 +918,43 @@ export function runSidebarRenderer(): void {
   try {
     require("node:fs").rmSync(SIDEBAR_SOCK, { force: true });
   } catch {}
-  Bun.listen<{ paneId?: string; buf: string }>({
+  // Protocol: one greeting line, then raw bytes. A stub sends `hello <pane>`
+  // and every subsequent byte is that pane's stdin verbatim (nc can't frame);
+  // `csm sidebar-ctl` connections send a single `focus <pane>` / `toggle
+  // <pane>` line and close.
+  function feedInput(paneId: string, bytes: string): void {
+    const winId = paneToWin.get(paneId);
+    const win = winId ? wins.get(winId) : undefined;
+    if (!win) return;
+    for (const ev of parseInput(bytes)) void handleEvent(win, ev);
+  }
+
+  Bun.listen<{ paneId?: string; buf: string; greeted: boolean }>({
     unix: SIDEBAR_SOCK,
     socket: {
       open(sock) {
-        sock.data = { buf: "" };
+        sock.data = { buf: "", greeted: false };
       },
       data(sock, chunk) {
+        if (sock.data.greeted) {
+          if (sock.data.paneId) feedInput(sock.data.paneId, chunk.toString());
+          return;
+        }
         sock.data.buf += chunk.toString();
-        let nl: number;
-        while ((nl = sock.data.buf.indexOf("\n")) !== -1) {
-          const line = sock.data.buf.slice(0, nl);
-          sock.data.buf = sock.data.buf.slice(nl + 1);
-          const [cmd, ...rest] = line.split(" ");
-          if (cmd === "hello") {
-            sock.data.paneId = rest[0];
-          } else if (cmd === "in" && sock.data.paneId) {
-            const winId = paneToWin.get(sock.data.paneId);
-            const win = winId ? wins.get(winId) : undefined;
-            if (!win) continue;
-            const bytes = Buffer.from(rest[0] ?? "", "base64").toString();
-            for (const ev of parseInput(bytes)) void handleEvent(win, ev);
-          } else if (cmd === "focus" && rest[0]) {
-            void ctlFocus(rest[0]);
-          } else if (cmd === "toggle" && rest[0]) {
-            void ctlToggle(rest[0]);
-          }
+        const nl = sock.data.buf.indexOf("\n");
+        if (nl === -1) return;
+        const line = sock.data.buf.slice(0, nl).trim();
+        const rest = sock.data.buf.slice(nl + 1);
+        sock.data.buf = "";
+        sock.data.greeted = true;
+        const [cmd, arg] = line.split(" ");
+        if (cmd === "hello" && arg) {
+          sock.data.paneId = arg;
+          if (rest) feedInput(arg, rest);
+        } else if (cmd === "focus" && arg) {
+          void ctlFocus(arg);
+        } else if (cmd === "toggle" && arg) {
+          void ctlToggle(arg);
         }
       },
       error() {},
