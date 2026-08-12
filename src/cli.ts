@@ -831,9 +831,9 @@ export async function setup(): Promise<void> {
  * PATH that reaches tmux — launchd's default PATH doesn't include homebrew.
  */
 async function installDaemonAgent(home: string): Promise<"installed" | "updated" | "unchanged"> {
-  // launchd is darwin-only. On the Linux VM host, long-lived services are
-  // systemd user units installed by deploy/provision.sh; the inbox daemon
-  // doesn't have one yet, so setup must not scatter launchd artifacts there.
+  // launchd is darwin-only. On the Linux VM host the daemon runs as the
+  // csm-daemon.service user unit, installed by deploy/provision.sh like the
+  // other units — setup must not scatter launchd artifacts there.
   if (process.platform !== "darwin") return "unchanged";
   const { resolve } = await import("node:path");
   const agentDir = `${home}/Library/LaunchAgents`;

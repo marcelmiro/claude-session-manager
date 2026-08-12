@@ -170,7 +170,10 @@ export async function wakePass(store: InboxStore, now = Date.now()): Promise<voi
       // broadcasts a Web Push to every device instead — a snooze set days
       // ago has no meaningful "driving device" to target (the general wake
       // push stays deferred per ADR 0013 addendum 2; this replaces a tier
-      // that cannot exist off-darwin, it doesn't add one).
+      // that cannot exist off-darwin, it doesn't add one). Both media share
+      // the nativeNotification gate on purpose: it is the "alert me on
+      // wake" toggle, and which medium delivers it is the platform's
+      // business, not a second setting.
       if (stamped && config.nativeNotification) {
         const title = `☾ Woke — ${row.name ?? row.repo ?? w.sessionId.slice(0, 8)}`;
         const body = `snoozed ${snoozeSpan(w.snoozedAt, now)} ago — due now`;
