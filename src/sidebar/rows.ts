@@ -223,8 +223,9 @@ export function renderView(
   for (const s of parked) {
     const d = s.disposition!;
     const right = d.kind === "snoozed" ? `☾ ${fmtWake(d.until, now)}` : `✗ ${d.note}`;
-    // muted, not dim: parked is deliberately shelved (has a wake/note),
-    // which deserves more presence than RECENT's leaving-the-building dim
+    // names muted, glyph slots dim: parked and RECENT rows keep readable
+    // names while their metadata stays quiet — only headers carry section
+    // weight down here
     push(s, "parked", sessionLine(s, vs, width, C.muted, { right: truncate(right, 12), rightColor: C.dim, oneLine: true }));
   }
 
@@ -232,7 +233,7 @@ export function renderView(
     lines.push("");
     header("RECENT", null, C.dim);
     for (const s of done) {
-      push(s, "done", sessionLine(s, vs, width, C.dim, { right: fmtAge(now - s.archivedAt!), rightColor: C.dim, oneLine: true }));
+      push(s, "done", sessionLine(s, vs, width, C.muted, { right: fmtAge(now - s.archivedAt!), rightColor: C.dim, oneLine: true }));
     }
   }
 
