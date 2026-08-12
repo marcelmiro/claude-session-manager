@@ -210,3 +210,11 @@ test("setup() writes the daemon LaunchAgent plist idempotently (no launchctl und
   await setup();
   expect(readFileSync(plistPath, "utf8")).toBe(plist);
 });
+
+test("setup() creates the sidebar autostart marker on a fresh machine", async () => {
+  const { PATHS } = await import("./core/config");
+  const marker = `${PATHS.dir}/inbox-sidebar-autostart-default`;
+  rmSync(marker, { force: true });
+  await setup();
+  expect(await Bun.file(marker).exists()).toBe(true);
+});

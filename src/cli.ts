@@ -807,6 +807,18 @@ export async function setup(): Promise<void> {
 
   const daemonResult = await installDaemonAgent(home);
 
+  // Sidebar default-on: the renderer stands up only while this marker exists,
+  // and nothing else creates it (the retired prototype's ctl once did) — a
+  // fresh machine would run an invisible inbox engine, with no M-S binding
+  // installed to turn it on. M-S visibility rides its own hidden marker.
+  try {
+    const autostart = `${PATHS.dir}/inbox-sidebar-autostart-default`;
+    if (!(await Bun.file(autostart).exists())) {
+      await Bun.$`mkdir -p ${PATHS.dir}`.quiet();
+      await Bun.write(autostart, "");
+    }
+  } catch {}
+
   if (!scriptsWritten && !settingsChanged && daemonResult === "unchanged") {
     console.log("CSM hooks already configured.");
     return;
