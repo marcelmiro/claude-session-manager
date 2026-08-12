@@ -760,15 +760,17 @@ export function runSidebarRenderer(): void {
       } catch {}
       const winId = await windowOf(invokerPane);
       await ensure(winId || undefined);
+      // the just-created stub hasn't been seen by a topology tick: the fresh
+      // WinState has no dims, no activePaneId and an empty view, so seeding
+      // straight off it selects nothing. Sync + paint the glance frame first,
+      // then reuse the M-s path — it seeds selection off the invoker pane
+      // (which IS this window's active work pane) with a populated fallback.
+      reloadSessions();
+      syncTopology(await listAllPanes());
       const win = wins.get(winId);
       if (win?.stubPane) {
-        win.focused = true;
-        win.clickArmed = true;
-        seedSelection(win);
         paint(win);
-        try {
-          await Bun.$`tmux select-pane -t ${win.stubPane}`.quiet();
-        } catch {}
+        await ctlFocus(invokerPane);
       }
     } else {
       await Bun.write(HIDDEN, "");
