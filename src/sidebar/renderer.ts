@@ -34,6 +34,13 @@ const AUTOSTART = `${PATHS.dir}/inbox-sidebar-autostart-default`;
 const HIDDEN = `${PATHS.dir}/inbox-sidebar-hidden-default`;
 /** start_command marker for stub panes (what discovery greps for). */
 const STUB_MARK = "sidebar-pane";
+/**
+ * Field separator for tmux -F output. NOT \t: tmux sanitizes control
+ * characters to `_` when the client runs OUTSIDE tmux (no TMUX env) — which
+ * is exactly how this daemon always runs. Free-text fields (start_command)
+ * go LAST so a separator collision inside them can't shift the fixed fields.
+ */
+const SEP = "<|>";
 /** Spawn stubs from the SAME entry script this process runs — the globally
  *  installed `csm` may be older and not know the subcommand yet. */
 const STUB_CMD = `${process.execPath} ${process.argv[1]} sidebar-pane`;
@@ -86,6 +93,7 @@ function freshWin(windowId: string): WinState {
 }
 
 export function runSidebarRenderer(): void {
+  console.error(`[sidebar] renderer starting (pid ${process.pid})`);
   const store = new InboxStore();
   let sessions: InboxSession[] = [];
   let lastDataVersion = -1;
@@ -270,11 +278,11 @@ export function runSidebarRenderer(): void {
       const win = await windowOf(s.real.paneId);
       if (!win) return;
       const panes = (
-        await Bun.$`tmux list-panes -t ${win} -F ${"#{pane_id}\t#{pane_start_command}"}`.quiet().text()
+        await Bun.$`tmux list-panes -t ${win} -F ${`#{pane_id}${SEP}#{pane_start_command}`}`.quiet().text()
       )
         .trim()
         .split("\n")
-        .filter((l) => !l.startsWith(`${s.real!.paneId}\t`) && !l.includes(STUB_MARK));
+        .filter((l) => !l.startsWith(`${s.real!.paneId}${SEP}`) && !l.includes(STUB_MARK));
       if (panes.length === 0) {
         if (win === from.windowId) await handOffTo(nextId ?? null, win);
         wins.delete(win);
@@ -725,14 +733,12 @@ export function runSidebarRenderer(): void {
   }
 
   async function listAllPanes(): Promise<PaneRow[]> {
-    const out = (
-      await Bun.$`tmux list-panes -a -F ${"#{window_id}\t#{pane_id}\t#{pane_left}\t#{pane_width}\t#{pane_height}\t#{pane_active}\t#{window_active}\t#{pane_tty}\t#{pane_start_command}\t#{pane_current_command}"}`
-        .quiet()
-        .text()
-    ).trim();
+    const fmt = ["#{window_id}", "#{pane_id}", "#{pane_left}", "#{pane_width}", "#{pane_height}", "#{pane_active}", "#{window_active}", "#{pane_tty}", "#{pane_current_command}", "#{pane_start_command}"].join(SEP);
+    const out = (await Bun.$`tmux list-panes -a -F ${fmt}`.quiet().text()).trim();
     if (!out) return [];
     return out.split("\n").map((l) => {
-      const [windowId, paneId, left, width, height, pa, wa, tty, startCmd, currentCmd] = l.split("\t");
+      const parts = l.split(SEP);
+      const [windowId, paneId, left, width, height, pa, wa, tty, currentCmd] = parts;
       return {
         windowId: windowId!,
         paneId: paneId!,
@@ -742,7 +748,8 @@ export function runSidebarRenderer(): void {
         paneActive: pa === "1",
         windowActive: wa === "1",
         tty: tty ?? "",
-        startCmd: startCmd ?? "",
+        // start_command is free text — it goes last and swallows any SEP hits
+        startCmd: parts.slice(9).join(SEP),
         currentCmd: currentCmd ?? "",
       };
     });
@@ -769,12 +776,12 @@ export function runSidebarRenderer(): void {
         (await Bun.$`ps -ax -o ppid=`.quiet().text()).trim().split("\n").map((s) => s.trim()),
       );
       const pids = (
-        await Bun.$`tmux list-panes -a -F ${"#{pane_id}\t#{pane_pid}"}`.quiet().text()
+        await Bun.$`tmux list-panes -a -F ${`#{pane_id}${SEP}#{pane_pid}`}`.quiet().text()
       )
         .trim()
         .split("\n")
         .reduce((m, l) => {
-          const [pane, pid] = l.split("\t");
+          const [pane, pid] = l.split(SEP);
           if (pane && pid) m.set(pane, pid);
           return m;
         }, new Map<string, string>());
@@ -826,12 +833,12 @@ export function runSidebarRenderer(): void {
             const created = (
               // the socket path travels via -e: the stub's env comes from the
               // tmux SERVER, not from this process, so it can't be inherited
-              await Bun.$`tmux split-window -f -h -b -d -l ${COLS} -t ${winId} -e ${`CSM_SIDEBAR_SOCK=${SIDEBAR_SOCK}`} -P -F ${"#{pane_id}\t#{pane_tty}"} ${STUB_CMD}`
+              await Bun.$`tmux split-window -f -h -b -d -l ${COLS} -t ${winId} -e ${`CSM_SIDEBAR_SOCK=${SIDEBAR_SOCK}`} -P -F ${`#{pane_id}${SEP}#{pane_tty}`} ${STUB_CMD}`
                 .quiet()
                 .text()
             )
               .trim()
-              .split("\t");
+              .split(SEP);
             const win = wins.get(winId) ?? freshWin(winId);
             win.stubPane = created[0] ?? null;
             win.stubTty = created[1] ?? null;
@@ -843,7 +850,9 @@ export function runSidebarRenderer(): void {
           } else if (stub.width !== COLS) {
             await Bun.$`tmux resize-pane -t ${stub.paneId} -x ${COLS}`.quiet();
           }
-        } catch {}
+        } catch (e) {
+          console.error(`[sidebar] ensure ${winId} failed:`, (e as { stderr?: Buffer }).stderr?.toString() ?? e);
+        }
       }),
     );
   }
@@ -960,43 +969,63 @@ export function runSidebarRenderer(): void {
 
   reloadSessions();
   let tickCount = 0;
-  setInterval(async () => {
-    try {
-      tickCount++;
-      // stand down while the prototype chassis owns the panes or M-S hides them
-      const active =
-        (await Bun.file(AUTOSTART).exists()) &&
-        !(await Bun.file(HIDDEN).exists()) &&
-        !(await prototypeRefresherAlive());
-      if (!active) {
-        standing = false;
-        return;
-      }
-      const firstTick = !standing;
-      standing = true;
-      // periodic re-install, not just first tick: a tmux SERVER restart wipes
-      // bindings while the daemon (and its `standing` flag) live on
-      if (firstTick || tickCount % 30 === 0) await installTmuxWiring();
-      await ensure();
-      syncTopology(await listAllPanes());
+  let phase = "idle"; // what the tick was doing — named by the watchdog on a hang
 
-      let dirty = firstTick;
-      try {
-        const dv = store.dataVersion();
-        if (dv !== lastDataVersion) {
-          reloadSessions();
-          dirty = true;
-        }
-      } catch {}
-      const minute = Math.floor(Date.now() / 60_000);
-      if (minute !== lastMinute) {
-        lastMinute = minute;
-        dirty = true;
-      }
-      // paint() diffs per line, so ticking every second is cheap; dirty just
-      // forces the shared-state reload above
-      paintAll();
-      void dirty;
+  async function tick(): Promise<void> {
+    tickCount++;
+    // stand down while the prototype chassis owns the panes or M-S hides them
+    phase = "gate";
+    const active =
+      (await Bun.file(AUTOSTART).exists()) &&
+      !(await Bun.file(HIDDEN).exists()) &&
+      !(await prototypeRefresherAlive());
+    if (!active) {
+      if (standing) console.error("[sidebar] standing down (markers/prototype)");
+      standing = false;
+      return;
+    }
+    const firstTick = !standing;
+    standing = true;
+    if (firstTick) console.error("[sidebar] standing up");
+    // periodic re-install, not just first tick: a tmux SERVER restart wipes
+    // bindings while the daemon (and its `standing` flag) live on
+    phase = "wiring";
+    if (firstTick || tickCount % 30 === 0) await installTmuxWiring();
+    phase = "ensure";
+    await ensure();
+    phase = "topology";
+    syncTopology(await listAllPanes());
+
+    phase = "store";
+    try {
+      const dv = store.dataVersion();
+      if (dv !== lastDataVersion) reloadSessions();
     } catch {}
-  }, 1000);
+    const minute = Math.floor(Date.now() / 60_000);
+    if (minute !== lastMinute) lastMinute = minute;
+    // paint() diffs per line, so ticking every second is cheap
+    phase = "paint";
+    paintAll();
+    phase = "idle";
+  }
+
+  // Self-scheduling loop, NOT setInterval: Bun's setInterval waits for an
+  // async callback's promise, so one hung tmux call would freeze rendering
+  // forever (while the daemon's other loops live on). The watchdog races
+  // every tick; a hang logs the phase it died in and the loop keeps going.
+  (async () => {
+    while (true) {
+      try {
+        await Promise.race([
+          tick(),
+          Bun.sleep(10_000).then(() => {
+            throw new Error(`watchdog: tick hung in phase '${phase}'`);
+          }),
+        ]);
+      } catch (e) {
+        console.error("[sidebar] tick failed:", e);
+      }
+      await Bun.sleep(1000);
+    }
+  })();
 }

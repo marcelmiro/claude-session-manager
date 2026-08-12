@@ -129,11 +129,13 @@ async function spawnWakeWindow(
   banner: string,
 ): Promise<WakeWindow | null> {
   // banner scrolls above claude's UI: walking into this window days later
-  // should say WHY it exists (safe chars only — it runs through a shell)
+  // should say WHY it exists (safe chars only — it runs through a shell).
+  // Separator is printable on purpose: tmux sanitizes control chars (\t) to
+  // `_` for clients running outside tmux — i.e. this daemon, always.
   const out = (
-    await Bun.$`tmux new-window -d -P -F ${"#{pane_id}\t#{session_name}\t#{window_index}"} -c ${dir} -n ${`⚡${repo}`} ${`echo '${banner}'; exec claude -r ${sessionId}`}`.text()
+    await Bun.$`tmux new-window -d -P -F ${"#{pane_id}<|>#{session_name}<|>#{window_index}"} -c ${dir} -n ${`⚡${repo}`} ${`echo '${banner}'; exec claude -r ${sessionId}`}`.text()
   ).trim();
-  const [paneId, sessionName, windowIndex] = out.split("\t");
+  const [paneId, sessionName, windowIndex] = out.split("<|>");
   if (!paneId || !sessionName || windowIndex === undefined) return null;
   return { paneId, sessionName, windowIndex: Number(windowIndex) };
 }
