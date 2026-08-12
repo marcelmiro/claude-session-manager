@@ -116,3 +116,16 @@ describe("cross-connection change detection", () => {
     await Bun.$`rm -f ${path} ${path}-wal ${path}-shm`.quiet();
   });
 });
+
+describe("clearedSince", () => {
+  test("counts distinct archived sessions since t; undo keeps the point", () => {
+    const s = fresh();
+    s.archive("a", 100);
+    s.archive("b", 200);
+    s.unarchive("a", 300);
+    s.archive("a", 400); // re-clear — still one distinct session
+    expect(s.clearedSince(0)).toBe(2);
+    expect(s.clearedSince(150)).toBe(2);
+    expect(s.clearedSince(500)).toBe(0);
+  });
+});

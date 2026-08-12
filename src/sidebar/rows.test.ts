@@ -31,8 +31,8 @@ function vs(over: Partial<ViewState> = {}): ViewState {
 const DIMS = { width: 30, height: 20 };
 
 const SAMPLE = [
-  sess({ id: "n1", since: NOW - 2 * H }),
-  sess({ id: "n2", reason: "question", since: NOW - 10 * M }),
+  sess({ id: "n1", since: NOW - 2 * H, needsYou: true }),
+  sess({ id: "n2", reason: "question", since: NOW - 10 * M, needsYou: true }),
   sess({ id: "r1", running: { finishAt: Number.MAX_SAFE_INTEGER }, since: NOW - 5 * M, real: { paneId: "%1", target: "main:1", status: "running" } }),
   sess({ id: "p1", disposition: { kind: "snoozed", until: NOW + 3 * H } }),
   sess({ id: "d1", archivedAt: NOW - H }),
@@ -108,7 +108,7 @@ describe("renderView", () => {
   });
 
   test("focused selection below the fold scrolls into view", () => {
-    const many = Array.from({ length: 20 }, (_, i) => sess({ id: `n${i}`, since: NOW - i * M }));
+    const many = Array.from({ length: 20 }, (_, i) => sess({ id: `n${i}`, since: NOW - i * M, needsYou: true }));
     const view = renderView(many, vs({ focused: true, selectedId: "n0" }), { width: 30, height: 10 }, NOW);
     // n0 is the YOUNGEST (needs-you sorts oldest first → last row); it must be visible
     expect(view.scrollTop).toBeGreaterThan(0);
@@ -120,4 +120,16 @@ describe("renderView", () => {
     const view = renderView(SAMPLE, vs({ activePaneId: "%1" }), DIMS, NOW);
     expect(view.rows.join("")).toContain("▎");
   });
+});
+
+test("unadmitted prompt-sitters render under a dim OPEN section", () => {
+  const view = renderView(
+    [...SAMPLE, sess({ id: "o1", name: "idle-one" })],
+    vs(),
+    { width: 30, height: 24 },
+    NOW,
+  );
+  expect(view.rows.join("")).toContain("OPEN 1");
+  expect(view.rows.join("")).toContain("idle-one");
+  expect(view.visible.find((v) => v.id === "o1")?.section).toBe("open");
 });

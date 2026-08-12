@@ -110,8 +110,8 @@ describe("deriveSections", () => {
   test("needs-you oldest-ignored first; running longest first (script anchor)", () => {
     const sections = deriveSections(
       [
-        sess({ id: "young", since: NOW - M }),
-        sess({ id: "old", since: NOW - D }),
+        sess({ id: "young", since: NOW - M, needsYou: true }),
+        sess({ id: "old", since: NOW - D, needsYou: true }),
         sess({ id: "run-new", since: NOW - 2 * M, running: { finishAt: NOW + H } }),
         sess({ id: "run-script", since: NOW - M, running: { finishAt: NOW + H }, script: true, scriptSince: NOW - H }),
       ],
@@ -140,5 +140,29 @@ describe("deriveSections", () => {
       NOW,
     );
     expect(sections.done.map((s) => s.id)).toEqual(["d2", "d1"]);
+  });
+});
+
+describe("transition gating (M3)", () => {
+  test("a plain prompt-sitting session is OPEN, not needs-you", () => {
+    expect(sectionOf(sess({}), NOW)).toBe("open");
+  });
+
+  test("admission flag, wake flag, or a live approval prompt admit", () => {
+    expect(sectionOf(sess({ needsYou: true }), NOW)).toBe("needs-you");
+    expect(sectionOf(sess({ fromSnooze: true }), NOW)).toBe("needs-you");
+    expect(sectionOf(sess({ reason: "approval" }), NOW)).toBe("needs-you");
+  });
+
+  test("a derived finish (finishAt passed) is its own transition — no flag needed", () => {
+    expect(sectionOf(sess({ running: { finishAt: NOW - M } }), NOW)).toBe("needs-you");
+  });
+
+  test("open sorts most recent first", () => {
+    const { open } = deriveSections(
+      [sess({ id: "o-old", since: NOW - D }), sess({ id: "o-new", since: NOW - M })],
+      NOW,
+    );
+    expect(open.map((s) => s.id)).toEqual(["o-new", "o-old"]);
   });
 });

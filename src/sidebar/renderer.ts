@@ -369,6 +369,7 @@ export function runSidebarRenderer(): void {
     "needs-you": ["s", "b", "e"],
     running: ["e"],
     parked: ["s", "b", "e"],
+    open: ["s", "b", "e"],
     done: ["e"],
   };
 
