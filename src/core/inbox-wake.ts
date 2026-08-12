@@ -163,16 +163,27 @@ export async function wakePass(store: InboxStore, now = Date.now()): Promise<voi
       );
       if (!win) continue;
       const stamped = await stampWakeAttention(win.paneId);
-      // banner tier: a wake is an alarm the user set, so it alerts like any
+      // Alert tier: a wake is an alarm the user set, so it alerts like any
       // attention event. Only once the session is genuinely ready — a resume
-      // that never boots must not announce itself. No Web Push (ADR 0013
-      // addendum 2: deferred until an inbox surface exists in portkey).
+      // that never boots must not announce itself. On darwin that's the
+      // native banner; a headless host has no banner tier, so the wake
+      // broadcasts a Web Push to every device instead — a snooze set days
+      // ago has no meaningful "driving device" to target (the general wake
+      // push stays deferred per ADR 0013 addendum 2; this replaces a tier
+      // that cannot exist off-darwin, it doesn't add one).
       if (stamped && config.nativeNotification) {
-        sendNativeNotification(
-          `☾ Woke — ${row.name ?? row.repo ?? w.sessionId.slice(0, 8)}`,
-          `snoozed ${snoozeSpan(w.snoozedAt, now)} ago — due now`,
-          win,
-        );
+        const title = `☾ Woke — ${row.name ?? row.repo ?? w.sessionId.slice(0, 8)}`;
+        const body = `snoozed ${snoozeSpan(w.snoozedAt, now)} ago — due now`;
+        if (process.platform === "darwin") {
+          sendNativeNotification(title, body, win);
+        } else {
+          try {
+            const { listDeviceIds, sendWebPush } = await import("./web-push");
+            await Promise.all(
+              listDeviceIds().map((id) => sendWebPush(id, { title, body, sessionId: w.sessionId })),
+            );
+          } catch {}
+        }
       }
     } catch {
       // best-effort per session; the claim stands (no wake retry storm), the

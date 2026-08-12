@@ -133,3 +133,25 @@ unattached session is otherwise invisible — the resurrect incident left
 exactly that); and the renderer respawns all stub relays at stand-up (a
 stub outliving a renderer restart eats one keystroke per pane to notice
 its socket died).
+
+## Addendum 5: the VM cutover story (2026-08-12, grilled)
+
+Settled against ADR 15/16's single-host cutover, built ahead of it:
+
+- **One host owns the inbox.** The daemon becomes `csm-daemon.service` on the
+  VM (provision-installed, BindsTo=tmux.service); the Mac launchd agent is
+  booted out at cutover as a runbook teardown step. Two daemons against two
+  tmux servers would mean two divergent inboxes — a multi-host inbox was
+  refused as speculative design.
+- **`inbox.db` rides the state copy** (WAL checkpointed first, daemon
+  stopped): a snooze pending at cutover is a promise and must wake on the VM.
+  Repo paths inside stay valid via /Users parity; the snapshot table
+  self-rebuilds on the first discovery tick.
+- **Off-darwin wake alert = broadcast Web Push.** The banner tier cannot
+  exist on a headless host; the wake pass broadcasts to every subscribed
+  device there (a snooze set days ago has no meaningful driving device —
+  same reasoning as `csm notify` ops alerts). This replaces an impossible
+  tier rather than un-deferring the general wake push of addendum 2, which
+  still waits for the portkey inbox.
+- **Unit ownership stays split by platform**: provision.sh owns systemd
+  units (like bridge/monitor), `csm setup` owns launchd and no-ops off-darwin.
