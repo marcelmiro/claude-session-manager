@@ -264,6 +264,16 @@ export function runSidebarRenderer(): void {
     } catch {}
   }
 
+  // The disposition walk follows the view to the next session's window ONLY
+  // when the disposed session lived in the window being looked at (its pane
+  // is about to die under you). Disposing a row that lives elsewhere must
+  // not yank the view away — the cursor still falls to the next row.
+  // Resolve BEFORE killPaneOf: a dead pane no longer answers windowOf.
+  async function livesHere(win: WinState, s: InboxSession | undefined): Promise<boolean> {
+    if (!s?.real) return false;
+    return (await windowOf(s.real.paneId)) === win.windowId;
+  }
+
   // Leave a dying window for the next session's sidebar, selection carried.
   async function handOffTo(nextId: string | null, dyingWin: string): Promise<void> {
     try {
@@ -456,12 +466,13 @@ export function runSidebarRenderer(): void {
         const prev = win.selectedId;
         win.selectedId = nextSelectionAfterVerb(win, id);
         const target = findSession(id);
+        const walk = await livesHere(win, target);
         const ok = applyVerb(() => store.block(id, note, Date.now()));
         if (ok) {
           await killPaneOf(win, target, win.selectedId);
           showFlash(win, `blocked${target?.real ? " — pane closed" : ""}`);
           paintAll();
-          await followSelection(win, win.selectedId);
+          if (walk) await followSelection(win, win.selectedId);
         } else {
           win.selectedId = prev;
           showFlash(win, "gone — nothing blocked");
@@ -528,12 +539,13 @@ export function runSidebarRenderer(): void {
           const prev = win.selectedId;
           if (win.selectedId === id) win.selectedId = nextSelectionAfterVerb(win, id);
           const target = findSession(id);
+          const walk = await livesHere(win, target);
           const ok = applyVerb(() => store.snooze(id, wakeAt(Date.now(), n, unit), Date.now()));
           if (ok) {
             await killPaneOf(win, target, win.selectedId);
             showFlash(win, `snoozed ${n}${unit}${target?.real ? " — pane closed" : ""}`);
             paintAll();
-            await followSelection(win, win.selectedId);
+            if (walk) await followSelection(win, win.selectedId);
             return;
           }
           win.selectedId = prev;
@@ -661,6 +673,7 @@ export function runSidebarRenderer(): void {
         // next row, not re-target this one while the mutate is in flight
         const prev = win.selectedId;
         win.selectedId = nextSelectionAfterVerb(win, row.id);
+        const walk = await livesHere(win, s);
         const ok = applyVerb(() => store.archive(row.id, Date.now()));
         if (ok) {
           if (willKill && s?.real) {
@@ -668,7 +681,7 @@ export function runSidebarRenderer(): void {
             showFlash(win, "done — pane closed");
           } else showFlash(win, "archived");
           paintAll();
-          await followSelection(win, win.selectedId);
+          if (walk) await followSelection(win, win.selectedId);
           break;
         }
         win.selectedId = prev;
