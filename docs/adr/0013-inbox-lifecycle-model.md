@@ -108,3 +108,28 @@ device when portkey-set, stale-liveness broadcast when Mac-set).
 trust; does clearing pull); ⚡/Needs-You event-source convergence; then
 provenance (fork/handoff links table already exists, `↳` grouping,
 handoff wake rule: child archived → parent wakes).
+
+## Addendum 4: OPEN retired — every prompt-sitter is Needs You (2026-08-12)
+
+The transition-gated admission (addendum 3) lasted zero days of real use.
+Lived-with verdict: a live session sitting at a prompt IS unfinished
+business, and filing it under a dim OPEN section just hid rows that still
+wanted a decision. `sectionOf` now sends every non-running, non-parked,
+non-archived live session to Needs You; the aim is to clear the section by
+actioning each row (reply, snooze, block, done). The `needsYou` flag, the
+one-time ⚡ seed, and the OPEN section are gone; observed running→ready/
+waiting transitions are still written as `transition` events (scoreboard +
+history), and the derived-finish and wake rules are unchanged.
+
+Same day, the resume paths earned their first real fixes (all found by
+walking the reported bugs): dead-pane probes moved off `display-message`
+(exits 0 against a fallback pane on tmux 3.7b) onto `list-panes`; snapshot
+rows preserved without a live pane get their stale `real` stripped so Enter
+resumes instead of selecting a reused window index; window spawns from the
+tty-less daemon must be `-d` (non-detached never returns) and single-string
+(multi-arg is direct-exec'd shell-less — no PATH, no claude); `switchTo`
+switches any client attached to a different tmux session (a pane in an
+unattached session is otherwise invisible — the resurrect incident left
+exactly that); and the renderer respawns all stub relays at stand-up (a
+stub outliving a renderer restart eats one keystroke per pane to notice
+its socket died).

@@ -56,7 +56,6 @@ const SECTION_HINTS: Record<Section, string> = {
   "needs-you": "↵  s b e f  ?",
   running: "↵  e f  ?",
   parked: "↵  b s e f  ?",
-  open: "↵  s b e f  ?",
   done: "↵  e f  ?",
 };
 
@@ -223,18 +222,6 @@ export function renderView(
     const d = s.disposition!;
     const right = d.kind === "snoozed" ? `☾ ${fmtWake(d.until, now)}` : `✗ ${d.note}`;
     push(s, "parked", sessionLine(s, vs, width, C.dim, { right: truncate(right, 12), rightColor: C.dim, oneLine: true }));
-  }
-
-  // OPEN: live sessions with nothing unhandled — neutral, one-line, dim.
-  // Deliberately not nagging: no reason glyphs, ages muted. Being here is
-  // fine; Needs You is the inbox (ADR 0013 / transition gating).
-  const { open } = sections;
-  if (open.length) {
-    lines.push("");
-    lines.push(bold(fg(C.dim, ` OPEN ${open.length}`)));
-    for (const s of open) {
-      push(s, "open", sessionLine(s, vs, width, C.muted, { right: fmtAge(now - s.since), rightColor: C.dim, oneLine: true }));
-    }
   }
 
   if (done.length) {

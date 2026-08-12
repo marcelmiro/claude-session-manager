@@ -14,7 +14,6 @@ import { loadNameCache } from "./names";
 import { branchPullRequest } from "./pull-request";
 import { detectScriptWaits } from "./script-wait";
 import { readLastPromptAt, resolveTranscriptPath } from "./last-turn";
-import { loadState } from "./state";
 import type { InboxStore } from "./inbox-store";
 import { stripOverlay, type InboxSession } from "./inbox-model";
 
@@ -70,7 +69,6 @@ export async function discoveryTick(store: InboxStore): Promise<void> {
       repoPath: s.repoPath,
       branch: s.branch,
       autoResumed: p?.autoResumed,
-      needsYou: p?.needsYou,
       // AI name from the shared cache (discovery only maps names onto
       // unmatched sessions, so look active ones up directly), else branch
       name: nameCache.names[s.id] || s.name || s.branch || s.id.slice(0, 8),
@@ -103,15 +101,12 @@ export async function discoveryTick(store: InboxStore): Promise<void> {
       const was = store.clearDisposition(s.id, now, "reply");
       if (arch.has(s.id)) store.unarchive(s.id, now);
       row.fromSnooze = was === "snoozed";
-      row.needsYou = undefined; // the reply handled it — admission resets
     }
-    // Needs You admission (ADR 0013 / M3): only an OBSERVED transition into
-    // ready/waiting admits — `p` required, so a session merely found sitting
-    // at a prompt on first sight lands in OPEN instead. (A first-sight
-    // approval prompt still reads needs-you via its reason: the prompt on
-    // screen is present-tense evidence.) The event log feeds the scoreboard.
+    // An OBSERVED transition into ready/waiting goes to the event log — it
+    // feeds the scoreboard and keeps a history of when sessions handed back.
+    // (It once also gated Needs You admission; every prompt-sitter files
+    // there now, so the event is record-keeping only.)
     if (p && statusChanged && (eff === "waiting" || (eff === "ready" && p.real?.status === "running"))) {
-      row.needsYou = true;
       store.transition(s.id, now, p.real?.status ?? null, eff);
     }
     row.pr = p?.pr; // carried; refreshed below on its own cadence
@@ -141,24 +136,6 @@ export async function discoveryTick(store: InboxStore): Promise<void> {
     }),
   );
 
-  // One-time Needs You seed from the monitor's ⚡ flags, so the inbox and the
-  // attention system agree on day one — everything without a flag starts in
-  // OPEN and earns its way in via observed transitions from here on.
-  if (byId.size && !store.getKV("needs-you-seeded")) {
-    store.setKV("needs-you-seeded", "1");
-    try {
-      const st = await loadState();
-      const flagged = new Set(
-        Object.values(st.sessions)
-          .filter((v) => v.needsAttention)
-          .map((v) => v.tmuxPane),
-      );
-      for (const row of byId.values()) {
-        if (row.real && flagged.has(row.real.paneId)) row.needsYou = true;
-      }
-    } catch {}
-  }
-
   // a transient discovery hiccup (tmux/ps failing mid-call) yields zero rows;
   // writing that would wipe the activity snapshot — skip the tick instead
   // (the authored overlay is safe in its own tables regardless)
@@ -173,8 +150,12 @@ export async function discoveryTick(store: InboxStore): Promise<void> {
   // a reply-observed unpark must NOT pin a row here after its pane closes.
   for (const p of prevRows) {
     if (byId.has(p.id)) continue;
+    // a preserved row has NO live pane this tick — drop the stale activity
+    // (`real` still points at the killed pane, `running`/`script` describe a
+    // state that ended with it) so Enter resumes instead of chasing a ghost
+    const kept: InboxSession = { ...p, real: undefined, running: undefined, script: undefined, scriptSince: undefined };
     if (disp.has(p.id) || (arch.has(p.id) && now - arch.get(p.id)! < 86_400_000)) {
-      rows.push(p);
+      rows.push(kept);
       continue;
     }
     const ev = store.latestEvent(p.id);
@@ -182,7 +163,7 @@ export async function discoveryTick(store: InboxStore): Promise<void> {
       ev?.type === "unarchive" ||
       (ev?.type === "unpark" && (ev.meta as { reason?: string } | null)?.reason === "manual")
     ) {
-      rows.push(p);
+      rows.push(kept);
     }
   }
 

@@ -28,13 +28,6 @@ export interface InboxSession {
   branch?: string;
   /** A woken snooze already auto-reopened its pane — never spawn twice. */
   autoResumed?: boolean;
-  /**
-   * Admitted into Needs You by an OBSERVED transition (running→ready/waiting
-   * seen by discovery, or the one-time ⚡ seed) — not by merely existing at a
-   * prompt. Cleared when a reply is observed (session runs again). ADR 0013:
-   * the inbox is unhandled events, not open sessions.
-   */
-  needsYou?: boolean;
   /** Turn is over but a live run_in_background script is still going (the ⏳ tier). */
   script?: boolean;
   /** When the script-wait state began (⧗ rows age from this, not the prompt). */
@@ -43,7 +36,7 @@ export interface InboxSession {
   pr?: { number?: number; state: string; fetchedAt: number };
 }
 
-export type Section = "needs-you" | "running" | "parked" | "open" | "done";
+export type Section = "needs-you" | "running" | "parked" | "done";
 
 // LOCAL dates, not UTC — with ISO slicing a "snooze 1d" pressed at 00:30 local
 // wakes ~90 minutes later (UTC midnight = 02:00 CEST). Day granularity means
@@ -108,13 +101,11 @@ export function sectionOf(s: InboxSession, now: number): Section | null {
     if (s.running.finishAt > now) return "running";
     return "needs-you"; // finished while unattended — the timestamp IS the transition
   }
-  // Transition-gated (ADR 0013 / M3): Needs You takes an observed admission
-  // (needsYou flag), a wake (fromSnooze), or a LIVE approval prompt (waiting
-  // is present-tense evidence, unlike ready which just means idle). Everything
-  // else — a session merely sitting at a prompt — is OPEN: visible, not
-  // nagging. The inbox starts honest instead of importing every live session.
-  if (s.needsYou || s.fromSnooze || s.reason === "approval") return "needs-you";
-  return "open";
+  // Every live session sitting at a prompt is unfinished business: it files
+  // under Needs You until dispatched — reply, snooze, block, or archive. (A
+  // neutral OPEN bucket for prompt-sitters existed briefly; lived-with verdict
+  // was that it just hid rows that still wanted a decision.)
+  return "needs-you";
 }
 
 /** Effective "in this state since" for age display (accounts for derived flips). */
@@ -136,8 +127,6 @@ export interface InboxSections {
   needsYou: InboxSession[];
   running: InboxSession[];
   parked: InboxSession[];
-  /** Live sessions with nothing unhandled — the neutral, non-nagging bucket. */
-  open: InboxSession[];
   done: InboxSession[];
 }
 
@@ -158,7 +147,6 @@ export function deriveSections(sessions: InboxSession[], now: number): InboxSect
       if (ad.kind === "snoozed" && bd.kind === "snoozed") return ad.until - bd.until;
       return b.since - a.since;
     }),
-    open: by("open").sort((a, b) => b.since - a.since), // most recent first — glanceable, no urgency ordering
     done: by("done").sort((a, b) => (b.archivedAt ?? 0) - (a.archivedAt ?? 0)),
   };
 }

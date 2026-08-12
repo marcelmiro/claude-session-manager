@@ -221,12 +221,26 @@ export function runSidebarRenderer(): void {
 
   // ── tmux actions ─────────────────────────────────────────────────────────
 
-  async function windowOf(paneId: string): Promise<string> {
+  // Where a pane lives, or null when it's dead. NOT display-message: with a
+  // vanished pane target, `display-message -p -t %x` silently formats against
+  // a fallback pane and exits 0 (tmux 3.7b) — it can't detect death and
+  // returns some other window's id. list-panes genuinely fails on a dead pane.
+  async function paneLocation(paneId: string): Promise<{ windowId: string; session: string } | null> {
     try {
-      return (await Bun.$`tmux display-message -p -t ${paneId} ${"#{window_id}"}`.quiet().text()).trim();
+      const line = (
+        await Bun.$`tmux list-panes -t ${paneId} -F ${`#{window_id}${SEP}#{session_name}`}`.quiet().text()
+      )
+        .trim()
+        .split("\n")[0];
+      const [windowId, session] = (line ?? "").split(SEP);
+      return windowId ? { windowId, session: session ?? "" } : null;
     } catch {
-      return "";
+      return null;
     }
+  }
+
+  async function windowOf(paneId: string): Promise<string> {
+    return (await paneLocation(paneId))?.windowId ?? "";
   }
 
   // After a disposition the VIEW follows the selection: show the next
@@ -300,31 +314,72 @@ export function runSidebarRenderer(): void {
     } catch {}
   }
 
+  // Any client looking at a different tmux session gets switched — selecting
+  // a window in an UNATTACHED session is invisible (the resurrect incident
+  // left live claudes in a stray session "0"; Enter on them did "nothing").
+  async function showToClients(session: string): Promise<void> {
+    if (!session) return;
+    try {
+      const clients = (
+        await Bun.$`tmux list-clients -F ${`#{client_tty}${SEP}#{client_session}`}`.quiet().text()
+      )
+        .trim()
+        .split("\n")
+        .filter(Boolean);
+      for (const line of clients) {
+        const [tty, current] = line.split(SEP);
+        if (tty && current !== session) {
+          await Bun.$`tmux switch-client -c ${tty} -t ${session}`.quiet();
+        }
+      }
+    } catch {}
+  }
+
   // Enter and click share this. A row whose pane died resumes on demand;
-  // re-engaging an ARCHIVED session un-archives into Needs You.
+  // re-engaging an ARCHIVED session un-archives into Needs You. The window
+  // comes from the live pane's ACTUAL location, never the row's recorded
+  // session:index — indexes get reused, and a stale one lands anywhere.
   async function switchTo(win: WinState, s: InboxSession): Promise<void> {
     if (s.archivedAt) {
       applyVerb(() => store.unarchive(s.id, Date.now()));
       showFlash(win, "restored — reopening");
     }
-    if (s.real) {
+    const loc = s.real ? await paneLocation(s.real.paneId) : null;
+    if (loc && s.real) {
       try {
-        await Bun.$`tmux display-message -p -t ${s.real.paneId} ok`.quiet(); // pane alive?
-        await Bun.$`tmux select-window -t ${s.real.target}`.quiet();
+        await Bun.$`tmux select-window -t ${loc.windowId}`.quiet();
         await Bun.$`tmux select-pane -t ${s.real.paneId}`.quiet();
-      } catch {
-        await resumeSession(win, s);
-      }
-    } else if (s.repoPath) {
-      await resumeSession(win, s);
+        await showToClients(loc.session);
+        return;
+      } catch {}
     }
+    await resumeSession(win, s);
   }
 
   async function resumeSession(win: WinState, s: InboxSession): Promise<void> {
     try {
       const home = process.env.HOME ?? "/";
       const dir = (await resolveRestoreTarget(s.id, s.repoPath ?? home)) ?? s.repoPath ?? home;
-      await Bun.$`tmux new-window -c ${dir} claude -r ${s.id}`.quiet();
+      // -d is load-bearing: a NON-detached new-window from the tty-less
+      // daemon never returns (verified live — the Bun.$ promise just hangs),
+      // so spawn detached and select the window explicitly. The -t pin
+      // matters too: outside tmux, an untargeted new-window lands in the
+      // most recently USED session, not the one on screen.
+      const attached = (
+        await Bun.$`tmux list-clients -F ${"#{client_session}"}`.quiet().text()
+      )
+        .trim()
+        .split("\n")[0];
+      // ONE string, not word-split argv: tmux direct-execs a multi-arg
+      // command with no shell, and the daemon's PATH has no claude — the
+      // single string goes through `$SHELL -c`, where zshenv restores PATH
+      const cmd = `exec claude -r ${s.id}`;
+      const spawned = (
+        attached
+          ? await Bun.$`tmux new-window -d -P -F ${"#{window_id}"} -t ${attached + ":"} -c ${dir} ${cmd}`.quiet().text()
+          : await Bun.$`tmux new-window -d -P -F ${"#{window_id}"} -c ${dir} ${cmd}`.quiet().text()
+      ).trim();
+      if (spawned) await Bun.$`tmux select-window -t ${spawned}`.quiet();
       showFlash(win, "pane gone — resuming in new window");
     } catch {
       showFlash(win, "resume failed");
@@ -369,7 +424,6 @@ export function runSidebarRenderer(): void {
     "needs-you": ["s", "b", "e"],
     running: ["e"],
     parked: ["s", "b", "e"],
-    open: ["s", "b", "e"],
     done: ["e"],
   };
 
@@ -534,11 +588,16 @@ export function runSidebarRenderer(): void {
             const home = process.env.HOME ?? "/";
             const dir = (await resolveRestoreTarget(s.id, s.repoPath ?? home)) ?? s.repoPath ?? home;
             const parentWin = s.real ? await windowOf(s.real.paneId) : "";
-            if (parentWin) {
-              await Bun.$`tmux new-window -a -t ${parentWin} -c ${dir} claude -r ${s.id} --fork-session`.quiet();
-            } else {
-              await Bun.$`tmux new-window -c ${dir} claude -r ${s.id} --fork-session`.quiet();
-            }
+            // -d and the single-string command for the same reasons as
+            // resumeSession: non-detached new-window hangs the tty-less
+            // daemon, and a word-split command skips the shell (no PATH)
+            const cmd = `exec claude -r ${s.id} --fork-session`;
+            const spawned = (
+              parentWin
+                ? await Bun.$`tmux new-window -d -a -P -F ${"#{window_id}"} -t ${parentWin} -c ${dir} ${cmd}`.quiet().text()
+                : await Bun.$`tmux new-window -d -P -F ${"#{window_id}"} -c ${dir} ${cmd}`.quiet().text()
+            ).trim();
+            if (spawned) await Bun.$`tmux select-window -t ${spawned}`.quiet();
             showFlash(win, "forked → new window");
           } catch {
             showFlash(win, "fork failed");
@@ -863,6 +922,20 @@ export function runSidebarRenderer(): void {
     );
   }
 
+  // A stub that outlived a previous renderer holds a DEAD relay: its `cat`
+  // blocks reading the tty and only notices the vanished socket when a
+  // keystroke dies into it (SIGPIPE) — eating that keystroke, one per pane.
+  // Respawn every existing stub at stand-up so they reconnect to THIS
+  // renderer's socket immediately.
+  async function respawnRelays(): Promise<void> {
+    try {
+      for (const p of await listAllPanes()) {
+        if (!p.startCmd.includes(STUB_MARK)) continue;
+        await Bun.$`tmux respawn-pane -k -t ${p.paneId} ${STUB_CMD}`.quiet();
+      }
+    } catch {}
+  }
+
   function syncTopology(panes: PaneRow[]): void {
     const seen = new Set<string>();
     const byWindow = new Map<string, PaneRow[]>();
@@ -1008,6 +1081,8 @@ export function runSidebarRenderer(): void {
     // bindings while the daemon (and its `standing` flag) live on
     phase = "wiring";
     if (firstTick || tickCount % 30 === 0) await installTmuxWiring();
+    phase = "relays";
+    if (firstTick) await respawnRelays();
     phase = "ensure";
     await ensure();
     phase = "topology";
