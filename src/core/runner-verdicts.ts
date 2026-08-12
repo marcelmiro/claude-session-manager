@@ -25,8 +25,18 @@
  */
 import { mkdir, readdir, rename, unlink, writeFile } from "node:fs/promises";
 import { realpath } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { PATHS } from "./config";
 import { withDeadline } from "./deadline";
+
+/**
+ * lsof lives at /usr/sbin/lsof on macOS and /usr/bin/lsof on Linux, and the monitor
+ * runs under tmux's status-command environment whose PATH can lack both dirs — so
+ * resolve via PATH first, then the known absolute homes. Resolved once at import: a
+ * bare "lsof" that ENOENTs inside the probe would misreport every runner as dead.
+ */
+export const LSOF =
+  Bun.which("lsof") ?? ["/usr/sbin/lsof", "/usr/bin/lsof"].find(existsSync) ?? "lsof";
 
 const VERDICTS_DIR = `${PATHS.dir}/verdicts`;
 const ALIVE_TTL_MS = 15_000;
@@ -88,10 +98,8 @@ export const runnersAlive: RunnerProbe = async (outputPaths) => {
   if (byResolved.size === 0) return verdicts;
 
   try {
-    // Absolute path: the monitor runs under tmux's status-command environment, whose
-    // PATH lacks /usr/sbin — a bare "lsof" throws ENOENT there, which the catch below
-    // would misreport as a dead runner. `--` guards a path that starts with a dash.
-    const proc = Bun.spawn(["/usr/sbin/lsof", "-F", "n", "--", ...byResolved.keys()], {
+    // `--` guards a path that starts with a dash.
+    const proc = Bun.spawn([LSOF, "-F", "n", "--", ...byResolved.keys()], {
       stdout: "pipe",
       stderr: "ignore",
     });

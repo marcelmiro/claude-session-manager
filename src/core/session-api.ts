@@ -192,7 +192,7 @@ export async function readPaneStatusline(paneId: string, capture?: string): Prom
 /** Outcome of a send; `reason` is set only on rejection (nothing was sent). */
 export type SendResult = {
   ok: boolean;
-  reason?: "no-pane" | "no-question" | "stale-question" | "not-presented" | "not-held" | "no-prompt" | "no-session" | "rewind-unavailable" | "rewind-mismatch" | "rewind-mode" | "bad-image" | "bad-selection" | "no-confirm" | "no-repo" | "no-transcript" | "resume-failed" | "not-found" | "shell-draft" | "shell-clear-failed";
+  reason?: "no-pane" | "no-question" | "stale-question" | "not-presented" | "not-held" | "no-prompt" | "no-session" | "rewind-unavailable" | "rewind-mismatch" | "rewind-mode" | "bad-image" | "bad-selection" | "no-confirm" | "no-repo" | "no-transcript" | "resume-failed" | "not-found" | "shell-draft" | "shell-clear-failed" | "draft-stash-failed" | "clear-failed";
   /** Fresh session id, set by createSession to the dictated id. */
   sessionId?: string;
 };
@@ -1261,11 +1261,11 @@ async function killInput(paneId: string): Promise<boolean> {
   }
   await sendKey(paneId, "C-e");
   await Bun.sleep(KEY_GAP);
-  for (let i = 0; i < 12 && inputPending(await capturePane(paneId)); i++) {
+  for (let i = 0; i < 12 && inputPending(await captureTyped(paneId)); i++) {
     await sendKey(paneId, "C-u");
     await Bun.sleep(KEY_GAP);
   }
-  return !inputPending(await capturePane(paneId));
+  return !inputPending(await captureTyped(paneId));
 }
 
 /**
@@ -1297,14 +1297,14 @@ async function runSendStep(paneId: string, step: SendStep): Promise<boolean> {
       for (let i = 0; i < 4; i++) {
         await sendKey(paneId, "Enter");
         await Bun.sleep(450);
-        if (!inputPending(await capturePane(paneId))) break;
+        if (!inputPending(await captureTyped(paneId))) break;
       }
       return true;
     case "restore":
       // Yank ONLY after our message clears the prompt — a premature C-y would paste the
       // draft into the not-yet-submitted input and ride along with our message.
       for (let i = 0; i < 8; i++) {
-        if (!inputPending(await capturePane(paneId))) break;
+        if (!inputPending(await captureTyped(paneId))) break;
         await Bun.sleep(KEY_GAP);
       }
       await sendKey(paneId, "C-y"); // Claude's yank: re-adds the draft cut by the stash kills
@@ -1328,12 +1328,14 @@ export async function sendMessage(
 ): Promise<SendResult> {
   const paneId = await resolveSessionPane(sessionId);
   if (!paneId) return { ok: false, reason: "no-pane" };
-  let capture = await capturePane(paneId);
+  // One styled capture, two views: shell detection needs the dim "! for shell mode"
+  // hint kept; draft detection needs dim ghost text dropped (see flattenStyled).
+  let styled = await capturePane(paneId, { escapes: true });
   // Shell-mode guard, BEFORE the `❯` draft guard (mutually exclusive prompts — shell mode
   // has no live `❯` line, so killInput can neither see nor clear it). The case this
   // catches: after a QUEUED `!cmd` executes, the pane's prompt STAYS in shell mode, and a
   // plain send typed into it would execute as bash.
-  const shell = shellModeInput(capture);
+  const shell = shellModeInput(flattenStyled(styled, false));
   if (shell) {
     // Text on the shell prompt is a Mac-side command mid-composition. The kill-ring
     // choreography is unverified in shell mode and its failure mode is silent draft
@@ -1343,10 +1345,10 @@ export async function sendMessage(
     // prompt to actually be gone before typing — never send into an unknown state.
     await sendKey(paneId, "BSpace");
     await Bun.sleep(KEY_GAP);
-    capture = await capturePane(paneId);
-    if (shellModeInput(capture)) return { ok: false, reason: "shell-clear-failed" };
+    styled = await capturePane(paneId, { escapes: true });
+    if (shellModeInput(flattenStyled(styled, false))) return { ok: false, reason: "shell-clear-failed" };
   }
-  const hadDraft = inputPending(capture);
+  const hadDraft = inputPending(flattenStyled(styled, true));
   for (const step of buildSendPlan(text, imagePaths, hadDraft)) {
     // A failed stash aborts BEFORE the message is typed: proceeding would splice it into
     // the remnant draft and submit both as one turn. The phone surfaces the failure and
@@ -1397,7 +1399,7 @@ export async function setSessionModelEffort(
 ): Promise<SendResult & { line?: string }> {
   const paneId = await resolveSessionPane(sessionId);
   if (!paneId) return { ok: false, reason: "no-pane" };
-  const hadDraft = inputPending(await capturePane(paneId));
+  const hadDraft = inputPending(await captureTyped(paneId));
   for (const step of buildSendPlan(`/${kind} ${value}`, [], hadDraft)) {
     // Same abort-on-failed-stash as sendMessage: never type into a remnant draft.
     if (!(await runSendStep(paneId, step))) return { ok: false, reason: "draft-stash-failed" };
@@ -1422,6 +1424,55 @@ export async function setSessionModelEffort(
  * the placeholder, the exact-match miss just restores the old (false-draft) behavior.
  */
 const QUEUED_PLACEHOLDER = "Press up to edit queued messages";
+
+/**
+ * Flatten a styled (`escapes: true`) pane capture to text, optionally dropping every
+ * DIM (SGR 2) span. Claude Code renders ghost text dim inside the EMPTY input box —
+ * placeholder hints, and a held/queued message shown verbatim where the old
+ * "Press up to edit queued messages" placeholder used to be (lab capture:
+ * `❯ ESC[2mcommit that batchESC[0m` with the box genuinely empty — typing replaced
+ * it, backspace brought it back). A plain capture flattens that into something
+ * indistinguishable from a real draft, which made `killInput` "fail" to clear an
+ * already-empty box and every send abort with draft-stash-failed. Real typed input
+ * never renders dim, so dim-vs-not is the discriminator. Dim state carries across
+ * newlines (a wrapped span doesn't re-emit its SGR on the continuation row).
+ */
+export function flattenStyled(styled: string, dropDim: boolean): string {
+  let out = "";
+  let dim = false;
+  for (let i = 0; i < styled.length; i++) {
+    const ch = styled[i]!;
+    if (ch === "\x1b") {
+      const rest = styled.slice(i);
+      const sgr = rest.match(/^\x1b\[([0-9;]*)m/);
+      if (sgr) {
+        const params = sgr[1]!.split(";");
+        for (let j = 0; j < params.length; j++) {
+          const p = params[j]!;
+          if (p === "" || p === "0") dim = false;
+          else if (p === "2") dim = true;
+          else if (p === "22") dim = false; // "normal intensity" — ends dim without a full reset
+          // Extended color: 38/48 consume sub-params (5;n or 2;r;g;b). Without
+          // skipping them, the "2" in a truecolor sequence reads as SGR dim.
+          else if (p === "38" || p === "48") j += params[j + 1] === "2" ? 4 : params[j + 1] === "5" ? 2 : 0;
+        }
+        i += sgr[0].length - 1;
+        continue;
+      }
+      // OSC (hyperlinks etc.), then any other CSI/short escape — skip whole sequence.
+      const other = rest.match(/^\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/) ?? rest.match(/^\x1b\[[0-9;?]*[A-Za-z]/) ?? rest.match(/^\x1b./);
+      if (other) i += other[0].length - 1;
+      continue;
+    }
+    if (ch === "\n" || !dropDim || !dim) out += ch;
+  }
+  return out;
+}
+
+/** The pane's typed-input view: styled capture with ghost (dim) text dropped. */
+async function captureTyped(paneId: string): Promise<string> {
+  return flattenStyled(await capturePane(paneId, { escapes: true }), true);
+}
 
 export function inputPending(capture: string): boolean {
   const lines = capture.split("\n");

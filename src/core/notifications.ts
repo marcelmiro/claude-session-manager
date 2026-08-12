@@ -1,10 +1,11 @@
-import { statSync } from "node:fs";
+import { statSync, readFileSync, writeFileSync } from "node:fs";
 import type { NotificationConfig, Session, TransitionEvent } from "../types";
 import type { SessionStatus } from "./status";
 import { getAbovePrompt } from "./status";
 import { renameWindow, getWindowName } from "./tmux";
 import { sourceForSession } from "./input-source";
 import { pendingToolCall } from "./hook-events";
+import { listPendingApprovals, PENDING_DIR } from "./approval";
 import { CONSUMERS_DIR, sendWebPush } from "./web-push";
 import type { PushPayload } from "../types";
 
@@ -160,6 +161,10 @@ export function sendNativeNotification(
   body: string,
   pane?: { sessionName: string; windowIndex: number; paneId: string },
 ): void {
+  // macOS-only by decision (ADR 14): on other hosts the desk surfaces are tmux-side
+  // (⚡ prefix, status-right) and the phone has web push — a VM-local notifier would
+  // notify the VM, not the human. Without this gate the spawns below no-op silently.
+  if (process.platform !== "darwin") return;
   try {
     // If Ghostty is frontmost: play sound only, skip visual notification.
     // Otherwise: full notification with sound (terminal-notifier or osascript).
@@ -246,6 +251,49 @@ export async function dispatchNotifications(
       if (src.source === "portkey" && src.deviceId && !deviceConnected(src.deviceId)) {
         await sendWebPush(src.deviceId, pushPayloadFor(event, session));
       }
+    }
+  }
+}
+
+/**
+ * Push for approvals the PreToolUse hook is HOLDING for the phone. A held approval
+ * never renders the pane picker, so the status stays `running` and the transition
+ * dispatch above can never fire for it — the phone was the intended approval surface
+ * yet nothing told it. Runs every monitor tick over the live `pending/*.json` markers:
+ * push once per hold (sidecar remembers the hold's tool_use_id + ts), only to the device that
+ * drove the turn, and only while that device isn't watching via SSE. The
+ * watching-then-backgrounded case heals itself: the sidecar is only written when a
+ * push is actually sent, so backgrounding mid-hold pushes on the next tick.
+ */
+export async function dispatchHeldApprovalPushes(sessions: Session[]): Promise<void> {
+  for (const hold of listPendingApprovals()) {
+    const session = sessions.find((s) => s.id === hold.sessionId);
+    if (!session) continue;
+    const src = sourceForSession(hold.sessionId);
+    if (src.source !== "portkey" || !src.deviceId || deviceConnected(src.deviceId)) continue;
+    const sidecar = `${PENDING_DIR}/${hold.sessionId}.pushed`;
+    // Key on tool_use_id + ts: the shell-side tool_use_id extraction can come up
+    // empty, and an id-only key would then match every later hold on the session
+    // and mute it permanently. The ts is stamped once per hold, so the pair is
+    // stable for one hold and distinct across holds.
+    const holdKey = `${hold.tool_use_id}:${hold.ts}`;
+    try {
+      if (readFileSync(sidecar, "utf8") === holdKey) continue; // this hold already pushed
+    } catch {
+      /* no sidecar — not pushed yet */
+    }
+    const event: TransitionEvent = {
+      sessionKey: session.tmuxPane?.paneId ?? hold.sessionId,
+      previousStatus: "running",
+      currentStatus: "waiting",
+      classification: "blocked",
+      session,
+    };
+    await sendWebPush(src.deviceId, pushPayloadFor(event, session));
+    try {
+      writeFileSync(sidecar, holdKey);
+    } catch {
+      /* worst case: a duplicate push next tick */
     }
   }
 }

@@ -15,8 +15,9 @@ import { reapDeadSessionFiles } from "./core/approval";
 import { loadConfig } from "./core/config";
 import { debugLog } from "./core/debug";
 import { loadState, saveState, computeAggregate, buildSessionStates, loadPaneSessions, savePaneSessions, processHookEvents } from "./core/state";
-import { detectTransitions, dispatchNotifications, syncWindowPrefix, ATTENTION_PREFIX, RUNNING_PREFIX, SCRIPT_PREFIX, stripAllPrefixes, desiredPrefix, buildBaseName, abbreviateRepo, NAME_SEPARATOR } from "./core/notifications";
+import { detectTransitions, dispatchNotifications, dispatchHeldApprovalPushes, syncWindowPrefix, ATTENTION_PREFIX, RUNNING_PREFIX, SCRIPT_PREFIX, stripAllPrefixes, desiredPrefix, buildBaseName, abbreviateRepo, NAME_SEPARATOR } from "./core/notifications";
 import { clearSource } from "./core/input-source";
+import { classifyActivity } from "./core/presence";
 import { detectScriptWaits } from "./core/script-wait";
 import { getBaseRepoPath } from "./core/git";
 import { repoNameFromPath } from "./core/sessions";
@@ -194,24 +195,43 @@ async function main(): Promise<void> {
   let activeSession: string | undefined;
   let terminalFocused = false;
   try {
-    const client = (await Bun.$`tmux list-clients -F '#{client_name}'`.quiet().text()).trim().split("\n")[0];
+    // Most recently active client decides presence AND supplies the viewed window.
+    // With 2+ clients attached (desk + a stray phone SSH), an arbitrary pick could
+    // read an idle client's activity as the user's — presence is max across clients.
+    const clients = (await Bun.$`tmux list-clients -F '#{client_activity} #{client_name}'`.quiet().text())
+      .trim()
+      .split("\n")
+      .filter(Boolean)
+      .sort((a, b) => Number(b.split(" ")[0]) - Number(a.split(" ")[0]));
+    const client = clients[0]?.slice(clients[0].indexOf(" ") + 1);
     if (client) {
-      const info = (await Bun.$`tmux display-message -c ${client} -p '#{pane_id}:#{window_index}:#{session_name}:#{window_name}'`.quiet().text()).trim();
-      const colonIdx1 = info.indexOf(":");
+      // client_activity leads the format (window_name may itself contain colons, so it
+      // must stay the greedy tail) and rides the same display-message call — no extra fork.
+      const info = (await Bun.$`tmux display-message -c ${client} -p '#{client_activity}:#{pane_id}:#{window_index}:#{session_name}:#{window_name}'`.quiet().text()).trim();
+      const colonIdx0 = info.indexOf(":");
+      const colonIdx1 = info.indexOf(":", colonIdx0 + 1);
       const colonIdx2 = info.indexOf(":", colonIdx1 + 1);
       const colonIdx3 = info.indexOf(":", colonIdx2 + 1);
-      activePaneId = info.slice(0, colonIdx1);
+      const clientActivity = info.slice(0, colonIdx0);
+      activePaneId = info.slice(colonIdx0 + 1, colonIdx1);
       activeWindow = info.slice(colonIdx1 + 1, colonIdx2);
       activeSession = info.slice(colonIdx2 + 1, colonIdx3);
       const activeWindowName = info.slice(colonIdx3 + 1);
 
-      // Check if the terminal is actually focused (Ghostty frontmost)
-      try {
-        const frontApp = (await Bun.$`osascript -e 'tell application "System Events" to return name of first application process whose frontmost is true'`.quiet().text()).trim().toLowerCase();
-        terminalFocused = frontApp === "ghostty";
-      } catch {
-        // Can't determine — assume focused to preserve existing behavior
-        terminalFocused = true;
+      if (process.platform === "darwin") {
+        // Check if the terminal is actually focused (Ghostty frontmost)
+        try {
+          const frontApp = (await Bun.$`osascript -e 'tell application "System Events" to return name of first application process whose frontmost is true'`.quiet().text()).trim().toLowerCase();
+          terminalFocused = frontApp === "ghostty";
+        } catch {
+          // Can't determine — assume focused to preserve existing behavior
+          terminalFocused = true;
+        }
+      } else {
+        // No frontmost probe off-macOS; presence = this client's last keystroke inside
+        // the window. "unknown" maps to focused — same failure direction as the darwin
+        // catch above (a broken probe must not spray attention/pushes at the active pane).
+        terminalFocused = classifyActivity([Number(clientActivity)], Date.now()) !== "absent";
       }
 
       // Only auto-clear ⚡ when the user is actually looking at the terminal
@@ -335,6 +355,11 @@ async function main(): Promise<void> {
   if (notableWithAttention.length > 0) {
     await dispatchNotifications(notableWithAttention, config);
   }
+
+  // Approvals HELD by the PreToolUse hook never render the pane picker, so the
+  // status stays `running` and no transition can push for them — tell the driving
+  // phone directly (once per hold, skipped while it watches via SSE).
+  await dispatchHeldApprovalPushes(sessions);
 
   // Script-wait detection: a ready session may still be driving a run_in_background
   // script (the turn genuinely ends while the runner lives — pr-triage waits this way

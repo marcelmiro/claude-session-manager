@@ -161,7 +161,7 @@ export function reapDeadSessionFiles(liveSessionIds: Set<string>): void {
       // Only reap finished session files. In-flight temp files (e.g. the Stop
       // hook's `<id>.jsonl.tmp` during an atomic log-trim) must be left alone —
       // deleting one mid-rename makes the hook's `mv` fail with ENOENT.
-      const m = f.match(/^(.*)\.(jsonl|json)$/);
+      const m = f.match(/^(.*)\.(jsonl|json|pushed)$/);
       if (!m) continue;
       const sessionId = m[1];
       if (!liveSessionIds.has(sessionId)) {

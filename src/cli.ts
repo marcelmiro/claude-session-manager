@@ -19,6 +19,7 @@ import { eventSourcedStatus } from "./core/hook-events";
 import { nativeStatus, resolveStatus } from "./core/session-state";
 import { loadNameCache, slugify } from "./core/names";
 import { PATHS } from "./core/config";
+import { PRESENCE_WINDOW_S } from "./core/presence";
 import { pickSavedCwd, resolveRestoreTarget } from "./core/resurrect";
 import { pickRepoPath } from "./core/sessions";
 import { resolveTranscriptPath, latestTranscriptCwd } from "./core/last-turn";
@@ -466,7 +467,7 @@ function isSubsequence(sub: string, str: string): boolean {
 // csm setup
 // ---------------------------------------------------------------------------
 
-const HOOK_VERSION = 13;
+export const HOOK_VERSION = 16;
 
 // SessionStart pane→session mapper. Writes one file per pane (panes/<paneId> → sessionId)
 // atomically (temp+rename) — the hook OWNS the map, so there's no shared-file write race and
@@ -546,9 +547,25 @@ TUID=$(printf '%s' "\$INPUT" | grep -oE '"tool_use_id"[[:space:]]*:[[:space:]]*"
 # which is the event line portkey mirrors, written exactly once.
 [ "\$TOOL" = "AskUserQuestion" ] && exit 0
 
-# Attached client → fall through to the instant desk TUI prompt (no lag).
-if [ -n "$(tmux list-clients -t "\$SESS" 2>/dev/null)" ]; then
-  exit 0
+# Presence → fall through to the instant desk TUI prompt (no lag). On macOS an
+# attached client IS presence (local tmux). Elsewhere (remote host) a persistent
+# SSH attach is the steady state even with the user away, so presence = a client
+# keystroke within the window; attached-but-idle falls through to the phone hold.
+# Unreadable activity fails toward the desk prompt — a wrong "away" strands every
+# tool call in the block-poll below.
+CL=$(tmux list-clients -t "\$SESS" 2>/dev/null)
+if [ -n "\$CL" ]; then
+  if [ "$(uname)" = "Darwin" ]; then
+    exit 0
+  else
+    ACT=$(tmux list-clients -t "\$SESS" -F '#{client_activity}' 2>/dev/null | sort -rn | head -1)
+    # Empty OR non-numeric activity is unreadable, not stale — arithmetic on a
+    # non-number would read as a huge age and flip the polarity to "away".
+    case "\$ACT" in ''|*[!0-9]*) exit 0 ;; esac
+    if [ \$(( \$(date +%s) - ACT )) -le ${PRESENCE_WINDOW_S} ]; then
+      exit 0
+    fi
+  fi
 fi
 
 # Detached → register the pending approval and block-poll for a decision.
@@ -622,22 +639,35 @@ SESS=$(tmux display-message -p -t "\$TMUX_PANE" '#{session_name}' 2>/dev/null)
 # 2. Live bridge consumer: marker mtime <=40s (tolerates one missed 15s heartbeat).
 #    Stale/absent → nobody can answer → native widget, no long stall.
 M="\$HOME/.config/csm/bridge-consumer"
-MT=$(stat -f %m "\$M" 2>/dev/null || echo 0)
+MT=$(stat -c %Y "\$M" 2>/dev/null || stat -f %m "\$M" 2>/dev/null || echo 0)
 if [ "\$MT" = 0 ] || [ $(( $(date +%s) - MT )) -ge 40 ]; then exit 0; fi
 # 3. Focus (three-part): active window + attached client (cheap tmux), and only then
-#    the frontmost app (lsappinfo — no TCC prompt, unlike osascript). All three true
-#    ⇒ you're looking ⇒ let the native widget render. Same probes as atMacFocus() in
-#    core/tmux.ts (the hold's release check) — keep the two in sync, but note the
-#    OPPOSITE failure polarity: here ambiguity means "don't intercept".
+#    the presence probe. Same probes as atMacFocus() in core/tmux.ts (the hold's
+#    release check) — keep the two in sync, but note the OPPOSITE failure polarity:
+#    here ambiguity means "don't intercept". macOS asks the frontmost app (lsappinfo —
+#    no TCC prompt, unlike osascript); elsewhere frontmost doesn't exist and an
+#    attached client is the steady state, so presence = a client keystroke within the
+#    window (attached-but-idle ⇒ user away ⇒ intercept for the phone).
 WA=$(tmux display-message -p -t "\$TMUX_PANE" '#{window_active}' 2>/dev/null)
 CL=$(tmux list-clients -t "\$SESS" 2>/dev/null)
 if [ "\$WA" = "1" ] && [ -n "\$CL" ]; then
-  FRONT=$(lsappinfo info -only name "$(lsappinfo front)" 2>/dev/null)
-  # Fail toward native: unreadable/empty frontmost ⇒ treat as focused (exit 0). Only a
-  # positively-identified OTHER app frontmost (you're on your phone) is NOT focused.
-  case "\$FRONT" in
-    ''|*'"Ghostty"'*) exit 0 ;;
-  esac
+  if [ "$(uname)" = "Darwin" ]; then
+    FRONT=$(lsappinfo info -only name "$(lsappinfo front)" 2>/dev/null)
+    # Fail toward native: unreadable/empty frontmost ⇒ treat as focused (exit 0). Only a
+    # positively-identified OTHER app frontmost (you're on your phone) is NOT focused.
+    case "\$FRONT" in
+      ''|*'"Ghostty"'*) exit 0 ;;
+    esac
+  else
+    ACT=$(tmux list-clients -t "\$SESS" -F '#{client_activity}' 2>/dev/null | sort -rn | head -1)
+    # Fail toward native: unreadable activity ⇒ treat as focused (exit 0). Only
+    # confirmed-stale input (user demonstrably away) lets the intercept proceed.
+    # Non-numeric is unreadable, not stale — arithmetic on it reads as a huge age.
+    case "\$ACT" in ''|*[!0-9]*) exit 0 ;; esac
+    if [ \$(( \$(date +%s) - ACT )) -le ${PRESENCE_WINDOW_S} ]; then
+      exit 0
+    fi
+  fi
 fi
 # All gates passed → hold and answer via the file channel (releases early on refocus).
 printf '%s' "\$INPUT" | csm question-hook
@@ -743,19 +773,30 @@ export async function setup(): Promise<void> {
     const existing = settings.hooks[event]
       .flatMap((entry: any) => (Array.isArray(entry.hooks) ? entry.hooks : []))
       .find((h: any) => typeof h.command === "string" && h.command.includes(path));
+    // Explicit `bash` + quoted path: Claude runs hook commands via `/bin/sh -c`, which is
+    // dash on Debian-family hosts — the scripts are bash, and a bare shebang-reliant path
+    // has been seen to fail there. Quoting keeps a path with spaces from silently exiting 127.
+    const desiredCommand = `bash "${path}"`;
     if (!existing) {
-      const hook: Record<string, unknown> = { type: "command", command: path };
+      const hook: Record<string, unknown> = { type: "command", command: desiredCommand };
       if (timeout !== undefined) hook.timeout = timeout;
       const entry: Record<string, unknown> = { hooks: [hook] };
       if (matcher !== undefined) entry.matcher = matcher; // omit matcher → all events/tools
       settings.hooks[event].push(entry);
       settingsChanged = true;
-    } else if (timeout !== undefined && existing.timeout !== timeout) {
+    } else {
       // Reconcile, don't just add: the registration is matched on command path, so an
-      // install from an older version keeps its stale timeout forever otherwise — and that
-      // timeout is the kill deadline the hook's own poll window has to stay inside.
-      existing.timeout = timeout;
-      settingsChanged = true;
+      // install from an older version keeps its stale command form / timeout forever
+      // otherwise — and that timeout is the kill deadline the hook's own poll window
+      // has to stay inside.
+      if (existing.command !== desiredCommand) {
+        existing.command = desiredCommand;
+        settingsChanged = true;
+      }
+      if (timeout !== undefined && existing.timeout !== timeout) {
+        existing.timeout = timeout;
+        settingsChanged = true;
+      }
     }
   }
 
@@ -790,6 +831,10 @@ export async function setup(): Promise<void> {
  * PATH that reaches tmux — launchd's default PATH doesn't include homebrew.
  */
 async function installDaemonAgent(home: string): Promise<"installed" | "updated" | "unchanged"> {
+  // launchd is darwin-only. On the Linux VM host, long-lived services are
+  // systemd user units installed by deploy/provision.sh; the inbox daemon
+  // doesn't have one yet, so setup must not scatter launchd artifacts there.
+  if (process.platform !== "darwin") return "unchanged";
   const { resolve } = await import("node:path");
   const agentDir = `${home}/Library/LaunchAgents`;
   const plistPath = `${agentDir}/com.csm.daemon.plist`;
@@ -1290,4 +1335,32 @@ export async function sidebarCtl(cmd: string | undefined, paneId: string | undef
       }).catch(() => resolve());
     });
   } catch {}
+}
+
+// ---------------------------------------------------------------------------
+// csm notify <message> — broadcast a web push to every subscribed device
+// ---------------------------------------------------------------------------
+
+/**
+ * Operational alert channel for headless automation (e.g. a systemd OnFailure /
+ * staleness timer pushing "backups are stale" to the phone). Broadcasts to ALL
+ * subscribed devices — deliberately unlike session pushes, which target only the
+ * device that drove the turn: an ops failure has no driving device.
+ */
+export async function notify(message: string): Promise<void> {
+  if (!message.trim()) {
+    console.error("usage: csm notify <message>");
+    process.exit(2);
+  }
+  const { listDeviceIds, sendWebPush } = await import("./core/web-push");
+  const ids = listDeviceIds();
+  if (ids.length === 0) {
+    console.error("csm: no push subscriptions — nothing to notify");
+    process.exit(1);
+  }
+  // Empty sessionId on purpose: it keeps the push out of the tap-attribution ledger
+  // (a tap must NOT navigate to a session — there is none behind an ops alert; the
+  // service worker falls back to a shared "csm" tag so repeats still collapse).
+  await Promise.all(ids.map((id) => sendWebPush(id, { title: "CSM", body: message, sessionId: "" })));
+  console.log(`csm: pushed to ${ids.length} device(s)`);
 }

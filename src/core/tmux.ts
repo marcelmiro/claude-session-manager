@@ -1,6 +1,8 @@
 import type { PaneInfo } from "../types.ts";
 import { isPermissionPrompt } from "./status";
 import { retryOnDeadline } from "./deadline";
+import { USER_SHELL } from "./launch-command";
+import { clientActivityPresence } from "./presence";
 
 /**
  * Get the "main" tmux session name (i.e. not the popup session).
@@ -237,11 +239,11 @@ export async function launchClaudeWindow(
   name: string,
   sessionId: string,
 ): Promise<string> {
-  const cmd = `claude --session-id ${sessionId}; exec zsh -l`;
+  const cmd = `claude --session-id ${sessionId}; exec ${USER_SHELL} -l`;
   // `-d`: don't make the new window active. This launch is driven from the phone (Portkey),
   // so the Mac's tmux client must stay on whatever window the user was in — no focus steal.
   const out =
-    await Bun.$`tmux new-window -a -d -t ${targetSession} -n ${name} -c ${repoPath} -P -F ${"#{pane_id}"} zsh -c ${cmd}`
+    await Bun.$`tmux new-window -a -d -t ${targetSession} -n ${name} -c ${repoPath} -P -F ${"#{pane_id}"} ${USER_SHELL} -c ${cmd}`
       .quiet()
       .text();
   return out.trim();
@@ -260,11 +262,11 @@ export async function launchResumeWindow(
   name: string,
   sessionId: string,
 ): Promise<string> {
-  const cmd = `claude --resume=${sessionId}; exec zsh -l`;
+  const cmd = `claude --resume=${sessionId}; exec ${USER_SHELL} -l`;
   // `-d`: don't make the new window active. Phone-driven (Portkey) resume, so the Mac's tmux
   // client stays on the user's current window — no focus steal.
   const out =
-    await Bun.$`tmux new-window -a -d -t ${targetSession} -n ${name} -c ${repoPath} -P -F ${"#{pane_id}"} zsh -c ${cmd}`
+    await Bun.$`tmux new-window -a -d -t ${targetSession} -n ${name} -c ${repoPath} -P -F ${"#{pane_id}"} ${USER_SHELL} -c ${cmd}`
       .quiet()
       .text();
   return out.trim();
@@ -285,11 +287,11 @@ export async function launchForkWindow(
   forkId: string,
   parentSessionId: string,
 ): Promise<string> {
-  const cmd = `claude --session-id ${forkId} --resume=${parentSessionId} --fork-session; exec zsh -l`;
+  const cmd = `claude --session-id ${forkId} --resume=${parentSessionId} --fork-session; exec ${USER_SHELL} -l`;
   // `-d`: don't make the new window active. Phone-driven (Portkey) fork, so the Mac's tmux
   // client stays on the user's current window — no focus steal.
   const out =
-    await Bun.$`tmux new-window -a -d -t ${targetSession} -n ${name} -c ${repoPath} -P -F ${"#{pane_id}"} zsh -c ${cmd}`
+    await Bun.$`tmux new-window -a -d -t ${targetSession} -n ${name} -c ${repoPath} -P -F ${"#{pane_id}"} ${USER_SHELL} -c ${cmd}`
       .quiet()
       .text();
   return out.trim();
@@ -410,6 +412,11 @@ export async function atMacFocus(paneId: string): Promise<boolean> {
     if (!session) return false;
     const clients = (await Bun.$`tmux list-clients -t ${session}`.quiet().text()).trim();
     if (!clients) return false;
+    if (process.platform !== "darwin") {
+      // No frontmost probe off-macOS: presence = a client of this session typed within
+      // the window. Only a positive "present" releases — "unknown" keeps holding.
+      return (await clientActivityPresence(session)) === "present";
+    }
     const front = (await Bun.$`lsappinfo front`.quiet().text()).trim();
     if (!front) return false;
     const name = (await Bun.$`lsappinfo info -only name ${front}`.quiet().text()).trim();
