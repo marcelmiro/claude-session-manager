@@ -21,20 +21,20 @@ Entry: `bin/csm.ts` (CLI router) → `src/index.ts` (TUI) or `src/cli.ts` (subco
 
 ## Bridge restarts (do it directly)
 
-The mobile bridge (`csm bridge`) runs as a long-lived detached daemon on `127.0.0.1:8473` (proxied to the phone via `tailscale serve`). **When a change needs a restart, restart it yourself — don't just tell the user.** This is a routine, durably-authorized action on the local machine; treat it as approved.
-
-> On a Linux VM host the bridge is a systemd user unit instead: `systemctl --user restart csm-bridge`, logs via `journalctl --user -u csm-bridge` ([ADR 16](docs/adr/0016-systemd-units-replace-launchd.md), `deploy/`). The procedure below is the darwin-hosted form.
+The mobile bridge (`csm bridge`) runs as a systemd user unit on the Linux VM host (`127.0.0.1:8473`, proxied to the phone via `tailscale serve`). **When a change needs a restart, restart it yourself — don't just tell the user.** This is a routine, durably-authorized action; treat it as approved.
 
 - **When a restart IS needed:** any change to `src/bridge/server.ts` or the `core/` functions it imports — the server code is loaded into the running Bun process.
 - **When it is NOT needed:** changes to `src/bridge/public/*` (`app.js`, `index.html`/CSS). Those are served fresh (`cache-control: no-cache`); the user just refreshes/reopens the page on the phone.
-- **How to restart** (preserve the token + the loopback bind so `tailscale serve` keeps working):
-  ```sh
-  PID=$(pgrep -f "csm bridge" | head -1)
-  TOK=$(ps eww -p "$PID" | tr ' ' '\n' | grep '^CSM_BRIDGE_TOKEN=' | cut -d= -f2)   # recover the running token
-  kill "$PID"; sleep 1
-  CSM_BRIDGE_TOKEN="$TOK" nohup csm bridge > "$HOME/.config/csm/bridge.log" 2>&1 & disown   # detach (PPID 1) so it outlives the session
-  ```
-  Host/port default to `127.0.0.1:8473` when unset (the usual setup). Then verify: `POST /auth` → 200 and the changed route behaves. The benign `Failed to start server. Is port 8473 in use?` log line is the second `caffeinate`-wrapped instance losing the bind race — ignore it.
+- **How to restart:** `systemctl --user restart csm-bridge`; logs via `journalctl --user -u csm-bridge` ([ADR 16](docs/adr/0016-systemd-units-replace-launchd.md), `deploy/`). The token lives in a 0600 `EnvironmentFile` (`~/.config/csm/bridge.env`), so a plain restart preserves it. Then verify: `POST /auth` → 200 and the changed route behaves.
+
+> Darwin-hosted fallback (rollback window only): recover the token from the running process, kill it, and relaunch detached —
+> ```sh
+> PID=$(pgrep -f "csm bridge" | head -1)
+> TOK=$(ps eww -p "$PID" | tr ' ' '\n' | grep '^CSM_BRIDGE_TOKEN=' | cut -d= -f2)
+> kill "$PID"; sleep 1
+> CSM_BRIDGE_TOKEN="$TOK" nohup csm bridge > "$HOME/.config/csm/bridge.log" 2>&1 & disown
+> ```
+> Host/port default to `127.0.0.1:8473` when unset. The benign `Failed to start server. Is port 8473 in use?` log line is a second `caffeinate`-wrapped instance losing the bind race — ignore it.
 
 ## CLI subcommands
 
