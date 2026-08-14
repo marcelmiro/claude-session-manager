@@ -23,3 +23,135 @@ Two workflows create parent→child session relationships that today live only i
 - **Grouping:** children nest under their parent with a `↳`, exactly as worktrees nest under their base repo. Replaces the tmux-adjacency habit with something that survives window reordering.
 - **Wake rule (handoffs only):** handing off leaves the orchestrator *blocked on the child*; when the child is **archived** (the done verb — the natural end of divide-and-conquer), the parent wakes into Needs you with a "child finished" reason, same derived-wake shape as a snooze wake. Forks get grouping only — neither side waits on the other — which is why `kind` exists. Rejected: auto-switching to the parent or auto-feeding the child's result into it; waking into Needs you is enough, the human decides when to context-switch.
 - **Phase 1 forward-compat hook (the only part to build now):** the `blocked` disposition's note field must be able to hold a session ref, not just free text.
+
+## Addendum: settled by the sidebar prototype (2026-08-07/08)
+
+Two days of living in the prototype against real sessions settled the open questions and revised one original rule. What follows is decided; the prototype (`prototype/inbox-sidebar/`, branch `inbox`, throwaway) is the evidence, not the implementation.
+
+**North star — Claude0.** The product thesis crystallized: CSM's aim is inbox zero for agent sessions. "Needs you" is not a dashboard section, it is *the inbox*, and the game is clearing it — every verb (reply, snooze, block, done) is a way of getting a row out of it, and an empty Needs you means you are genuinely free. This framing (working name: **Claude0**) should drive prioritization: anything that makes clearing feel fast and trustworthy is core; anything else is chrome.
+
+**The original rule stands: every disposition (and done) kills the pane** — we briefly revised this to let snooze keep its pane, then reverted: what makes killing safe for the most common verb is that **a snooze wake auto-reopens the pane** (detached `claude -r` in a `⚡`-named window, no focus steal — day snoozes fire at local midnight, so the morning window bar *is* the morning inbox). Snooze means "it literally comes back", which is stronger trust than a list entry, and the window-bar shrink applies to all parked states, not just the long-lived ones. The pane↔row relationship is **one-directional**: live pane ⇒ inbox row, but rows outlive panes (parked, recent, restored-from-done), and re-engaging a pane-less row resumes it on demand (`claude -r` in a new window, directory via `resolveRestoreTarget` — deleted worktrees land in the base repo with the transcript consolidated). Undo-done deliberately does *not* resurrect the pane; only re-engagement does.
+
+**Done is a toggle.** `e` archives (RECENT, 24h derived window, then History); `e` on a RECENT row un-archives back into Needs you, pane still closed. On a live session the archive is a double-tap confirm because it also closes the pane — the first real mutation, guarded like the TUI's kill.
+
+**Ages are time-in-state, stamped by observation.** A transition the poller witnesses stamps `now`; only first sight falls back to transcript timestamps (which can lie — see gaps). Needs you sorts oldest-ignored-first and ages from when the session handed you the turn; a >1d age renders loud. Running ages from the user's last prompt ("how long on my instruction"). Script-wait (`⧗`) is its own running *mode* aged from the turn→script handover, because "is this wait normal or wedged" is the question it answers. Snooze wakes show relative on the row, exact on the detail line; hours exact, days at local midnight.
+
+**Needs you must be transition-gated (decided here, not yet built).** The prototype imports every prompt-sitting session into Needs you at first sight, which makes the inbox "all live sessions" instead of "unhandled events" — the first thing that felt wrong in use. Production gates entry on observed transitions, seeded from the monitor's existing attention flags so the inbox and the ⚡ system cannot disagree.
+
+**Interaction grammar.** Unfocused, the sidebar is a pure glance surface (no chrome, pinned to top). Focus (M-s) is instant — the toggle command signals the sidebar process directly rather than waiting on its poll — and the selector lands on the session of the pane you came from. Two independent marks: the *pin* (`▎`, white — location, deliberately not a status color) on the session in this window's active pane, and the *selector* (row background) only while focused. Clicks are focus-gated: the first click on an unfocused sidebar only focuses and selects (absorbs macOS app-focus click-through); a focused click navigates. `J`/`K` jump sections. Verbs are section-scoped; RECENT takes only `e`.
+
+**Per-window panes are an acceptable chassis for glance parity, not for production.** With change-gated renders (repaint only when inputs change, invisible windows included so switches land current) and self-terminating orphans (a sidebar that becomes its window's only pane exits, restoring native close semantics), N per-window panes are visually indistinguishable from one fixed sidebar. What disqualifies the chassis at production scale is cost, not correctness: ~39MB × N blessed processes. Production is one renderer writing ANSI to the pane ttys. Nested tmux and an out-of-tmux window remain rejected.
+
+**Visual language.** Glyphs are the measured-1-cell set only (emoji are double-width in tmux, single-width to blessed — repaints corrupt); status lives in section color tiers (white attention / mint activity / dim parked+done); peach appears only as signal (reason glyphs `! ? ↺`, stale ages), never as paint. Rows: two-line (name + dim repo/PR) in Needs you and Running, one-line elsewhere. `☾` = snoozed, `✗` = blocked, `⧗` = script-wait.
+
+**Known gaps production must close (in rollout order):** durable state under `~/.config/csm` (the prototype's `/tmp` state file triples as store/IPC/cache and dies on reboot — disqualifying); the single-renderer chassis; transition-gated Needs you; then the transcript-blind activity cases — a session whose work happens outside its own transcript (background-job child sessions, desktop-app sessions with no pane) reads as stale/invisible today and belongs in the same family as `⧗` and provenance: "activity the pane's transcript can't see."
+
+## Addendum 2: settled by the prototype week (2026-08-08 → 11)
+
+A week of daily-driving revised two earlier calls and settled the rest of the interaction grammar. The wake loop is validated live (twice, including the failure mode below); these are decisions, with the prototype as evidence.
+
+**Parked is always expanded** — revising this ADR's "collapsed count" default. The collapse toggle existed, was never once used, and was removed: Parked at real volume (~5 rows) is glanceable, and hiding it made snoozed work invisible in exactly the way the inbox exists to prevent. Within Parked, snoozed sorts before blocked; snoozed by soonest wake first, blocked by least-time-blocked first. The two stay visually distinct groups — mixing was rejected because a future wake time and a past block start share no coherent sort key.
+
+**Snooze grammar is digits-then-unit, digits required** (`16h`, `3d`; the unit letter commits instantly, no Enter). A bare-unit-means-1 shortcut was tried and removed: with muscle memory from an earlier two-stage menu, `s h` committed a 1h snooze instantly — and a snooze kills the pane, so a mistyped key was a destructive act. Amount-first is the guard: no digits, no commit, just a nudge.
+
+**Dispositions walk the view.** Every disposition (done/snooze/block) moves the selector to the row *under* the disposed one, and the shown window follows: the display switches to that next session's window, focused in its sidebar. Triage never exits the inbox — clearing five sessions is five verb-keys, each one a guided step to the next window. Disposing the session you're currently looking at navigates *before* its window dies, so the walk is flicker-free even when it kills the ground under you.
+
+**Clicks are select-then-commit** (refining Addendum 1's focus-gating): a click on an unfocused sidebar focuses and highlights the row hit (no row → the window's active session); a focused click on a non-highlighted row moves the highlight; only a click on the already-highlighted row navigates. Mouse navigation costs 2–3 clicks and can never switch windows by accident.
+
+**Visibility is a global toggle** (`M-S`): hide kills every sidebar pane and stands down all self-heal paths until shown again; the hidden state survives server restarts; showing lands focused in the current window's sidebar. Full-width when needed, one keystroke back.
+
+**Fork places beside the parent** (`new-window -a` at the parent's window), matching the TUI's fork placement — related work stays adjacent until provenance grouping replaces the adjacency habit.
+
+**Wake duty belongs to a launchd-kept-alive daemon, not the status-right monitor.** The monitor is a fresh process per `status-right` tick, and tmux evaluates the status line only while a client is attached — a midnight wake with no terminal open would silently not fire. The daemon (installed idempotently by `csm setup`) owns the wake pass: due snooze with no live pane → detached `claude -r` with an in-pane wake banner, mark auto-resumed, write the wake event. It is also the model's **single snapshot producer** (renderers and verbs never write discovery state) — the same long-lived process the single-renderer chassis needs anyway. The status-right monitor keeps prefixes and window naming; consolidating its discovery into the daemon is deliberate follow-up work, not part of the wake cutover.
+
+**The wake attention stamp must wait for detected status `ready`.** Claude's boot spinner reads as `running`, and the monitor's carry-over clears attention for running sessions ("user already interacted") — the first live wake lost its ⚡ to exactly this. Stamp only once the prompt is live.
+
+**Wake notifications: banner now, push deferred.** A wake raises the macOS banner and the ⚡/status-right/`csm next` tiers. Web Push does *not* fire — refining this ADR's "push routed to the device that set the snooze": until an inbox surface exists in portkey, every snooze is Mac-set and a push tier is dead code. The recorded design for when that surface lands: route to the setter device when the snooze was set from portkey; for Mac-set snoozes, broadcast to subscribed devices whose SSE liveness is stale (a scheduled wake is an alarm the user set, not ambient noise).
+
+**Self-heal is part of the contract.** A per-pane chassis dies with the single renderer, but what the week proved must survive productionization as `csm setup`-installed pieces: autostart on client attach (marker-gated so an explicit hide wins), reclamation of resurrect-restored corpse panes, and per-window heal of missing/mispositioned/mis-sized sidebars. A sidebar that only works until the next reboot reads as broken, not as a prototype.
+
+## Addendum 3: shipped semantics + direction (2026-08-12)
+
+M1–M3 are in production (wake daemon, single-renderer sidebar, transition
+gating). Decisions made while shipping, and the roadmap decisions that
+followed:
+
+**Needs You admission rules (M3, as built).** Admission = an OBSERVED
+transition (discovery watches a session go running→ready/waiting and stamps
+the row + writes a `transition` event), a snooze wake, a LIVE approval
+prompt (present-tense evidence, unlike sitting at a ready prompt), or a
+derived finish (a `finishAt` passing IS the transition). A reply — the
+session observed running again — resets admission. A one-time seed from the
+monitor's ⚡ flags aligned inbox and attention system on day one. Everything
+else files under **OPEN**: a neutral, dim, one-line section — visible, not
+nagging, all verbs still apply. Measured motivation: before gating, 9 of 9
+Needs You rows existed but only 1 was backed by a real event.
+
+**Claude0 scoreboard.** status-right is `⚡N 🔄N ✓N`; ✓ counts DISTINCT
+sessions archived since local midnight from archive events, so an undo
+doesn't take the point back — the clearing motion happened. Known
+refinement: ⚡ (state.json flags) and Needs You (admissions) don't share an
+event source yet and can briefly disagree.
+
+**The sidebar is the popup TUI's replacement, not a companion.** Confirmed
+(this ADR's rollout section guessed "likely obsoleted"): triage logic lives
+in ONE surface. Rejected on those grounds: verbs in the TUI space-menu
+(dead surface) and standalone CLI verbs (`csm snooze <fuzzy>` — clutter;
+if provenance work needs a programmatic verb entry point, it ships as that
+feature's plumbing, not as a user command).
+
+**Portkey migrates to an inbox system eventually, not now.** When it does,
+wake Web Push un-defers with the routing rule from addendum 2 (setter
+device when portkey-set, stale-liveness broadcast when Mac-set).
+
+**Remaining, in order:** live with the honest inbox (does Needs You earn
+trust; does clearing pull); ⚡/Needs-You event-source convergence; then
+provenance (fork/handoff links table already exists, `↳` grouping,
+handoff wake rule: child archived → parent wakes).
+
+## Addendum 4: OPEN retired — every prompt-sitter is Needs You (2026-08-12)
+
+The transition-gated admission (addendum 3) lasted zero days of real use.
+Lived-with verdict: a live session sitting at a prompt IS unfinished
+business, and filing it under a dim OPEN section just hid rows that still
+wanted a decision. `sectionOf` now sends every non-running, non-parked,
+non-archived live session to Needs You; the aim is to clear the section by
+actioning each row (reply, snooze, block, done). The `needsYou` flag, the
+one-time ⚡ seed, and the OPEN section are gone; observed running→ready/
+waiting transitions are still written as `transition` events (scoreboard +
+history), and the derived-finish and wake rules are unchanged.
+
+Same day, the resume paths earned their first real fixes (all found by
+walking the reported bugs): dead-pane probes moved off `display-message`
+(exits 0 against a fallback pane on tmux 3.7b) onto `list-panes`; snapshot
+rows preserved without a live pane get their stale `real` stripped so Enter
+resumes instead of selecting a reused window index; window spawns from the
+tty-less daemon must be `-d` (non-detached never returns) and single-string
+(multi-arg is direct-exec'd shell-less — no PATH, no claude); `switchTo`
+switches any client attached to a different tmux session (a pane in an
+unattached session is otherwise invisible — the resurrect incident left
+exactly that); and the renderer respawns all stub relays at stand-up (a
+stub outliving a renderer restart eats one keystroke per pane to notice
+its socket died).
+
+## Addendum 5: the VM cutover story (2026-08-12, grilled)
+
+Settled against ADR 15/16's single-host cutover, built ahead of it:
+
+- **One host owns the inbox.** The daemon becomes `csm-daemon.service` on the
+  VM (provision-installed, BindsTo=tmux.service); the Mac launchd agent is
+  booted out at cutover as a runbook teardown step. Two daemons against two
+  tmux servers would mean two divergent inboxes — a multi-host inbox was
+  refused as speculative design.
+- **`inbox.db` rides the state copy** (WAL checkpointed first, daemon
+  stopped): a snooze pending at cutover is a promise and must wake on the VM.
+  Repo paths inside stay valid via /Users parity; the snapshot table
+  self-rebuilds on the first discovery tick.
+- **Off-darwin wake alert = broadcast Web Push.** The banner tier cannot
+  exist on a headless host; the wake pass broadcasts to every subscribed
+  device there (a snooze set days ago has no meaningful driving device —
+  same reasoning as `csm notify` ops alerts). This replaces an impossible
+  tier rather than un-deferring the general wake push of addendum 2, which
+  still waits for the portkey inbox.
+- **Unit ownership stays split by platform**: provision.sh owns systemd
+  units (like bridge/monitor), `csm setup` owns launchd and no-ops off-darwin.

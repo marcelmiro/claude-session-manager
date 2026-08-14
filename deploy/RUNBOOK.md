@@ -60,10 +60,17 @@ collision silently mints `<name>-1` and the phone points at the wrong origin.
 On the Mac (VM reachable as `vm` over Tailscale):
 
 ```sh
+launchctl bootout gui/$UID/com.csm.daemon                             # stop the inbox daemon first (also teardown, below)
+sqlite3 ~/.config/csm/inbox.db "PRAGMA wal_checkpoint(TRUNCATE);"     # fold WAL into the db file before copying it
 rsync -a --info=progress2 ~/Documents/ vm:Documents/                  # repos + worktrees, same abs path (ADR 15)
 rsync -a ~/.claude/projects/ vm:.claude/projects/                     # transcripts resolve as-is
-scp ~/.config/csm/config.json ~/.config/csm/names.json ~/.config/csm/push-vapid.json vm:.config/csm/
+scp ~/.config/csm/config.json ~/.config/csm/names.json ~/.config/csm/push-vapid.json ~/.config/csm/inbox.db vm:.config/csm/
 ```
+
+`inbox.db` carries the authored inbox state — open snoozes, block notes, the
+event history behind the ✓ scoreboard. A snooze pending at cutover must wake on
+the VM (repo paths inside stay valid via `/Users` parity; the activity snapshot
+table self-rebuilds on the VM's first discovery tick).
 
 Do NOT copy: `push-subscriptions.json` (origin-bound — dead at the new origin),
 `state.json`, `panes/`, `hook-events`, `resurrect-sessions.json`, `verdicts/`,
@@ -93,7 +100,10 @@ clipboard), **7** (phone lists sessions, resume works, push round-trips).
 - Mac: `brew install et` (mosh optional for bad links); Ghostty config
   `shell-integration-features = ssh-env,ssh-terminfo`, `clipboard-write = allow`.
 - Mac teardown: stop the launchd bridge / `caffeinate` wrapper, remove the plist,
-  stop the monitor. Leave `~/.config/csm` and repos in place as the rollback seed.
+  stop the monitor, and boot out the inbox daemon (`launchctl bootout
+  gui/$UID/com.csm.daemon` + delete `~/Library/LaunchAgents/com.csm.daemon.plist`
+  — two daemons against two tmux servers means two divergent inboxes). Leave
+  `~/.config/csm` and repos in place as the rollback seed.
 - Flip CLAUDE.md's "Bridge restarts" section to the systemd procedure
   (`systemctl --user restart csm-bridge`, log: `journalctl --user -u csm-bridge`),
   keeping the darwin procedure as a footnote (ADR 16).

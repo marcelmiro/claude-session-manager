@@ -805,15 +805,114 @@ export async function setup(): Promise<void> {
     await Bun.write(settingsPath, JSON.stringify(settings, null, 2) + "\n");
   }
 
-  if (!scriptsWritten && !settingsChanged) {
+  const daemonResult = await installDaemonAgent(home);
+
+  // Sidebar default-on: the renderer stands up only while this marker exists,
+  // and nothing else creates it (the retired prototype's ctl once did) — a
+  // fresh machine would run an invisible inbox engine, with no M-S binding
+  // installed to turn it on. M-S visibility rides its own hidden marker.
+  try {
+    const autostart = `${PATHS.dir}/inbox-sidebar-autostart-default`;
+    if (!(await Bun.file(autostart).exists())) {
+      await Bun.$`mkdir -p ${PATHS.dir}`.quiet();
+      await Bun.write(autostart, "");
+    }
+  } catch {}
+
+  if (!scriptsWritten && !settingsChanged && daemonResult === "unchanged") {
     console.log("CSM hooks already configured.");
     return;
   }
 
-  console.log(scriptsUpdated ? "CSM hooks updated." : "CSM hooks installed.");
-  console.log(`  Hook scripts: ${hookDir}/{session-start,event,pretooluse,question-pretooluse}.sh`);
-  console.log(`  Settings: ${settingsPath}`);
+  if (scriptsWritten || settingsChanged) {
+    console.log(scriptsUpdated ? "CSM hooks updated." : "CSM hooks installed.");
+    console.log(`  Hook scripts: ${hookDir}/{session-start,event,pretooluse,question-pretooluse}.sh`);
+    console.log(`  Settings: ${settingsPath}`);
+  }
+  if (daemonResult !== "unchanged") {
+    console.log(`Inbox daemon ${daemonResult} (launchd: com.csm.daemon — snooze wakes fire without a terminal open).`);
+  }
   console.log("\nNew Claude Code sessions will now emit status/transcript events.");
+}
+
+/**
+ * Install/refresh the launchd agent that keeps `csm daemon` alive. launchd
+ * (KeepAlive + RunAtLoad) is what makes a snooze survive reboots: the wake
+ * pass must run with no tmux client attached and no terminal open. The plist
+ * pins the bun binary and the csm entry script that ran this setup, plus a
+ * PATH that reaches tmux — launchd's default PATH doesn't include homebrew.
+ */
+async function installDaemonAgent(home: string): Promise<"installed" | "updated" | "unchanged"> {
+  // launchd is darwin-only. On the Linux VM host the daemon runs as the
+  // csm-daemon.service user unit, installed by deploy/provision.sh like the
+  // other units — setup must not scatter launchd artifacts there.
+  if (process.platform !== "darwin") return "unchanged";
+  const { resolve } = await import("node:path");
+  const agentDir = `${home}/Library/LaunchAgents`;
+  const plistPath = `${agentDir}/com.csm.daemon.plist`;
+  const entry = resolve(process.argv[1] ?? "");
+  // The PATH symlink, not process.execPath: execPath resolves to the
+  // versioned Cellar binary, which a brew upgrade deletes — silently killing
+  // the daemon that snoozes depend on.
+  const bunBin = Bun.which("bun") ?? process.execPath;
+  const logPath = `${home}/.config/csm/daemon.log`;
+  const plist = `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.csm.daemon</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>${bunBin}</string>
+    <string>--env-file=/dev/null</string>
+    <string>${entry}</string>
+    <string>daemon</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+  <key>StandardOutPath</key><string>${logPath}</string>
+  <key>StandardErrorPath</key><string>${logPath}</string>
+</dict>
+</plist>
+`;
+
+  let existing = "";
+  try {
+    existing = await Bun.file(plistPath).text();
+  } catch {}
+  const changed = existing !== plist;
+  if (changed) {
+    await Bun.$`mkdir -p ${agentDir}`.quiet();
+    await Bun.write(plistPath, plist);
+  }
+
+  // CSM_HOME is the test seam — never touch the real launchd from tests.
+  if (!process.env.CSM_HOME) {
+    const uid = process.getuid?.() ?? 501;
+    const target = `gui/${uid}/com.csm.daemon`;
+    if (changed) {
+      await Bun.$`launchctl bootout ${target}`.quiet().nothrow();
+      // bootstrap right after bootout races the old service's teardown and
+      // fails with I/O error — verify and retry until the daemon is actually
+      // loaded (a silently-unloaded agent means snoozes never wake).
+      for (let i = 0; i < 5; i++) {
+        await Bun.$`launchctl bootstrap gui/${uid} ${plistPath}`.quiet().nothrow();
+        if ((await Bun.$`launchctl print ${target}`.quiet().nothrow()).exitCode === 0) break;
+        await Bun.sleep(1000);
+      }
+    } else {
+      // plist unchanged but the agent may not be loaded (fresh boot of an old
+      // install, manual bootout) — bootstrap is a cheap no-op when it is.
+      const loaded = (await Bun.$`launchctl print ${target}`.quiet().nothrow()).exitCode === 0;
+      if (!loaded) await Bun.$`launchctl bootstrap gui/${uid} ${plistPath}`.quiet().nothrow();
+    }
+  }
+
+  return changed ? (existing ? "updated" : "installed") : "unchanged";
 }
 
 // ---------------------------------------------------------------------------
@@ -832,6 +931,24 @@ interface ResurrectSessionMap {
   sessions: Record<string, ResurrectSessionEntry>;
 }
 
+
+/**
+ * Resurrect save/restore must only ever run against the DEFAULT tmux server.
+ * The resurrect/continuum hooks live in global tmux.conf, so they fire on ANY
+ * server start — a scratch server (`tmux -L whatever`) would restore the real
+ * layout and resume every mapped Claude session a second time (two processes
+ * appending to one transcript), or overwrite the coordinate map with scratch
+ * coordinates.
+ */
+async function onDefaultTmuxServer(): Promise<boolean> {
+  try {
+    const path = (await Bun.$`tmux display-message -p '#{socket_path}'`.quiet().text()).trim();
+    return path.split("/").pop() === "default";
+  } catch {
+    return false; // no server reachable — nothing to save/restore anyway
+  }
+}
+
 /**
  * Snapshot current pane→Claude session mappings using tmux coordinates
  * (session:window.pane_index) that survive a tmux server restart.
@@ -840,6 +957,7 @@ interface ResurrectSessionMap {
  * Can also be run manually before a planned restart.
  */
 export async function saveSessions(): Promise<void> {
+  if (!(await onDefaultTmuxServer())) return; // scratch server — see onDefaultTmuxServer
   const paneSessions = await loadPaneSessions();
   if (Object.keys(paneSessions).length === 0) {
     // Nothing tracked — skip silently (hook context)
@@ -911,6 +1029,7 @@ export async function saveSessions(): Promise<void> {
  * Can also be run manually after a restore.
  */
 export async function restoreSessions(): Promise<void> {
+  if (!(await onDefaultTmuxServer())) return; // scratch server — see onDefaultTmuxServer
   // Read saved mapping
   let map: ResurrectSessionMap;
   try {
@@ -1117,6 +1236,117 @@ export async function questionHook(): Promise<void> {
 
   rmSync(pendingFile, { force: true });
   process.exit(0); // timeout → neutral → native-widget floor
+}
+
+// ---------------------------------------------------------------------------
+// csm daemon
+// ---------------------------------------------------------------------------
+
+/**
+ * Long-lived inbox daemon (launchd-kept-alive, installed by `csm setup`).
+ * Owns the snooze wake pass — the status-right monitor can't: tmux only
+ * evaluates the status line while a client is attached, so a midnight wake
+ * with no terminal open would never fire from there. `--once` runs a single
+ * pass and exits (debugging / manual catch-up).
+ */
+export async function daemon(): Promise<void> {
+  const { InboxStore } = await import("./core/inbox-store");
+
+  // Internal: one discovery pass in a fresh process (the long-lived loop only
+  // spawns and reaps — in-process discovery leaks; see inbox-discovery.ts).
+  if (process.argv.includes("--discover-once")) {
+    const { discoveryTick } = await import("./core/inbox-discovery");
+    const store = new InboxStore();
+    try {
+      await discoveryTick(store);
+    } finally {
+      store.close();
+    }
+    return;
+  }
+
+  const { wakePass } = await import("./core/inbox-wake");
+  const { prototypeRefresherAlive } = await import("./core/inbox-discovery");
+
+  // `--once`: a single wake pass (debugging / manual catch-up).
+  if (process.argv.includes("--once")) {
+    const store = new InboxStore();
+    try {
+      await wakePass(store);
+    } finally {
+      store.close();
+    }
+    return;
+  }
+
+  // The sidebar renderer runs inside this process (own 1s loop + unix
+  // socket); it stands down by itself while the prototype chassis is live.
+  const { runSidebarRenderer } = await import("./sidebar/renderer");
+  runSidebarRenderer();
+
+  let tick = 0;
+  while (true) {
+    try {
+      if (!(await prototypeRefresherAlive())) {
+        const child = Bun.spawn(
+          [process.execPath, process.argv[1]!, "daemon", "--discover-once"],
+          { stdin: "ignore", stdout: "ignore", stderr: "ignore" },
+        );
+        // a wedged tmux/ps call must not pile up children behind it
+        const killer = setTimeout(() => child.kill(), 15_000);
+        await child.exited;
+        clearTimeout(killer);
+      }
+    } catch {}
+    if (tick % 5 === 0) {
+      try {
+        const store = new InboxStore();
+        try {
+          await wakePass(store);
+        } finally {
+          store.close();
+        }
+      } catch {
+        // tmux down (server not started yet) or db busy — next pass retries
+      }
+    }
+    tick++;
+    await Bun.sleep(3_000);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// csm sidebar-pane / sidebar-ctl  (M2 single-renderer chassis)
+// ---------------------------------------------------------------------------
+
+/** One-shot control message to the renderer (M-s focus / M-S toggle bindings). */
+export async function sidebarCtl(cmd: string | undefined, paneId: string | undefined): Promise<void> {
+  if ((cmd !== "focus" && cmd !== "toggle") || !paneId) return;
+  const sock = `${PATHS.dir}/sidebar.sock`;
+  try {
+    await new Promise<void>((resolve) => {
+      Bun.connect({
+        unix: sock,
+        socket: {
+          open(s) {
+            s.write(`${cmd} ${paneId}\n`);
+            s.flush();
+            setTimeout(() => {
+              s.end();
+              resolve();
+            }, 50);
+          },
+          data() {},
+          error() {
+            resolve();
+          },
+          close() {
+            resolve();
+          },
+        },
+      }).catch(() => resolve());
+    });
+  } catch {}
 }
 
 // ---------------------------------------------------------------------------

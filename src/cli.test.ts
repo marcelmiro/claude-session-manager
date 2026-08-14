@@ -194,3 +194,27 @@ test("AskUserQuestion is delegated: pretooluse.sh exits for it, question-pretool
   // No claude-version gate (dropped 2026-07-18) — updatedInput is assumed forward-compatible.
   expect(q).not.toContain("claude --version");
 });
+
+test("setup() writes the daemon LaunchAgent plist idempotently (no launchctl under CSM_HOME)", async () => {
+  const plistPath = `${TEST_HOME}/Library/LaunchAgents/com.csm.daemon.plist`;
+  rmSync(plistPath, { force: true });
+
+  await setup();
+  const plist = readFileSync(plistPath, "utf8");
+  expect(plist).toContain("<string>com.csm.daemon</string>");
+  expect(plist).toContain("<string>daemon</string>");
+  expect(plist).toContain(`<string>${Bun.which("bun") ?? process.execPath}</string>`);
+  expect(plist).toContain("<key>KeepAlive</key><true/>");
+
+  // Second run leaves it byte-identical (the change check gates launchctl reloads).
+  await setup();
+  expect(readFileSync(plistPath, "utf8")).toBe(plist);
+});
+
+test("setup() creates the sidebar autostart marker on a fresh machine", async () => {
+  const { PATHS } = await import("./core/config");
+  const marker = `${PATHS.dir}/inbox-sidebar-autostart-default`;
+  rmSync(marker, { force: true });
+  await setup();
+  expect(await Bun.file(marker).exists()).toBe(true);
+});

@@ -13,6 +13,7 @@ clients over Tailscale. The cutover itself (state copy, auth, PWA reinstall) is
 | `units/tmux.service` | User unit: tmux server at boot (linger), `csm save-sessions` on stop. |
 | `units/csm-bridge.service` | User unit: the bridge, `Restart=always` with spaced retries, token via 0600 `EnvironmentFile`. |
 | `units/csm-monitor.service` | User unit: fallback monitor tick + resurrect autosave while no tmux client is attached (status-right — and continuum riding it — only runs for attached clients). |
+| `units/csm-daemon.service` | User unit: the inbox daemon (snooze wakes, discovery snapshots, sidebar renderer) — systemd twin of darwin's `com.csm.daemon` launchd agent. Off-darwin the wake alert is a broadcast Web Push (no banner tier on a headless host). |
 | `tmux-vm.conf` | Remote-client tmux settings (escape-time, window-size, OSC 52). Sourced from `~/.tmux.conf`. |
 | `aws/dlm-policies.sh` | DLM snapshot schedules (4-hourly/3d + daily/14d on `csm-backup=true` volumes) + budget-stop guardrail pointer. CLI-only — the console can't do sub-daily. |
 | `units/snapshot-check.{service,timer}` | Hourly staleness probe: newest `csm-backup` snapshot older than 5h → `csm notify` pushes to the phone. Needs the aws CLI and an instance role with `ec2:DescribeSnapshots`. |
