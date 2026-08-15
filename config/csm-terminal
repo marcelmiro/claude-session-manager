@@ -1,0 +1,96 @@
+#!/bin/sh
+# Start the local or remote tmux environment used by CSM. Machine-specific
+# choices live under ~/.config/csm instead of being committed to dotfiles.
+
+PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$HOME/.bun/bin:/usr/bin:/bin:${PATH:-}"
+export PATH
+
+config_home=${XDG_CONFIG_HOME:-"$HOME/.config"}
+csm_config="$config_home/csm"
+
+read_setting() {
+  name=$1
+  fallback=$2
+  file="$csm_config/$name"
+  if [ -r "$file" ]; then
+    IFS= read -r value < "$file"
+    printf '%s' "${value:-$fallback}"
+  else
+    printf '%s' "$fallback"
+  fi
+}
+
+write_setting() {
+  name=$1
+  value=$2
+  umask 077
+  mkdir -p "$csm_config"
+  printf '%s\n' "$value" > "$csm_config/$name"
+}
+
+usage() {
+  cat <<'EOF'
+Usage: csm terminal [local|remote|status]
+       csm terminal default <local|remote>
+       csm terminal host <tailscale-hostname>
+
+With no argument, uses ~/.config/csm/terminal-mode (default: local).
+EOF
+}
+
+command=${1:-}
+case "$command" in
+  use)
+    case "${2:-}" in
+      local|remote) write_setting terminal-mode "$2"; printf 'Default CSM terminal: %s\n' "$2" ;;
+      *) usage >&2; exit 2 ;;
+    esac
+    exit 0
+    ;;
+  host)
+    [ -n "${2:-}" ] || { usage >&2; exit 2; }
+    write_setting remote-host "$2"
+    printf 'Remote CSM host: %s\n' "$2"
+    exit 0
+    ;;
+  status)
+    printf 'mode=%s\n' "$(read_setting terminal-mode local)"
+    printf 'remote_host=%s\n' "$(read_setting remote-host '<unset>')"
+    printf 'local_session=%s\n' "$(read_setting local-session main)"
+    printf 'remote_session=%s\n' "$(read_setting remote-session main)"
+    exit 0
+    ;;
+  local|remote) mode=$command ;;
+  -h|--help|help) usage; exit 0 ;;
+  '') mode=$(read_setting terminal-mode local) ;;
+  *) usage >&2; exit 2 ;;
+esac
+
+case "$mode" in
+  local)
+    session=${CSM_LOCAL_TMUX_SESSION:-$(read_setting local-session main)}
+    command -v tmux >/dev/null 2>&1 || {
+      printf 'tmux is required for local CSM mode.\n' >&2
+      exit 127
+    }
+    tmux new-session -A -s "$session"
+    ;;
+  remote)
+    host=${CSM_REMOTE_HOST:-$(read_setting remote-host '')}
+    session=${CSM_REMOTE_TMUX_SESSION:-$(read_setting remote-session main)}
+    [ -n "$host" ] || {
+      printf 'No remote host configured. Run: csm terminal host <tailscale-hostname>\n' >&2
+      exit 2
+    }
+    command -v mosh >/dev/null 2>&1 || {
+      printf 'Mosh is required for remote CSM mode.\n' >&2
+      exit 127
+    }
+    # Keep the server alive across laptop sleep and travel. A short network
+    # timeout strands the local client on wake because there is nothing left to
+    # reconnect to; 30 days still bounds cleanup after an ungraceful client loss.
+    mosh --predict=always \
+      --server='env MOSH_SERVER_NETWORK_TMOUT=2592000 mosh-server' \
+      "$host" -- tmux new-session -A -s "$session"
+    ;;
+esac

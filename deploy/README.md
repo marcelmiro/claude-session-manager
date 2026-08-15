@@ -9,12 +9,13 @@ clients over Tailscale. The cutover itself (state copy, auth, PWA reinstall) is
 
 | File | Purpose |
 |---|---|
-| `provision.sh` | Idempotent host setup — packages, inotify sysctl, swap, TZ, journald cap, needrestart list-only, bubblewrap AppArmor profile, linger + user units, bridge token, tmux snippet, tailscale install/serve. Re-run any time. |
+| `provision.sh` | Idempotent host setup — packages, zsh/tmux profile, inotify sysctl, swap, TZ, journald cap, needrestart list-only, bubblewrap AppArmor profile, linger + user units, bridge token, persistence plugins, and Tailscale. Re-run any time. |
 | `units/tmux.service` | User unit: tmux server at boot (linger), `csm save-sessions` on stop. |
 | `units/csm-bridge.service` | User unit: the bridge, `Restart=always` with spaced retries, token via 0600 `EnvironmentFile`. |
 | `units/csm-monitor.service` | User unit: fallback monitor tick + resurrect autosave while no tmux client is attached (status-right — and continuum riding it — only runs for attached clients). |
 | `units/csm-daemon.service` | User unit: the inbox daemon (snooze wakes, discovery snapshots, sidebar renderer) — systemd twin of darwin's `com.csm.daemon` launchd agent. Off-darwin the wake alert is a broadcast Web Push (no banner tier on a headless host). |
-| `tmux-vm.conf` | Remote-client tmux settings (escape-time, window-size, OSC 52). Sourced from `~/.tmux.conf`. |
+| `../config/tmux.conf` | CSM-owned, cross-platform tmux integration installed by both `csm setup` and Linux provisioning. Personal tmux settings remain separate. |
+| `doctor.sh` | Read-only post-provision audit of auth, services, tmux, clipboard capability, bridge, Tailscale, and host capacity. |
 | `aws/dlm-policies.sh` | DLM snapshot schedules (4-hourly/3d + daily/14d on `csm-backup=true` volumes) + budget-stop guardrail pointer. CLI-only — the console can't do sub-daily. |
 | `units/snapshot-check.{service,timer}` | Hourly staleness probe: newest `csm-backup` snapshot older than 5h → `csm notify` pushes to the phone. Needs the aws CLI and an instance role with `ec2:DescribeSnapshots`. |
 
@@ -22,6 +23,7 @@ clients over Tailscale. The cutover itself (state copy, auth, PWA reinstall) is
 
 ```sh
 ./provision.sh --tz Europe/Madrid --swap-gb 16
+./doctor.sh
 ```
 
 Run as the login user; system steps use sudo. Steps needing live systemd or
@@ -40,6 +42,19 @@ Prerequisites the script checks but cannot create:
   join does not disable key expiry, and an expired node key strands the box.
 - **bun + csm + claude** installs are in the runbook (they're user-level, not host
   provisioning).
+
+The Linux host does **not** need the personal dotfiles repository. Provisioning
+installs a small import in `~/.tmux.conf`; `csm setup` owns and updates the actual
+tmux/zsh fragments under `~/.config/csm/`. Clone dotfiles only when you explicitly
+want that machine's unrelated editor/shell preferences.
+
+Mac-to-VM paste is terminal input, not a Linux clipboard operation: use `Cmd+V`
+in Ghostty. VM-to-Mac copy (including CSM's Space→c) uses OSC 52. Ghostty needs
+`clipboard-read = allow` and `clipboard-write = allow`; tmux advertises both
+`clipboard` and `bpaste` client features when the chain is healthy. `doctor.sh`
+checks the remote half and prints the attached client's capabilities. Ghostty's
+explicit `super+v=paste_from_clipboard` binding makes the host-to-VM path behave
+like a local terminal; no remote clipboard service or tmux prefix is involved.
 
 ## After a reboot
 

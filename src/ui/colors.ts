@@ -1,13 +1,16 @@
 export const C = {
-  bg: "#101010",
-  fg: "#FFFFFF",
-  muted: "#A0A0A0",
-  dim: "#505050",
+  // Use the terminal's ANSI slots for the base palette. Ghostty maps these to
+  // the exact Vesper colors; named slots also avoid Blessed's lossy RGB→256
+  // conversion and make the UI follow another terminal theme coherently.
+  bg: "black",
+  fg: "bright-white",
+  muted: "white",
+  dim: "bright-black",
   surface: "#1C1C1C",
   hover: "#282828",
-  peach: "#FFC799",
-  mint: "#99FFE4",
-  red: "#FF8080",
+  peach: "bright-yellow",
+  mint: "bright-green",
+  red: "bright-red",
 } as const;
 
 export function statusColor(status: "running" | "waiting" | "ready" | "idle" | "archived"): string {

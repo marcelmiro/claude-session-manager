@@ -10,13 +10,14 @@
 import "../test/helpers/home";
 import { TEST_HOME } from "../test/helpers/home";
 import { test, expect, beforeEach } from "bun:test";
-import { mkdirSync, rmSync, writeFileSync, readFileSync, existsSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync, readFileSync, readlinkSync, existsSync } from "node:fs";
 import { setup, HOOK_VERSION } from "./cli";
 import { HOLD_WINDOW_MS } from "./core/approval";
 
 const claudeDir = `${TEST_HOME}/.claude`;
 const settingsPath = `${claudeDir}/settings.json`;
-const hooksDir = `${TEST_HOME}/.config/csm/hooks`;
+const csmDir = `${TEST_HOME}/.config/csm`;
+const hooksDir = `${csmDir}/hooks`;
 const EVENTS = [
   "SessionStart",
   "UserPromptSubmit",
@@ -25,11 +26,17 @@ const EVENTS = [
   "Stop",
   "SubagentStop",
   "PreToolUse",
+  "WorktreeCreate",
+  "WorktreeRemove",
 ];
 
 beforeEach(() => {
   rmSync(claudeDir, { recursive: true, force: true });
-  rmSync(hooksDir, { recursive: true, force: true });
+  rmSync(csmDir, { recursive: true, force: true });
+  rmSync(`${TEST_HOME}/.local/bin/csm`, { force: true });
+  rmSync(`${TEST_HOME}/.local/bin/csm-terminal`, { force: true });
+  rmSync(`${TEST_HOME}/.zshrc`, { force: true });
+  rmSync(`${TEST_HOME}/.tmux.conf`, { force: true });
   mkdirSync(claudeDir, { recursive: true });
   // Pre-existing user content that setup() must NOT clobber.
   writeFileSync(
@@ -41,6 +48,34 @@ beforeEach(() => {
       },
     }),
   );
+});
+
+test("setup installs CSM-owned terminal fragments and imports them idempotently", async () => {
+  writeFileSync(`${TEST_HOME}/.zshrc`, "# user zsh config\n");
+  writeFileSync(`${TEST_HOME}/.tmux.conf`, "# user tmux config\n");
+  mkdirSync(`${TEST_HOME}/.local/bin`, { recursive: true });
+  writeFileSync(
+    `${TEST_HOME}/.local/bin/csm-terminal`,
+    "#!/bin/sh\n# Start the local or remote tmux environment used by CSM.\n",
+  );
+
+  await setup();
+  await setup();
+
+  expect(readFileSync(`${csmDir}/shell.zsh`, "utf8")).not.toContain("alias csm-local=");
+  expect(readFileSync(`${csmDir}/tmux.conf`, "utf8")).toContain("display-popup -E");
+  expect(readlinkSync(`${TEST_HOME}/.local/bin/csm`)).toBe(`${import.meta.dir}/../bin/csm.ts`);
+  expect(readFileSync(`${csmDir}/terminal-launcher`, "utf8")).toContain(
+    "MOSH_SERVER_NETWORK_TMOUT=2592000",
+  );
+  expect(existsSync(`${TEST_HOME}/.local/bin/csm-terminal`)).toBe(false);
+
+  const zshrc = readFileSync(`${TEST_HOME}/.zshrc`, "utf8");
+  const tmux = readFileSync(`${TEST_HOME}/.tmux.conf`, "utf8");
+  expect(zshrc).toContain("# user zsh config");
+  expect(tmux).toContain("# user tmux config");
+  expect(zshrc.match(/\.config\/csm\/shell\.zsh/g)).toHaveLength(2); // test + source in one import line
+  expect(tmux.match(/\.config\/csm\/tmux\.conf/g)).toHaveLength(2); // test + source in one import line
 });
 
 /** Count CSM registrations (command points into the CSM hooks dir) for an event. */
@@ -69,10 +104,11 @@ test("running setup() twice leaves exactly one CSM entry per event and preserves
   // Other top-level keys preserved.
   expect(settings.model).toBe("opus");
 
-  // Idempotent per script after two runs: one CSM registration per event, except
-  // PreToolUse, which deliberately carries two (approval + matcher-scoped question).
+  // Idempotent per script after two runs. PreToolUse deliberately carries two
+  // registrations (approval + question), as does SubagentStop (log + cleanup).
   for (const event of EVENTS) {
-    expect(csmEntries(settings, event)).toHaveLength(event === "PreToolUse" ? 2 : 1);
+    const wanted = event === "PreToolUse" || event === "SubagentStop" ? 2 : 1;
+    expect(csmEntries(settings, event)).toHaveLength(wanted);
   }
 
   // The pre-existing user hook on SessionStart survives alongside the CSM one.
@@ -116,9 +152,17 @@ test("setup() repairs a stale timeout on an already-registered hook", async () =
   expect(csmEntries(after, "PreToolUse")).toHaveLength(2); // repaired, not duplicated
 });
 
-test("setup() writes the four hook scripts stamped with the current CSM_HOOK_VERSION", async () => {
+test("setup() writes every hook script stamped with the current CSM_HOOK_VERSION", async () => {
   await setup();
-  for (const name of ["session-start", "event", "pretooluse", "question-pretooluse"]) {
+  for (const name of [
+    "session-start",
+    "event",
+    "pretooluse",
+    "question-pretooluse",
+    "subagent-worktree-cleanup",
+    "worktree-create",
+    "worktree-remove",
+  ]) {
     const path = `${hooksDir}/${name}.sh`;
     expect(existsSync(path)).toBe(true);
     expect(readFileSync(path, "utf8")).toContain(`# CSM_HOOK_VERSION=${HOOK_VERSION}`);
@@ -195,11 +239,16 @@ test("AskUserQuestion is delegated: pretooluse.sh exits for it, question-pretool
   expect(q).not.toContain("claude --version");
 });
 
-test("setup() writes the daemon LaunchAgent plist idempotently (no launchctl under CSM_HOME)", async () => {
+test("setup() manages the daemon with launchd only on macOS", async () => {
   const plistPath = `${TEST_HOME}/Library/LaunchAgents/com.csm.daemon.plist`;
   rmSync(plistPath, { force: true });
 
   await setup();
+  if (process.platform !== "darwin") {
+    expect(existsSync(plistPath)).toBe(false);
+    return;
+  }
+
   const plist = readFileSync(plistPath, "utf8");
   expect(plist).toContain("<string>com.csm.daemon</string>");
   expect(plist).toContain("<string>daemon</string>");

@@ -15,7 +15,7 @@ ExecStart=/bin/bash -c 'tmux has-session -t main 2>/dev/null || tmux new-session
 # the forking handshake under systemd (tmux-continuum #110) and killed the server.
 # resurrect recreates the saved layout, then its post-restore hook runs
 # `csm restore-sessions` to resume each pane's Claude session.
-ExecStartPost=/bin/bash -c 'sleep 1; %h/.tmux/plugins/tmux-resurrect/scripts/restore.sh || true'
+ExecStartPost=/bin/bash -c 'sleep 1; %h/.config/tmux/plugins/tmux-resurrect/scripts/restore.sh || true'
 # Save the pane→session map on the way down so restore-sessions can resume every
 # Claude session after the reboot. csm resolves via the unit's own PATH above.
 ExecStop=/bin/bash -c 'csm save-sessions; /usr/bin/tmux kill-server'

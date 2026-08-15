@@ -152,30 +152,7 @@ function formatStatus(aggregate: AggregateStatus): string {
   const parts: string[] = [];
   if (aggregate.needsAttention > 0) parts.push(`⚡ ${aggregate.needsAttention}`);
   if (aggregate.running > 0) parts.push(`🔄 ${aggregate.running}`);
-  const cleared = clearedToday();
-  if (cleared > 0) parts.push(`✓ ${cleared}`);
   return parts.join(" ");
-}
-
-/**
- * Claude0 scoreboard: sessions archived since local midnight (inbox `e`,
- * portkey archive — any surface writing the store's archive event). Fresh
- * store per call; the monitor is a fresh process per status-right tick.
- */
-function clearedToday(): number {
-  try {
-    const { InboxStore } = require("./core/inbox-store") as typeof import("./core/inbox-store");
-    const store = new InboxStore();
-    try {
-      const midnight = new Date();
-      midnight.setHours(0, 0, 0, 0);
-      return store.clearedSince(midnight.getTime());
-    } finally {
-      store.close();
-    }
-  } catch {
-    return 0;
-  }
 }
 
 async function main(): Promise<void> {

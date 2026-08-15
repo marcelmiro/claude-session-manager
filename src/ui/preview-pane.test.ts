@@ -13,6 +13,7 @@ import { parseTranscript, lastAssistantMessage } from "../core/transcript";
 import type { PendingToolCall } from "../core/jsonl-reader";
 import type { Session } from "../types";
 import { fixture } from "../../test/helpers/fixture";
+import { C } from "./colors";
 
 const raw = fixture("transcripts/approved-tool.jsonl");
 const turns = parseTranscript(raw);
@@ -98,7 +99,7 @@ test("waiting preview renders history above the decision block and scrolls to bo
   expect(idxHistory).toBeGreaterThan(-1);
   expect(idxDecision).toBeGreaterThan(idxHistory);
   // The final option line closes the block.
-  expect(content.trimEnd().endsWith("3. No{/#A0A0A0-fg}")).toBe(true);
+  expect(content.trimEnd().endsWith(`3. No{/${C.muted}-fg}`)).toBe(true);
 });
 
 test("truncateAtWord truncates on a word boundary (no mid-word cut)", () => {

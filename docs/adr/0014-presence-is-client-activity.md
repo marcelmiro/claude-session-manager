@@ -21,7 +21,7 @@ both mechanisms break *silently*:
   permanently believe the user is watching (kills ⚡ and phone pushes on the
   active pane); the hook's empty-`lsappinfo` case permanently disables the
   question intercept; `atMacFocus` never releases a hold early.
-- "Client attached" inverts its meaning: a persistent SSH/et attach is the VM's
+- "Client attached" inverts its meaning: a persistent Mosh/SSH attach is the VM's
   steady state even when the user is out with their phone, so the approval hook
   would *always* route to the (unwatched) desk prompt.
 

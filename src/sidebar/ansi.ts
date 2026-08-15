@@ -43,14 +43,31 @@ export function bg(color: string, s: string): string {
   return `\x1b[48;2;${r};${g};${b}m${s}\x1b[49m`;
 }
 
-/** Printable width of a line: its length with SGR sequences stripped. */
+const SGR = /\x1b\[[0-9;]*m/g;
+const GRAPHEMES = new Intl.Segmenter(undefined, { granularity: "grapheme" });
+
+/** Printable terminal-cell width of a line, ignoring the SGR sequences we emit. */
 export function plainLen(s: string): number {
-  return s.replace(/\x1b\[[0-9;]*m/g, "").length;
+  return Bun.stringWidth(s.replace(SGR, ""));
 }
 
 export function truncate(s: string, w: number): string {
   if (w <= 0) return "";
-  return s.length <= w ? s : s.slice(0, Math.max(0, w - 1)) + "…";
+  if (Bun.stringWidth(s) <= w) return s;
+
+  const ellipsis = "…";
+  const contentWidth = w - Bun.stringWidth(ellipsis);
+  if (contentWidth <= 0) return ellipsis;
+
+  let out = "";
+  let used = 0;
+  for (const { segment } of GRAPHEMES.segment(s)) {
+    const segmentWidth = Bun.stringWidth(segment);
+    if (used + segmentWidth > contentWidth) break;
+    out += segment;
+    used += segmentWidth;
+  }
+  return out + ellipsis;
 }
 
 export function fmtAge(ms: number): string {

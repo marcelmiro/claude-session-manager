@@ -140,7 +140,10 @@ test("re-reads once the file changes, serves the memo while it doesn't", async (
   expect(await readLastTurnAt(path)).toBe(Date.parse("2026-07-18T10:05:00.000Z"));
 
   // Rewrite with a newer turn AND a new mtime — the memo must invalidate.
+  const initial = await Bun.file(path).stat();
   writeFileSync(path, JSON.stringify(turn("assistant", "2026-07-19T09:00:00.000Z")) + "\n");
+  // APFS can preserve the same timestamp across two writes in one test tick.
+  utimesSync(path, initial!.atimeMs / 1000, (initial!.mtimeMs + 1000) / 1000);
   expect(await readLastTurnAt(path)).toBe(Date.parse("2026-07-19T09:00:00.000Z"));
 
   // Same mtime, different bytes: the memo answers, proving it isn't re-parsing.

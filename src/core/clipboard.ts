@@ -1,7 +1,7 @@
 /**
  * Copy text to the USER's clipboard from wherever CSM runs. On macOS that's pbcopy.
  * On a remote host there is no useful local clipboard — instead emit OSC 52, which
- * the attaching terminal (Ghostty over SSH/et) translates into a clipboard write on
+ * the attaching terminal (Ghostty over Mosh/SSH) translates into a clipboard write on
  * the user's machine. Requires tmux `set-clipboard on` + `allow-passthrough on` and
  * the terminal allowing clipboard-write; all three are silent no-ops when missing,
  * which is why the sequences are built by a pure, exactly-tested function.

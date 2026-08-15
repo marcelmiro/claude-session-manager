@@ -81,10 +81,10 @@ note "remember: tag the root volume csm-backup=true, and measure FullSnapshotSiz
 # Requires a one-time budgets action role; if absent, print the console pointer
 # rather than half-configuring it.
 if aws budgets describe-budgets --account-id "$ACCOUNT" \
-    --query "Budgets[?BudgetName=='csm-vm-stop']" --output text 2>/dev/null | grep -q .; then
+    --query "Budgets[?BudgetName=='vm-stop']" --output text 2>/dev/null | grep -q .; then
   note "budget guardrail exists"
 else
-  note "ACTION NEEDED: create an action-enabled budget 'csm-vm-stop' (Billing → Budgets)"
+  note "ACTION NEEDED: create an action-enabled budget 'vm-stop' (Billing → Budgets)"
   note "  threshold: your monthly ceiling; action: Stop EC2 instance <instance-id>."
   note "  Budgets actions need their own IAM role — the console flow creates it; the CLI needs it pre-created."
 fi

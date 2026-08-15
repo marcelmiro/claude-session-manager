@@ -201,24 +201,10 @@ export class InboxStore {
 
   /**
    * An OBSERVED status transition (running→ready/waiting) — the event that
-   * admits a session into Needs You (ADR 0013: the inbox is unhandled
-   * events, not open sessions) and feeds the Claude0 scoreboard.
+   * records when a session hands control back to the user.
    */
   transition(sessionId: string, now: number, from: string | null, to: string): void {
     this.event(sessionId, now, "transition", { from, to });
-  }
-
-  /**
-   * Distinct sessions archived since `t` — the Claude0 "cleared today"
-   * scoreboard number. Counts archive EVENTS (an undo doesn't take the
-   * point back; the clearing motion happened).
-   */
-  clearedSince(t: number): number {
-    return (
-      this.db
-        .query("SELECT COUNT(DISTINCT session_id) AS n FROM events WHERE type = 'archive' AND at >= ?")
-        .get(t) as { n: number }
-    ).n;
   }
 
   // ── reads ────────────────────────────────────────────────────────────────
