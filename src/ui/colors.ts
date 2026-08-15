@@ -1,17 +1,16 @@
 export const C = {
-  bg: "#101010",
-  // Blessed has a stale lookup-cache entry for exact #FFFFFF and maps it to
-  // ANSI white (7), which Vesper deliberately defines as muted #A0A0A0.
-  // A one-step-off request resolves to bright white (15), whose Vesper palette
-  // entry is the intended #FFFFFF.
-  fg: "#FEFEFE",
-  muted: "#A0A0A0",
-  dim: "#505050",
+  // Use the terminal's ANSI slots for the base palette. Ghostty maps these to
+  // the exact Vesper colors; named slots also avoid Blessed's lossy RGB→256
+  // conversion and make the UI follow another terminal theme coherently.
+  bg: "black",
+  fg: "bright-white",
+  muted: "white",
+  dim: "bright-black",
   surface: "#1C1C1C",
   hover: "#282828",
-  peach: "#FFC799",
-  mint: "#99FFE4",
-  red: "#FF8080",
+  peach: "bright-yellow",
+  mint: "bright-green",
+  red: "bright-red",
 } as const;
 
 export function statusColor(status: "running" | "waiting" | "ready" | "idle" | "archived"): string {

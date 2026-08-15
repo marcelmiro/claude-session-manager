@@ -102,8 +102,8 @@ export async function discoveryTick(store: InboxStore): Promise<void> {
       if (arch.has(s.id)) store.unarchive(s.id, now);
       row.fromSnooze = was === "snoozed";
     }
-    // An OBSERVED transition into ready/waiting goes to the event log — it
-    // feeds the scoreboard and keeps a history of when sessions handed back.
+    // An OBSERVED transition into ready/waiting goes to the event log to keep
+    // a history of when sessions handed back.
     // (It once also gated Needs You admission; every prompt-sitter files
     // there now, so the event is record-keeping only.)
     if (p && statusChanged && (eff === "waiting" || (eff === "ready" && p.real?.status === "running"))) {

@@ -87,11 +87,10 @@ else files under **OPEN**: a neutral, dim, one-line section — visible, not
 nagging, all verbs still apply. Measured motivation: before gating, 9 of 9
 Needs You rows existed but only 1 was backed by a real event.
 
-**Claude0 scoreboard.** status-right is `⚡N 🔄N ✓N`; ✓ counts DISTINCT
-sessions archived since local midnight from archive events, so an undo
-doesn't take the point back — the clearing motion happened. Known
-refinement: ⚡ (state.json flags) and Needs You (admissions) don't share an
-event source yet and can briefly disagree.
+**Status-right is activity only.** It renders `⚡N 🔄N`: sessions needing the
+user and sessions currently running. A later `✓N` cleared-today scoreboard
+was tried and removed; completed work should disappear instead of leaving a
+persistent counter that looks like another live-session state.
 
 **The sidebar is the popup TUI's replacement, not a companion.** Confirmed
 (this ADR's rollout section guessed "likely obsoleted"): triage logic lives
@@ -118,8 +117,8 @@ wanted a decision. `sectionOf` now sends every non-running, non-parked,
 non-archived live session to Needs You; the aim is to clear the section by
 actioning each row (reply, snooze, block, done). The `needsYou` flag, the
 one-time ⚡ seed, and the OPEN section are gone; observed running→ready/
-waiting transitions are still written as `transition` events (scoreboard +
-history), and the derived-finish and wake rules are unchanged.
+waiting transitions are still written as `transition` events for history,
+and the derived-finish and wake rules are unchanged.
 
 Same day, the resume paths earned their first real fixes (all found by
 walking the reported bugs): dead-pane probes moved off `display-message`

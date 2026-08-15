@@ -25,7 +25,9 @@ export function createLayout() {
     height: "100%",
     border: { type: "line" },
     style: {
-      border: { fg: C.dim },
+      fg: C.fg,
+      bg: C.bg,
+      border: { fg: C.dim, bg: C.bg },
     },
   });
 
@@ -42,6 +44,7 @@ export function createLayout() {
     tags: true,
     style: {
       fg: C.fg,
+      bg: C.bg,
     },
   });
 
@@ -58,7 +61,8 @@ export function createLayout() {
     alwaysScroll: true,
     style: {
       fg: C.fg,
-      border: { fg: C.dim },
+      bg: C.bg,
+      border: { fg: C.dim, bg: C.bg },
     },
     padding: { left: 1, right: 1 },
   });
@@ -72,7 +76,8 @@ export function createLayout() {
     height: 1,
     tags: true,
     style: {
-      fg: C.dim,
+      fg: C.muted,
+      bg: C.bg,
     },
     padding: { left: 1 },
   });
