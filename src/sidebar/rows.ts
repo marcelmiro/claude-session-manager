@@ -6,8 +6,9 @@
  * what each pane last showed.
  *
  * Rendering constraints learned the hard way (prototype week):
- * - emoji (⚡ ✋) are double-width in tmux — all glyphs here are measured
- *   1-cell (● ⦿ ⏸ ✓ ↺ ▸ ▾ ✗ ☾ ⧗ ↵).
+ * - terminal layout is measured in cells, not UTF-16 code units. Emoji are
+ *   normally two cells; combining marks and ZWJ sequences are not one cell
+ *   per code unit. `plainLen`/`truncate` own that accounting.
  * - width is a hard invariant: a row line NEVER exceeds the pane (overflow
  *   wraps, shifting every row below and corrupting click + scroll math).
  */
@@ -19,7 +20,7 @@ import {
   type InboxSession,
   type Section,
 } from "../core/inbox-model";
-import { C, bg, bold, displayName, fg, fmtAge, fmtWake, fmtWakeAbs, truncate } from "./ansi";
+import { C, bg, bold, displayName, fg, fmtAge, fmtWake, fmtWakeAbs, plainLen, truncate } from "./ansi";
 
 export interface VisibleRow {
   id: string;
@@ -102,8 +103,10 @@ function sessionLine(
 ): string[] {
   const right = truncate(opts.right, Math.max(2, width - 9));
   const name = displayName(s.name);
-  const label = truncate(name, width - 1 - right.length - 1);
-  const pad = " ".repeat(Math.max(1, width - 1 - label.length - right.length));
+  const rightWidth = plainLen(right);
+  const label = truncate(name, width - 1 - rightWidth - 1);
+  const labelWidth = plainLen(label);
+  const pad = " ".repeat(Math.max(1, width - 1 - labelWidth - rightWidth));
   const sel = vs.focused && s.id === vs.selectedId;
   // passive "you are here" pin: the session in this window's active pane.
   // white, not a status color — the bar means "you are here" regardless of
@@ -134,8 +137,10 @@ function sessionLine(
     prText = `#${s.pr.number}`;
     prColor = C.muted;
   }
-  const repoLabel = truncate(repo, width - 1 - prText.length - 1);
-  const pad2 = " ".repeat(Math.max(1, width - 1 - repoLabel.length - prText.length));
+  const prWidth = plainLen(prText);
+  const repoLabel = truncate(repo, width - 1 - prWidth - 1);
+  const repoWidth = plainLen(repoLabel);
+  const pad2 = " ".repeat(Math.max(1, width - 1 - repoWidth - prWidth));
   const line2 = `${marker}${fg(C.dim, repoLabel)}${pad2}${prText ? fg(prColor, prText) : ""}`;
   return [wrap(line1), wrap(line2)];
 }

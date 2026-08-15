@@ -47,6 +47,18 @@ describe("renderView", () => {
     }
   });
 
+  test("wide emoji, CJK, and combining marks do not overflow a row", () => {
+    const unicode = [
+      sess({ id: "unicode", name: "⚡ Fix 日本 e\u0301 rendering", since: NOW - 2 * H }),
+    ];
+    const dims = { width: 18, height: 8 };
+    const view = renderView(unicode, vs(), dims, NOW);
+    expect(view.rows.length).toBe(dims.height);
+    for (const row of view.rows) {
+      expect(plainLen(row)).toBeLessThanOrEqual(dims.width);
+    }
+  });
+
   test("sections and rowAtLine cover both lines of a two-line row", () => {
     const view = renderView(SAMPLE, vs(), DIMS, NOW);
     expect(view.visible.map((v) => v.section)).toEqual([
