@@ -99,8 +99,8 @@ clipboard), **7** (phone lists sessions, resume works, push round-trips).
   portkey icon; open `https://<vm>.<tailnet>.ts.net`, Add to Home Screen, re-grant
   push (the bell — permission needs the tap), confirm a test push.
 - Mac: `brew install mosh`; run `csm setup`, then configure the client with
-  `csm-terminal host <vm.ts.net>` and `csm-terminal use remote`. Ghostty may run
-  `~/.local/bin/csm-terminal` at startup; `csm-terminal local` remains available
+  `csm terminal host <vm.ts.net>` and `csm terminal default remote`. Ghostty runs
+  `csm terminal` at startup; `csm terminal local` remains available
   for a completely separate Mac-local CSM/tmux environment.
   `shell-integration-features = ssh-env,ssh-terminfo`, `clipboard-write = allow`.
 - Mac teardown: stop the launchd bridge / `caffeinate` wrapper, remove the plist,

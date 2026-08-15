@@ -18,10 +18,6 @@ if [[ "$OSTYPE" != darwin* ]]; then
   [[ -r "$HOME/.zshrc.local" ]] && source "$HOME/.zshrc.local"
 fi
 
-# Explicit local/remote entry points. `csm-mode local|remote` changes what a new
-# Ghostty surface opens; `vm` always opens the configured remote host.
-alias csm-local='$HOME/.local/bin/csm-terminal local'
-alias csm-remote='$HOME/.local/bin/csm-terminal remote'
-alias csm-mode='$HOME/.local/bin/csm-terminal use'
-alias csm-terminal-status='$HOME/.local/bin/csm-terminal status'
-alias vm='$HOME/.local/bin/csm-terminal remote'
+# Terminal control is namespaced under `csm terminal ...`. Ghostty invokes the
+# lower-level launcher directly so it can fall back to a local shell when a
+# connection ends.

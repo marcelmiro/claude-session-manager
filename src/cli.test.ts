@@ -10,7 +10,7 @@
 import "../test/helpers/home";
 import { TEST_HOME } from "../test/helpers/home";
 import { test, expect, beforeEach } from "bun:test";
-import { mkdirSync, rmSync, writeFileSync, readFileSync, existsSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync, readFileSync, readlinkSync, existsSync } from "node:fs";
 import { setup, HOOK_VERSION } from "./cli";
 import { HOLD_WINDOW_MS } from "./core/approval";
 
@@ -33,6 +33,7 @@ const EVENTS = [
 beforeEach(() => {
   rmSync(claudeDir, { recursive: true, force: true });
   rmSync(csmDir, { recursive: true, force: true });
+  rmSync(`${TEST_HOME}/.local/bin/csm`, { force: true });
   rmSync(`${TEST_HOME}/.local/bin/csm-terminal`, { force: true });
   rmSync(`${TEST_HOME}/.zshrc`, { force: true });
   rmSync(`${TEST_HOME}/.tmux.conf`, { force: true });
@@ -52,15 +53,22 @@ beforeEach(() => {
 test("setup installs CSM-owned terminal fragments and imports them idempotently", async () => {
   writeFileSync(`${TEST_HOME}/.zshrc`, "# user zsh config\n");
   writeFileSync(`${TEST_HOME}/.tmux.conf`, "# user tmux config\n");
+  mkdirSync(`${TEST_HOME}/.local/bin`, { recursive: true });
+  writeFileSync(
+    `${TEST_HOME}/.local/bin/csm-terminal`,
+    "#!/bin/sh\n# Start the local or remote tmux environment used by CSM.\n",
+  );
 
   await setup();
   await setup();
 
-  expect(readFileSync(`${csmDir}/shell.zsh`, "utf8")).toContain("alias csm-local=");
+  expect(readFileSync(`${csmDir}/shell.zsh`, "utf8")).not.toContain("alias csm-local=");
   expect(readFileSync(`${csmDir}/tmux.conf`, "utf8")).toContain("display-popup -E");
-  expect(readFileSync(`${TEST_HOME}/.local/bin/csm-terminal`, "utf8")).toContain(
+  expect(readlinkSync(`${TEST_HOME}/.local/bin/csm`)).toBe(`${import.meta.dir}/../bin/csm.ts`);
+  expect(readFileSync(`${csmDir}/terminal-launcher`, "utf8")).toContain(
     "MOSH_SERVER_NETWORK_TMOUT=2592000",
   );
+  expect(existsSync(`${TEST_HOME}/.local/bin/csm-terminal`)).toBe(false);
 
   const zshrc = readFileSync(`${TEST_HOME}/.zshrc`, "utf8");
   const tmux = readFileSync(`${TEST_HOME}/.tmux.conf`, "utf8");

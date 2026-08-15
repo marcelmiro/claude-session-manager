@@ -30,9 +30,9 @@ write_setting() {
 
 usage() {
   cat <<'EOF'
-Usage: csm-terminal [local|remote|status]
-       csm-terminal use <local|remote>
-       csm-terminal host <tailscale-hostname>
+Usage: csm terminal [local|remote|status]
+       csm terminal default <local|remote>
+       csm terminal host <tailscale-hostname>
 
 With no argument, uses ~/.config/csm/terminal-mode (default: local).
 EOF
@@ -79,7 +79,7 @@ case "$mode" in
     host=${CSM_REMOTE_HOST:-$(read_setting remote-host '')}
     session=${CSM_REMOTE_TMUX_SESSION:-$(read_setting remote-session main)}
     [ -n "$host" ] || {
-      printf 'No remote host configured. Run: csm-terminal host <tailscale-hostname>\n' >&2
+      printf 'No remote host configured. Run: csm terminal host <tailscale-hostname>\n' >&2
       exit 2
     }
     command -v mosh >/dev/null 2>&1 || {

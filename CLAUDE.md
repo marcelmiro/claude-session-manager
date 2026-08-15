@@ -63,7 +63,7 @@ The mobile bridge (`csm bridge`) runs as a systemd user unit on the Linux VM hos
 
 **Focus pane pre-selection**: Set `CSM_FOCUS_PANE=%42` (tmux pane ID) to pre-select that session on launch. Requires `run-shell` to expand the format string: `bind a run-shell 'tmux set-environment CSM_FOCUS_PANE "#{pane_id}"' \; display-popup -E -w 90% -h 85% csm`. Falls back to first session if pane not found.
 
-**`csm setup` details**: Installs CSM's Claude lifecycle hooks under `~/.config/csm/hooks`, preserving existing hooks and settings. It also updates CSM-owned tmux/zsh fragments under `~/.config/csm/`, installs `~/.local/bin/csm-terminal`, adds one import to the user's `.tmux.conf` and `.zshrc`, and ensures the tmux persistence plugins are present. Safe to run multiple times (idempotent); personal dotfiles are never replaced.
+**`csm setup` details**: Installs CSM's Claude lifecycle hooks under `~/.config/csm/hooks`, preserving existing hooks and settings. It also updates CSM-owned tmux/zsh fragments under `~/.config/csm/`, installs the `~/.local/bin/csm` command plus a private terminal launcher under `~/.config/csm/`, removes the retired public `csm-terminal` launcher when CSM owns it, adds one import to the user's `.tmux.conf` and `.zshrc`, and ensures the tmux persistence plugins are present. Safe to run multiple times (idempotent); personal dotfiles are never replaced.
 
 ## Architecture
 

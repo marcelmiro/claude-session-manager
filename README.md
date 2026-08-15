@@ -26,7 +26,8 @@ csm setup
 ```text
 ~/.config/csm/tmux.conf
 ~/.config/csm/shell.zsh
-~/.local/bin/csm-terminal
+~/.config/csm/terminal-launcher  # private transport implementation
+~/.local/bin/csm
 ```
 
 It adds one import line to `~/.tmux.conf` and `~/.zshrc`; it does not replace
@@ -36,24 +37,24 @@ personal dotfiles.
 
 ```sh
 # Make new terminal windows use local tmux:
-csm-terminal use local
+csm terminal default local
 
 # Or configure an always-on host and make it the default:
-csm-terminal host vm.example.ts.net
-csm-terminal use remote
+csm terminal host vm.example.ts.net
+csm terminal default remote
 
 # Open either mode explicitly without changing the default:
-csm-local
-csm-remote
+csm terminal local
+csm terminal remote
 
-csm-terminal status
+csm terminal status
 ```
 
-On macOS, Ghostty can use this command so a failed connection or detach falls
+On macOS, Ghostty invokes the CSM command so a failed connection or detach falls
 through to a local login shell:
 
 ```text
-/bin/zsh -lc '"$HOME/.local/bin/csm-terminal"; exec /bin/zsh -l'
+/bin/zsh -lc '"$HOME/.local/bin/csm" terminal; exec /bin/zsh -l'
 ```
 
 Remote mode requires Mosh on both machines. Hostname, mode, and session choices

@@ -25,7 +25,7 @@ import { pickRepoPath } from "./core/sessions";
 import { resolveTranscriptPath, latestTranscriptCwd } from "./core/last-turn";
 import { shellQuote } from "./core/launch-command";
 import { PENDING_DIR, DECISIONS_DIR, HOLD_WINDOW_MS, QUESTION_HOLD_MS, HOOK_KILL_GRACE_MS } from "./core/approval";
-import { mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, writeFileSync, readFileSync, readlinkSync, rmSync, symlinkSync } from "node:fs";
 
 const home = homedir();
 
@@ -731,7 +731,7 @@ async function installTerminalIntegration(home: string): Promise<string[]> {
   const files = [
     { source: `${configDir}/tmux.conf`, target: `${home}/.config/csm/tmux.conf`, executable: false },
     { source: `${configDir}/shell.zsh`, target: `${home}/.config/csm/shell.zsh`, executable: false },
-    { source: `${configDir}/csm-terminal`, target: `${home}/.local/bin/csm-terminal`, executable: true },
+    { source: `${configDir}/csm-terminal`, target: `${home}/.config/csm/terminal-launcher`, executable: true },
   ];
   const changed: string[] = [];
 
@@ -746,6 +746,27 @@ async function installTerminalIntegration(home: string): Promise<string[]> {
       changed.push(file.target);
     }
     if (file.executable) await Bun.$`chmod +x ${file.target}`.quiet();
+  }
+
+  // Migrate the old public implementation-detail command out of PATH. Only
+  // remove it when it is recognizably CSM-owned; never clobber an unrelated file.
+  const legacyLauncher = `${home}/.local/bin/csm-terminal`;
+  let legacyContents = "";
+  try { legacyContents = await Bun.file(legacyLauncher).text(); } catch {}
+  if (legacyContents.includes("Start the local or remote tmux environment used by CSM")) {
+    rmSync(legacyLauncher, { force: true });
+    changed.push(legacyLauncher);
+  }
+
+  const commandSource = `${import.meta.dir}/../bin/csm.ts`;
+  const commandTarget = `${home}/.local/bin/csm`;
+  let installedCommand = "";
+  try { installedCommand = readlinkSync(commandTarget); } catch {}
+  if (installedCommand !== commandSource) {
+    await Bun.$`mkdir -p ${home}/.local/bin`.quiet();
+    rmSync(commandTarget, { force: true });
+    symlinkSync(commandSource, commandTarget);
+    changed.push(commandTarget);
   }
 
   const imports = [
@@ -914,7 +935,8 @@ export async function setup(): Promise<void> {
   if (integrationChanged.length > 0) {
     console.log("CSM terminal integration installed.");
     console.log(`  Profile: ${home}/.config/csm/{tmux.conf,shell.zsh}`);
-    console.log(`  Launcher: ${home}/.local/bin/csm-terminal`);
+    console.log(`  Command: ${home}/.local/bin/csm`);
+    console.log(`  Launcher: ${home}/.config/csm/terminal-launcher`);
   }
 
   if (scriptsWritten || settingsChanged) {
