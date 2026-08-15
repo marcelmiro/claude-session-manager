@@ -58,6 +58,12 @@ through to a local login shell:
 
 Remote mode requires Mosh on both machines. Hostname, mode, and session choices
 are machine-local files under `~/.config/csm/`, never committed to dotfiles.
+The remote Mosh server keeps a reconnect window of 30 days so ordinary laptop
+sleep, roaming, and travel do not strand an open terminal.
+
+On Linux, CSM provides a compact interactive zsh baseline and then sources
+`~/.zshrc.local` when present. Put personal prompt/theme setup there; `csm setup`
+updates its own fragment without overwriting that file.
 
 ## Provision an always-on Linux host
 

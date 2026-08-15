@@ -86,9 +86,11 @@ case "$mode" in
       printf 'Mosh is required for remote CSM mode.\n' >&2
       exit 127
     }
-    # tmux owns durable state; the transport only needs a short roaming window.
+    # Keep the server alive across laptop sleep and travel. A short network
+    # timeout strands the local client on wake because there is nothing left to
+    # reconnect to; 30 days still bounds cleanup after an ungraceful client loss.
     mosh --predict=always \
-      --server='env MOSH_SERVER_NETWORK_TMOUT=300 mosh-server' \
+      --server='env MOSH_SERVER_NETWORK_TMOUT=2592000 mosh-server' \
       "$host" -- tmux new-session -A -s "$session"
     ;;
 esac
