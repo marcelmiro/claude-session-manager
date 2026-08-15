@@ -39,7 +39,7 @@ personal dotfiles.
 csm-terminal use local
 
 # Or configure an always-on host and make it the default:
-csm-terminal host csm-vm.example.ts.net
+csm-terminal host vm.example.ts.net
 csm-terminal use remote
 
 # Open either mode explicitly without changing the default:
