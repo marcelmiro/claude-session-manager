@@ -153,7 +153,9 @@ function formatStatus(aggregate: AggregateStatus): string {
   if (aggregate.needsAttention > 0) parts.push(`⚡ ${aggregate.needsAttention}`);
   if (aggregate.running > 0) parts.push(`🔄 ${aggregate.running}`);
   const cleared = clearedToday();
-  if (cleared > 0) parts.push(`✓ ${cleared}`);
+  // Use the emoji checkmark (Apple Color Emoji on Ghostty/macOS), not the
+  // text-presentation ✓ that falls through to an unrelated fallback font.
+  if (cleared > 0) parts.push(`✅ ${cleared}`);
   return parts.join(" ");
 }
 

@@ -1,8 +1,16 @@
 import blessed from "blessed";
 import { C } from "./colors";
 
+// Blessed 0.1.81 falls back to an 8-color capability table for
+// `tmux-256color`, despite the terminfo entry advertising 256 colors. Its
+// renderer then crushes the Vesper palette down to ANSI black/red/white.
+// Blessed itself only renders up to 256 colors, so use its complete, bundled
+// xterm table while tmux continues to expose `tmux-256color` to child apps.
+export const BLESSED_TERMINAL = "xterm-256color";
+
 export function createLayout() {
   const screen = blessed.screen({
+    terminal: BLESSED_TERMINAL,
     smartCSR: true,
     title: "csm",
     fullUnicode: true,
