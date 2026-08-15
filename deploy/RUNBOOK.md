@@ -30,11 +30,12 @@ table in the plan (copy vs regenerate vs discard); decisions: ADRs 14–16.
 ## B. Provision
 
 ```sh
-git clone https://github.com/marcelmiro/csm ~/Documents/csm   # or scp deploy/ first
+git clone https://github.com/marcelmiro/claude-session-manager ~/Documents/csm
 ~/Documents/csm/deploy/provision.sh --tz Europe/Madrid --swap-gb 16
 curl -fsSL https://bun.sh/install | bash                       # bun → ~/.bun/bin
 cd ~/Documents/csm && bun install && ln -sf ~/Documents/csm/bin/csm.ts ~/.bun/bin/csm
 curl -fsSL https://claude.ai/install.sh | bash -s stable       # claude (self-updating channel)
+csm setup                                                     # hooks + tmux/zsh fragments
 sudo tailscale up --ssh --hostname=<name> --authkey=<PRE-TAGGED key>   # tag at join or expiry stays on
 sudo tailscale serve --bg 8473
 ```
@@ -83,13 +84,13 @@ Then on the VM: `csm setup`.
 ## E. Bring up + verify
 
 ```sh
-systemctl --user daemon-reload && systemctl --user start tmux csm-bridge csm-monitor snapshot-check.timer
+systemctl --user daemon-reload && systemctl --user start tmux csm-bridge csm-monitor csm-daemon snapshot-check.timer
 ```
 
 Run verification scenarios **4** (reboot with no SSH → everything back), **5/6**
 (presence: typing suppresses pushes; idle attach routes approvals/questions to the
 phone), **8** (reboot with live sessions → `csm restore-sessions` resumes each,
-no duplicate claude per pane), **9** (Space→c over SSH lands in the Mac
+no duplicate claude per pane), **9** (Space→c over Mosh lands in the Mac
 clipboard), **7** (phone lists sessions, resume works, push round-trips).
 
 ## F. Point the clients at it
@@ -97,7 +98,10 @@ clipboard), **7** (phone lists sessions, resume works, push round-trips).
 - iPhone: Tailscale app → VPN On Demand → cellular **Always**. Delete the old
   portkey icon; open `https://<vm>.<tailnet>.ts.net`, Add to Home Screen, re-grant
   push (the bell — permission needs the tap), confirm a test push.
-- Mac: `brew install et` (mosh optional for bad links); Ghostty config
+- Mac: `brew install mosh`; run `csm setup`, then configure the client with
+  `csm-terminal host <vm.ts.net>` and `csm-terminal use remote`. Ghostty may run
+  `~/.local/bin/csm-terminal` at startup; `csm-terminal local` remains available
+  for a completely separate Mac-local CSM/tmux environment.
   `shell-integration-features = ssh-env,ssh-terminfo`, `clipboard-write = allow`.
 - Mac teardown: stop the launchd bridge / `caffeinate` wrapper, remove the plist,
   stop the monitor, and boot out the inbox daemon (`launchctl bootout

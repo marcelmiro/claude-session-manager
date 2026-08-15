@@ -682,6 +682,12 @@ const HOOK_SCRIPTS = [
   { name: "question-pretooluse.sh", content: QUESTION_PRETOOLUSE_HOOK_SCRIPT },
 ] as const;
 
+const FILE_HOOK_SCRIPTS = [
+  "subagent-worktree-cleanup.sh",
+  "worktree-create.sh",
+  "worktree-remove.sh",
+] as const;
+
 /** Which hook script handles each Claude Code event. PreToolUse blocks (Inc6). */
 const HOOK_REGISTRATIONS: { event: string; script: string; matcher?: string; timeout?: number }[] = [
   { event: "SessionStart", script: "session-start.sh" },
@@ -690,6 +696,9 @@ const HOOK_REGISTRATIONS: { event: string; script: string; matcher?: string; tim
   { event: "Notification", script: "event.sh" },
   { event: "Stop", script: "event.sh" },
   { event: "SubagentStop", script: "event.sh" },
+  { event: "SubagentStop", script: "subagent-worktree-cleanup.sh" },
+  { event: "WorktreeCreate", script: "worktree-create.sh" },
+  { event: "WorktreeRemove", script: "worktree-remove.sh" },
   // Claude Code's own timeout — the SIGKILL each hook poll loop races. Deliberately the
   // poll window PLUS a grace: Claude counts from spawn and a loop can't start its clock
   // until the process is up, so registering the bare window would make the kill land first
@@ -709,6 +718,79 @@ const HOOK_REGISTRATIONS: { event: string; script: string; matcher?: string; tim
   },
 ];
 
+const CSM_TMUX_SOURCE = "if-shell 'test -f ~/.config/csm/tmux.conf' 'source-file ~/.config/csm/tmux.conf' ''";
+const CSM_ZSH_SOURCE = '[[ -r "$HOME/.config/csm/shell.zsh" ]] && source "$HOME/.config/csm/shell.zsh"';
+
+/**
+ * Install the CSM-owned terminal profile and add one import to the user's base
+ * tmux/zsh files. Personal config stays personal; setup can update its fragment
+ * without rewriting or templating somebody else's dotfiles.
+ */
+async function installTerminalIntegration(home: string): Promise<string[]> {
+  const configDir = `${import.meta.dir}/../config`;
+  const files = [
+    { source: `${configDir}/tmux.conf`, target: `${home}/.config/csm/tmux.conf`, executable: false },
+    { source: `${configDir}/shell.zsh`, target: `${home}/.config/csm/shell.zsh`, executable: false },
+    { source: `${configDir}/csm-terminal`, target: `${home}/.local/bin/csm-terminal`, executable: true },
+  ];
+  const changed: string[] = [];
+
+  for (const file of files) {
+    const wanted = await Bun.file(file.source).text();
+    let existing = "";
+    try { existing = await Bun.file(file.target).text(); } catch {}
+    if (existing !== wanted) {
+      const slash = file.target.lastIndexOf("/");
+      await Bun.$`mkdir -p ${file.target.slice(0, slash)}`.quiet();
+      await Bun.write(file.target, wanted);
+      changed.push(file.target);
+    }
+    if (file.executable) await Bun.$`chmod +x ${file.target}`.quiet();
+  }
+
+  const imports = [
+    { path: `${home}/.tmux.conf`, line: CSM_TMUX_SOURCE, label: "tmux import" },
+    { path: `${home}/.zshrc`, line: CSM_ZSH_SOURCE, label: "zsh import" },
+  ];
+  for (const entry of imports) {
+    let existing = "";
+    try { existing = await Bun.file(entry.path).text(); } catch {}
+    if (!existing.split("\n").includes(entry.line)) {
+      const prefix = existing.length === 0 ? "" : existing.endsWith("\n") ? "\n" : "\n\n";
+      await Bun.write(entry.path, `${existing}${prefix}# CSM integration (managed by csm setup)\n${entry.line}\n`);
+      changed.push(entry.label);
+    }
+  }
+
+  // Persistence is part of CSM's contract, not a dotfiles prerequisite. Avoid
+  // network access under CSM_HOME so tests and contained installs stay hermetic;
+  // Linux provisioning installs the same plugins before `csm setup` runs.
+  if (!process.env.CSM_HOME && Bun.which("git")) {
+    const plugins = [
+      { name: "tmux-resurrect", repo: "https://github.com/tmux-plugins/tmux-resurrect" },
+      { name: "tmux-continuum", repo: "https://github.com/tmux-plugins/tmux-continuum" },
+    ];
+    for (const plugin of plugins) {
+      const dir = `${home}/.config/tmux/plugins/${plugin.name}`;
+      if (!(await Bun.file(`${dir}/README.md`).exists())) {
+        await Bun.$`mkdir -p ${home}/.config/tmux/plugins`.quiet();
+        const clone = await Bun.$`git clone -q --depth 1 ${plugin.repo} ${dir}`.quiet().nothrow();
+        if (clone.exitCode === 0) changed.push(`tmux plugin ${plugin.name}`);
+      }
+    }
+  }
+
+  // Apply updates to an existing server without creating one. CSM_HOME is the
+  // test seam and must never touch the developer's real tmux server.
+  if (!process.env.CSM_HOME && Bun.which("tmux")) {
+    await Bun.$`tmux has-session`.quiet().nothrow().then(async (result) => {
+      if (result.exitCode === 0) await Bun.$`tmux source-file ${home}/.config/csm/tmux.conf`.quiet().nothrow();
+    });
+  }
+
+  return changed;
+}
+
 /** Read the CSM_HOOK_VERSION from an installed hook script. Returns 0 if missing or unreadable. */
 async function getInstalledHookVersion(hookPath: string): Promise<number> {
   try {
@@ -723,11 +805,9 @@ async function getInstalledHookVersion(hookPath: string): Promise<number> {
 /**
  * Install the CSM hooks into ~/.claude/settings.json and create the hook scripts.
  *
- * Registers exactly ONE command per event (ADR-3b): SessionStart → pane-map,
- * the five non-blocking events → `event.sh` (log), PreToolUse → `pretooluse.sh`
- * (log now; blocking approval in Inc6). Safe to run multiple times — rewrites
- * outdated scripts and adds only missing registrations, so a second run is a
- * no-op (exactly one CSM entry per event; user hooks preserved).
+ * Registers CSM's tracking, approval, and worktree hooks. Safe to run multiple
+ * times — rewrites outdated scripts and adds only missing registrations, so a
+ * second run is a no-op and user hooks are preserved.
  */
 export async function setup(): Promise<void> {
   const { homedir } = await import("os");
@@ -735,6 +815,8 @@ export async function setup(): Promise<void> {
   const settingsPath = `${home}/.claude/settings.json`;
   const hookDir = `${home}/.config/csm/hooks`;
   const scriptPath = (name: string) => `${hookDir}/${name}`;
+
+  const integrationChanged = await installTerminalIntegration(home);
 
   // Load existing settings (or start fresh)
   let settings: Record<string, any> = {};
@@ -751,9 +833,14 @@ export async function setup(): Promise<void> {
 
   // Rewrite any missing/outdated script (version gate is per-script).
   await Bun.$`mkdir -p ${hookDir}`.quiet();
+  const fileHookScripts = await Promise.all(FILE_HOOK_SCRIPTS.map(async (name) => ({
+    name,
+    content: (await Bun.file(`${import.meta.dir}/../config/hooks/${name}`).text())
+      .replace("__CSM_HOOK_VERSION__", String(HOOK_VERSION)),
+  })));
   let scriptsWritten = 0;
   let scriptsUpdated = false;
-  for (const { name, content } of HOOK_SCRIPTS) {
+  for (const { name, content } of [...HOOK_SCRIPTS, ...fileHookScripts]) {
     const path = scriptPath(name);
     const installed = await getInstalledHookVersion(path);
     if (installed < HOOK_VERSION) {
@@ -819,14 +906,20 @@ export async function setup(): Promise<void> {
     }
   } catch {}
 
-  if (!scriptsWritten && !settingsChanged && daemonResult === "unchanged") {
-    console.log("CSM hooks already configured.");
+  if (!scriptsWritten && !settingsChanged && daemonResult === "unchanged" && integrationChanged.length === 0) {
+    console.log("CSM hooks and terminal integration already configured.");
     return;
+  }
+
+  if (integrationChanged.length > 0) {
+    console.log("CSM terminal integration installed.");
+    console.log(`  Profile: ${home}/.config/csm/{tmux.conf,shell.zsh}`);
+    console.log(`  Launcher: ${home}/.local/bin/csm-terminal`);
   }
 
   if (scriptsWritten || settingsChanged) {
     console.log(scriptsUpdated ? "CSM hooks updated." : "CSM hooks installed.");
-    console.log(`  Hook scripts: ${hookDir}/{session-start,event,pretooluse,question-pretooluse}.sh`);
+    console.log(`  Hook scripts: ${hookDir} (tracking, approvals, and worktrees)`);
     console.log(`  Settings: ${settingsPath}`);
   }
   if (daemonResult !== "unchanged") {

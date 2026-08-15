@@ -48,7 +48,7 @@ The mobile bridge (`csm bridge`) runs as a systemd user unit on the Linux VM hos
 | `csm status` | Tmux status-right monitor (`⚡3 🔄2`) | stdout |
 | `csm list` | Text-only session list with status/repo/context% | stdout |
 | `csm switch <name>` | Fuzzy-match session by name and switch to it | tmux display-message |
-| `csm setup` | Install SessionStart hook for session tracking | stdout |
+| `csm setup` | Install Claude hooks plus CSM-owned tmux/zsh/terminal integration | stdout |
 | `csm save-sessions` | Snapshot pane→session map for tmux-resurrect | stdout (silent in hook) |
 | `csm restore-sessions` | Restore Claude sessions after tmux-resurrect restore | stdout |
 | `csm --help` | Show available commands and usage | stdout |
@@ -63,7 +63,7 @@ The mobile bridge (`csm bridge`) runs as a systemd user unit on the Linux VM hos
 
 **Focus pane pre-selection**: Set `CSM_FOCUS_PANE=%42` (tmux pane ID) to pre-select that session on launch. Requires `run-shell` to expand the format string: `bind a run-shell 'tmux set-environment CSM_FOCUS_PANE "#{pane_id}"' \; display-popup -E -w 90% -h 85% csm`. Falls back to first session if pane not found.
 
-**`csm setup` details**: Installs a `SessionStart` hook into `~/.claude/settings.json` that writes pane→session ID mappings to `~/.config/csm/hook-events`. Creates `~/.config/csm/hooks/session-start.sh`. Safe to run multiple times (idempotent). Preserves existing hooks and settings.
+**`csm setup` details**: Installs CSM's Claude lifecycle hooks under `~/.config/csm/hooks`, preserving existing hooks and settings. It also updates CSM-owned tmux/zsh fragments under `~/.config/csm/`, installs `~/.local/bin/csm-terminal`, adds one import to the user's `.tmux.conf` and `.zshrc`, and ensures the tmux persistence plugins are present. Safe to run multiple times (idempotent); personal dotfiles are never replaced.
 
 ## Architecture
 
