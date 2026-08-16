@@ -1,7 +1,7 @@
 # 15. The Linux VM user's home is /Users/throxy
 
 Date: 2026-08-09
-Status: accepted
+Status: superseded by ADR 17
 
 ## Context
 

@@ -2,7 +2,7 @@
 
 Ordered, one sitting (~2h active). The Mac keeps working until phase F, so nothing
 is burned before the VM is proven. State dispositions come from the migration
-table in the plan (copy vs regenerate vs discard); decisions: ADRs 14–16.
+table in the plan (copy vs regenerate vs discard); decisions: ADRs 14–17.
 
 ## A. Launch (AWS, eu-central-1)
 
@@ -16,24 +16,27 @@ table in the plan (copy vs regenerate vs discard); decisions: ADRs 14–16.
    (plain-API r7i launches still default to optional).
 3. First boot, as `ubuntu`:
    ```sh
-   sudo mkdir -p /Users && sudo useradd -m -d /Users/throxy -s /usr/bin/zsh throxy   # ADR 15; useradd won't create /Users itself
-   echo 'throxy ALL=(ALL) NOPASSWD:ALL' | sudo tee /etc/sudoers.d/throxy
-   sudo install -d -m 700 -o throxy /Users/throxy/.ssh
-   sudo cp ~/.ssh/authorized_keys /Users/throxy/.ssh/ && sudo chown throxy /Users/throxy/.ssh/authorized_keys
+   DEV_USER=marcel
+   sudo mkdir -p /Users && sudo useradd -m -d "/Users/$DEV_USER" -s /usr/bin/zsh "$DEV_USER"   # useradd won't create /Users itself
+   echo "$DEV_USER ALL=(ALL) NOPASSWD:ALL" | sudo tee "/etc/sudoers.d/$DEV_USER"
+   sudo install -d -m 700 -o "$DEV_USER" "/Users/$DEV_USER/.ssh"
+   sudo cp ~/.ssh/authorized_keys "/Users/$DEV_USER/.ssh/" && sudo chown "$DEV_USER" "/Users/$DEV_USER/.ssh/authorized_keys"
    ```
 4. NVMe timeout (an EBS blip can remount the FS read-only at the 30s default):
    `nvme_core.io_timeout=4294967295` appended to `GRUB_CMDLINE_LINUX` in
    `/etc/default/grub`, then `sudo update-grub`. Verify any extra volumes mount by
    UUID with `nofail`.
-5. Reboot once; log in as `throxy`.
+5. Reboot once; log in as `marcel`. Keep the same short name and `/Users/marcel`
+   home on Mac and VM so Claude transcript paths remain portable.
 
 ## B. Provision
 
 ```sh
-git clone https://github.com/marcelmiro/claude-session-manager ~/Documents/csm
-~/Documents/csm/deploy/provision.sh --tz Europe/Madrid --swap-gb 16
+mkdir -p ~/dev
+git clone https://github.com/marcelmiro/claude-session-manager ~/dev/csm
+~/dev/csm/deploy/provision.sh --tz Europe/Madrid --swap-gb 16
 curl -fsSL https://bun.sh/install | bash                       # bun → ~/.bun/bin
-cd ~/Documents/csm && bun install && ln -sf ~/Documents/csm/bin/csm.ts ~/.bun/bin/csm
+cd ~/dev/csm && bun install && ln -sf ~/dev/csm/bin/csm.ts ~/.bun/bin/csm
 curl -fsSL https://claude.ai/install.sh | bash -s stable       # claude (self-updating channel)
 csm setup                                                     # hooks + tmux/zsh fragments
 sudo tailscale up --ssh --hostname=<name> --authkey=<PRE-TAGGED key>   # tag at join or expiry stays on
@@ -63,7 +66,7 @@ On the Mac (VM reachable as `vm` over Tailscale):
 ```sh
 launchctl bootout gui/$UID/com.csm.daemon                             # stop the inbox daemon first (also teardown, below)
 sqlite3 ~/.config/csm/inbox.db "PRAGMA wal_checkpoint(TRUNCATE);"     # fold WAL into the db file before copying it
-rsync -a --info=progress2 ~/Documents/ vm:Documents/                  # repos + worktrees, same abs path (ADR 15)
+rsync -a --info=progress2 ~/dev/ vm:dev/                              # flat repos; worktrees travel inside each base repo
 rsync -a ~/.claude/projects/ vm:.claude/projects/                     # transcripts resolve as-is
 scp ~/.config/csm/config.json ~/.config/csm/names.json ~/.config/csm/push-vapid.json ~/.config/csm/inbox.db vm:.config/csm/
 ```
@@ -98,8 +101,8 @@ clipboard), **7** (phone lists sessions, resume works, push round-trips).
 - iPhone: Tailscale app → VPN On Demand → cellular **Always**. Delete the old
   portkey icon; open `https://<vm>.<tailnet>.ts.net`, Add to Home Screen, re-grant
   push (the bell — permission needs the tap), confirm a test push.
-- Mac: `brew install mosh`; run `csm setup`, then configure the client with
-  `csm terminal host <vm.ts.net>` and `csm terminal default remote`. Ghostty runs
+- Mac: `brew install mosh`; run `csm setup`, then set `terminal.remoteHost` and
+  `terminal.defaultTarget` in `$(csm config)`. Ghostty runs
   `csm terminal` at startup; `csm terminal local` remains available
   for a completely separate Mac-local CSM/tmux environment.
   `shell-integration-features = ssh-env,ssh-terminfo`, `clipboard-write = allow`.

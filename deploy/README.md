@@ -3,7 +3,7 @@
 Provisioning for running the whole CSM stack (tmux + Claude Code sessions + the
 portkey bridge) on a headless Ubuntu 24.04 VM, with the Mac and iPhone as thin
 clients over Tailscale. The cutover itself (state copy, auth, PWA reinstall) is
-`RUNBOOK.md`; decision records are ADRs 14–16.
+`RUNBOOK.md`; decision records are ADRs 14–17.
 
 ## Contents
 
@@ -36,7 +36,8 @@ Prerequisites the script checks but cannot create:
   /Users && sudo useradd -m -d /Users/<name> -s /usr/bin/zsh <name>` — useradd does
   NOT create the `/Users` parent itself). Claude Code encodes the absolute cwd into
   transcript directory names; matching the Mac's `/Users/...` layout byte-for-byte
-  is what lets copied sessions resume (ADR 15).
+  is what lets copied sessions resume. Use the same short account name on both hosts
+  (ADR 17).
 - **Tailscale join** is interactive by design: `sudo tailscale up --ssh
   --hostname=<name> --authkey=<key>`. Use a **pre-tagged auth key** — tagging after
   join does not disable key expiry, and an expired node key strands the box.
