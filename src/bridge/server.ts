@@ -324,7 +324,7 @@ async function markSessionRead(sessionId: string): Promise<void> {
 }
 
 // Repos available for a new session: active-session repos (worktrees deduped to base)
-// plus the configured repoPaths, exactly as the TUI wizard sources them. Sources the
+// plus the configured repository roots, exactly as the TUI wizard sources them. Sources the
 // session set from the discovery snapshot computeSessionsPayload already produced
 // (repo membership changes on human timescales — no need for a dedicated sweep), and
 // falls back to a real discovery only before the first projection exists.
@@ -334,8 +334,8 @@ async function reposPayload(): Promise<Array<{ name: string; path: string; branc
   const sessionRepos = sessions
     .filter((s) => s.repoPath)
     .map((s) => ({ name: s.repo, path: s.repoPath }));
-  const repos = await discoverRepos(sessionRepos, cfg.repoPaths ?? [], cfg.priorityRepos ?? []);
-  const priority = cfg.priorityRepos ?? [];
+  const repos = await discoverRepos(sessionRepos, cfg.repositories.roots, cfg.repositories.priority);
+  const priority = cfg.repositories.priority;
   // "~" (home dir) is offered as a launch target, sorted among the base repos the same
   // way discoverRepos orders them (insert before the first base repo it sorts ahead of,
   // so worktree rows stay nested under their base).
@@ -516,12 +516,12 @@ async function historyPayload(params: URLSearchParams): Promise<unknown> {
   const repoCounts = new Map<string, number>();
   for (const e of matched) repoCounts.set(e.repo, (repoCounts.get(e.repo) ?? 0) + 1);
 
-  // Chips are for YOUR repos: base repo a direct child of a configured repoPaths dir
+  // Chips are for YOUR repos: base repo a direct child of a configured repository root
   // (or $HOME itself, where general sessions live). Months of history accumulate
   // temp/scratch clones Claude spawned — those get no chip (their rows still list
   // under "all" and in search).
   const home = homedir();
-  const roots = ((await loadConfig()).repoPaths ?? ["~/Documents"]).map((p) => p.replace(/^~/, home).replace(/\/+$/, ""));
+  const roots = (await loadConfig()).repositories.roots.map((p) => p.replace(/^~/, home).replace(/\/+$/, ""));
   const primary = new Set<string>();
   for (const e of matched) {
     const base = (e.baseRepoPath || "").replace(/\/+$/, "");
@@ -849,6 +849,10 @@ async function route(req: Request): Promise<Response> {
   }
 
   if (method === "GET" && path === "/sessions") return json(await sessionsPayload());
+  if (method === "GET" && path === "/preferences") {
+    const cfg = await loadConfig();
+    return json({ repositoryPriority: cfg.repositories.priority });
+  }
   if (method === "GET" && path === "/pending") return json(listPendingApprovals());
   // EventSource can't set headers, so the deviceId rides a query param here.
   if (method === "GET" && path === "/stream") {

@@ -1,7 +1,7 @@
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
-import { mkdtemp, rm, realpath } from "fs/promises";
+import { mkdtemp, rm, realpath, readFile } from "fs/promises";
 import { tmpdir } from "os";
-import { cleanBranchToDir, getDefaultBranch, branchCheckedOutPath, listBranches } from "./git";
+import { cleanBranchToDir, getDefaultBranch, branchCheckedOutPath, listBranches, ensureWorktreeIgnore, getBaseRepoPath } from "./git";
 import { isTrunk } from "../ui/wizard";
 import type { WizardBranch } from "../types";
 
@@ -133,6 +133,21 @@ describe("branchCheckedOutPath", () => {
     // you're already sitting on. The main working tree is itself a worktree entry.
     await initRepo();
     expect(await branchCheckedOutPath(dir, "main")).toBe(dir);
+  });
+});
+
+describe("managed worktree layout", () => {
+  test("ensureWorktreeIgnore adds one local-only exclusion idempotently", async () => {
+    await initRepo();
+    await ensureWorktreeIgnore(dir);
+    await ensureWorktreeIgnore(dir);
+    const exclude = await readFile(`${dir}/.git/info/exclude`, "utf8");
+    expect(exclude.split("\n").filter((line) => line === "/.claude/worktrees/")).toHaveLength(1);
+  });
+
+  test("a deleted managed worktree resolves structurally to its base repo", async () => {
+    await initRepo();
+    expect(await getBaseRepoPath(`${dir}/.claude/worktrees/deleted-feature`)).toBe(dir);
   });
 });
 

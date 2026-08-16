@@ -119,6 +119,13 @@ else
   fail "~/.zshrc does not import the CSM fragment"
 fi
 
+csm_config="$HOME/.config/csm/config.json"
+if jq -e '.schemaVersion == 1 and (.repositories.roots | type == "array") and (.repositories.roots | length > 0)' "$csm_config" >/dev/null 2>&1; then
+  pass "single-file CSM config is valid: $csm_config"
+else
+  fail "missing or invalid schemaVersion 1 CSM config: $csm_config"
+fi
+
 for plugin in \
   catppuccin/tmux/catppuccin.tmux \
   tmux-resurrect/resurrect.tmux \

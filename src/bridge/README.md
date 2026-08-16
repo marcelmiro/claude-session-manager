@@ -71,7 +71,7 @@ it at login. It binds loopback; `tailscale serve` (step 2) still fronts it.
     <key>CSM_BRIDGE_TOKEN</key><string>&lt;your-token&gt;</string>
     <key>PATH</key><string>/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
   </dict>
-  <key>WorkingDirectory</key><string>/Users/&lt;you&gt;/Documents/csm</string>
+  <key>WorkingDirectory</key><string>/Users/&lt;you&gt;/dev/csm</string>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
   <key>StandardOutPath</key><string>/Users/&lt;you&gt;/.config/csm/bridge.log</string>

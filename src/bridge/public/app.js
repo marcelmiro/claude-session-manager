@@ -66,6 +66,7 @@ function md(text) {
 
 const authed = signal(false);
 const sessions = signal([]);
+const repositoryPriority = signal([]); // read-only projection of config repositories.priority
 const selectedId = signal(null);
 const transcript = signal(null);
 const error = signal("");
@@ -297,6 +298,19 @@ async function refreshSessions() {
     }
   } catch {
     error.value = "bridge unreachable";
+  }
+}
+
+async function refreshPreferences() {
+  try {
+    const r = await fetch("/preferences");
+    if (!r.ok) return;
+    const value = await r.json();
+    repositoryPriority.value = Array.isArray(value.repositoryPriority)
+      ? value.repositoryPriority.map((name) => String(name).toLowerCase())
+      : [];
+  } catch {
+    // Session refresh owns connection feedback; preferences safely fall back to alphabetical.
   }
 }
 
@@ -629,7 +643,7 @@ async function login(token) {
       body: JSON.stringify({ token }),
     });
     if (!r.ok) return (error.value = "wrong token");
-    await refreshSessions();
+    await Promise.all([refreshSessions(), refreshPreferences()]);
     if (authed.value) {
       connectStream();
       initPush();
@@ -1261,12 +1275,9 @@ function dotStyle(s) {
   return s.unread ? `${base};box-shadow:0 0 0 4px ${g}, 0 0 9px 2px ${g}` : base;
 }
 
-// Fixed repo group order so the list doesn't reshuffle as session statuses change.
-// Listed repos pin to the top in this order; everything else follows alphabetically.
-const REPO_ORDER = ["throxy", "customeros", "~", "csm"];
 function repoRank(repo) {
-  const i = REPO_ORDER.indexOf(repo);
-  return i === -1 ? REPO_ORDER.length : i;
+  const i = repositoryPriority.value.indexOf(repo.toLowerCase());
+  return i === -1 ? repositoryPriority.value.length : i;
 }
 
 // A raw filesystem path or a generic branch is noise as a subtitle — drop it so the
@@ -1598,7 +1609,7 @@ function History() {
   const rows = h ? h.rows : [];
 
   // Chips: pinned repos first (same order the list uses), then by match count. The
-  // server only facets repos under repoPaths — temp/scratch clones get no chip.
+  // server only facets repos under configured repository roots — temp/scratch clones get no chip.
   const chips = h
     ? [...h.repos].sort((a, b) => repoRank(a.repo) - repoRank(b.repo) || b.count - a.count || a.repo.localeCompare(b.repo))
     : [];
@@ -4067,7 +4078,7 @@ try {
 }
 
 let bootTimeout;
-refreshSessions()
+Promise.all([refreshSessions(), refreshPreferences()])
   .then(() => {
     clearTimeout(bootTimeout);
     if (authed.value) {

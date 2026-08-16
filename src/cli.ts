@@ -18,7 +18,7 @@ import { detectStatus } from "./core/status";
 import { eventSourcedStatus } from "./core/hook-events";
 import { nativeStatus, resolveStatus } from "./core/session-state";
 import { loadNameCache, slugify } from "./core/names";
-import { PATHS } from "./core/config";
+import { PATHS, ensureUserConfig, removeLegacyConfigSidecars } from "./core/config";
 import { PRESENCE_WINDOW_S } from "./core/presence";
 import { pickSavedCwd, resolveRestoreTarget } from "./core/resurrect";
 import { pickRepoPath } from "./core/sessions";
@@ -689,7 +689,8 @@ const HOOK_SCRIPTS = [
   { name: "question-pretooluse.sh", content: QUESTION_PRETOOLUSE_HOOK_SCRIPT },
 ] as const;
 
-const FILE_HOOK_SCRIPTS = [
+const FILE_HOOK_SCRIPTS = [] as const;
+const RETIRED_WORKTREE_HOOK_SCRIPTS = [
   "subagent-worktree-cleanup.sh",
   "worktree-create.sh",
   "worktree-remove.sh",
@@ -703,9 +704,6 @@ const HOOK_REGISTRATIONS: { event: string; script: string; matcher?: string; tim
   { event: "Notification", script: "event.sh" },
   { event: "Stop", script: "event.sh" },
   { event: "SubagentStop", script: "event.sh" },
-  { event: "SubagentStop", script: "subagent-worktree-cleanup.sh" },
-  { event: "WorktreeCreate", script: "worktree-create.sh" },
-  { event: "WorktreeRemove", script: "worktree-remove.sh" },
   // Claude Code's own timeout — the SIGKILL each hook poll loop races. Deliberately the
   // poll window PLUS a grace: Claude counts from spawn and a loop can't start its clock
   // until the process is up, so registering the bare window would make the kill land first
@@ -833,7 +831,7 @@ async function getInstalledHookVersion(hookPath: string): Promise<number> {
 /**
  * Install the CSM hooks into ~/.claude/settings.json and create the hook scripts.
  *
- * Registers CSM's tracking, approval, and worktree hooks. Safe to run multiple
+ * Registers CSM's tracking and approval hooks. Safe to run multiple
  * times — rewrites outdated scripts and adds only missing registrations, so a
  * second run is a no-op and user hooks are preserved.
  */
@@ -844,7 +842,12 @@ export async function setup(): Promise<void> {
   const hookDir = `${home}/.config/csm/hooks`;
   const scriptPath = (name: string) => `${hookDir}/${name}`;
 
+  const configCreated = await ensureUserConfig();
+
   const integrationChanged = await installTerminalIntegration(home);
+  // The replacement launcher now reads config.json, so the migrated sidecars can
+  // no longer serve a compatibility purpose or mislead a future editor.
+  removeLegacyConfigSidecars();
 
   // Load existing settings (or start fresh)
   let settings: Record<string, any> = {};
@@ -854,6 +857,28 @@ export async function setup(): Promise<void> {
     // No settings file or malformed — start fresh
   }
   if (!settings.hooks) settings.hooks = {};
+
+  // v17 returns worktree lifecycle ownership to Claude Code. Remove only CSM's
+  // retired commands; user-authored hooks on the same events remain untouched.
+  let settingsChanged = false;
+  for (const event of Object.keys(settings.hooks)) {
+    if (!Array.isArray(settings.hooks[event])) continue;
+    const keptEntries: any[] = [];
+    for (const entry of settings.hooks[event]) {
+      if (!Array.isArray(entry?.hooks)) {
+        keptEntries.push(entry);
+        continue;
+      }
+      const hooks = entry.hooks.filter((hook: any) => {
+        if (typeof hook?.command !== "string") return true;
+        return !RETIRED_WORKTREE_HOOK_SCRIPTS.some((script) => hook.command.includes(`${hookDir}/${script}`));
+      });
+      if (hooks.length !== entry.hooks.length) settingsChanged = true;
+      if (hooks.length > 0) keptEntries.push({ ...entry, hooks });
+    }
+    settings.hooks[event] = keptEntries;
+  }
+  for (const script of RETIRED_WORKTREE_HOOK_SCRIPTS) rmSync(scriptPath(script), { force: true });
 
   // Fold the pre-v7 single-file map (+ residual hook-events) into per-pane files so sessions
   // already running at upgrade time stay resolvable. Idempotent — a no-op once migrated.
@@ -881,7 +906,6 @@ export async function setup(): Promise<void> {
 
   // Ensure each event has exactly one CSM registration. Match on the full script
   // path (a stable idempotency key) so a re-run never duplicates an entry.
-  let settingsChanged = false;
   for (const { event, script, matcher, timeout } of HOOK_REGISTRATIONS) {
     const path = scriptPath(script);
     if (!Array.isArray(settings.hooks[event])) settings.hooks[event] = [];
@@ -934,7 +958,7 @@ export async function setup(): Promise<void> {
     }
   } catch {}
 
-  if (!scriptsWritten && !settingsChanged && daemonResult === "unchanged" && integrationChanged.length === 0) {
+  if (!scriptsWritten && !settingsChanged && daemonResult === "unchanged" && integrationChanged.length === 0 && !configCreated) {
     console.log("CSM hooks and terminal integration already configured.");
     return;
   }
@@ -946,9 +970,11 @@ export async function setup(): Promise<void> {
     console.log(`  Launcher: ${home}/.config/csm/terminal-launcher`);
   }
 
+  if (configCreated) console.log(`CSM config created: ${PATHS.config}`);
+
   if (scriptsWritten || settingsChanged) {
     console.log(scriptsUpdated ? "CSM hooks updated." : "CSM hooks installed.");
-    console.log(`  Hook scripts: ${hookDir} (tracking, approvals, and worktrees)`);
+    console.log(`  Hook scripts: ${hookDir} (tracking and approvals)`);
     console.log(`  Settings: ${settingsPath}`);
   }
   if (daemonResult !== "unchanged") {

@@ -237,11 +237,25 @@ export interface GlobalSearchState {
 export type SearchEntryRef = import("./core/search").SearchEntry;
 
 export interface CsmConfig {
-  statusMonitor: boolean;
-  windowPrefix: boolean;
-  nativeNotification: boolean;
-  repoPaths?: string[];       // dirs to scan 1-level deep for git repos
-  priorityRepos?: string[];   // repo names pinned at top of list (lowercase)
+  $schema?: string;
+  schemaVersion: 1;
+  repositories: {
+    roots: string[];          // dirs to scan 1-level deep for canonical git repos
+    priority: string[];       // repo names pinned at top of lists
+  };
+  terminal: {
+    defaultTarget: "local" | "remote";
+    remoteHost: string | null;
+    localSession: string;
+    remoteSession: string;
+  };
+  ui: {
+    statusMonitor: boolean;
+    windowPrefix: boolean;
+  };
+  notifications: {
+    native: boolean;
+  };
 }
 
 // --- Hook event log + transcript types (Impl #2 — Camp 1) ---

@@ -365,7 +365,7 @@ function renderWorktreeStep(lines: string[], state: WizardState): void {
   lines.push(`{${C.surface}-bg}  {${C.peach}-fg}>{/${C.peach}-fg} ${renderTextWithCursor(state.worktreeName, state.worktreeNameCursor)}{/${C.surface}-bg}`);
 
   if (state.worktreeName) {
-    const wtPath = worktreeDirName(repo.name, cleanBranchToDir(state.worktreeName));
+    const wtPath = worktreeDirName(cleanBranchToDir(state.worktreeName));
     const baseRef = branch.isRemote ? `origin/${branch.name}` : branch.name;
     const command = reuse
       ? `git worktree add ${wtPath} ${branch.name}`
@@ -497,7 +497,7 @@ export async function renderWizardPreview(previewBox: Widgets.BoxElement, state:
     ];
 
     if (state.worktreeName) {
-      const wtPath = worktreeDirName(repo.name, cleanBranchToDir(state.worktreeName));
+      const wtPath = worktreeDirName(cleanBranchToDir(state.worktreeName));
       if (state.worktreeMode === "reuse") {
         lines.push(
           `  {${C.dim}-fg}Branch:{/${C.dim}-fg} {${C.fg}-fg}${branch.name}{/${C.fg}-fg} {${C.dim}-fg}(reused){/${C.dim}-fg}`,

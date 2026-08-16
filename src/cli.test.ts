@@ -26,8 +26,6 @@ const EVENTS = [
   "Stop",
   "SubagentStop",
   "PreToolUse",
-  "WorktreeCreate",
-  "WorktreeRemove",
 ];
 
 beforeEach(() => {
@@ -78,6 +76,21 @@ test("setup installs CSM-owned terminal fragments and imports them idempotently"
   expect(tmux.match(/\.config\/csm\/tmux\.conf/g)).toHaveLength(2); // test + source in one import line
 });
 
+test("setup migrates terminal sidecars before retiring them", async () => {
+  mkdirSync(csmDir, { recursive: true });
+  writeFileSync(`${csmDir}/config.json`, "{}");
+  writeFileSync(`${csmDir}/terminal-mode`, "remote\n");
+  writeFileSync(`${csmDir}/remote-host`, "vm.example.ts.net\n");
+
+  await setup();
+
+  const config = JSON.parse(readFileSync(`${csmDir}/config.json`, "utf8"));
+  expect(config.terminal).toMatchObject({ defaultTarget: "remote", remoteHost: "vm.example.ts.net" });
+  expect(existsSync(`${csmDir}/terminal-mode`)).toBe(false);
+  expect(existsSync(`${csmDir}/remote-host`)).toBe(false);
+  expect(readFileSync(`${csmDir}/terminal-launcher`, "utf8")).toContain('config_file="$HOME/.config/csm/config.json"');
+});
+
 /** Count CSM registrations (command points into the CSM hooks dir) for an event. */
 function csmEntries(settings: any, event: string): any[] {
   const entries = settings.hooks?.[event] ?? [];
@@ -105,9 +118,9 @@ test("running setup() twice leaves exactly one CSM entry per event and preserves
   expect(settings.model).toBe("opus");
 
   // Idempotent per script after two runs. PreToolUse deliberately carries two
-  // registrations (approval + question), as does SubagentStop (log + cleanup).
+  // registrations (approval + question).
   for (const event of EVENTS) {
-    const wanted = event === "PreToolUse" || event === "SubagentStop" ? 2 : 1;
+    const wanted = event === "PreToolUse" ? 2 : 1;
     expect(csmEntries(settings, event)).toHaveLength(wanted);
   }
 
@@ -159,13 +172,38 @@ test("setup() writes every hook script stamped with the current CSM_HOOK_VERSION
     "event",
     "pretooluse",
     "question-pretooluse",
-    "subagent-worktree-cleanup",
-    "worktree-create",
-    "worktree-remove",
   ]) {
     const path = `${hooksDir}/${name}.sh`;
     expect(existsSync(path)).toBe(true);
     expect(readFileSync(path, "utf8")).toContain(`# CSM_HOOK_VERSION=${HOOK_VERSION}`);
+  }
+});
+
+test("setup removes retired CSM worktree hooks and scripts but preserves user hooks", async () => {
+  mkdirSync(hooksDir, { recursive: true });
+  for (const script of ["worktree-create.sh", "worktree-remove.sh", "subagent-worktree-cleanup.sh"]) {
+    writeFileSync(`${hooksDir}/${script}`, "#!/bin/bash\n# old CSM hook\n");
+  }
+  writeFileSync(settingsPath, JSON.stringify({
+    hooks: {
+      WorktreeCreate: [{ hooks: [
+        { type: "command", command: `bash "${hooksDir}/worktree-create.sh"` },
+        { type: "command", command: "/usr/local/bin/user-worktree-hook" },
+      ] }],
+      WorktreeRemove: [{ hooks: [{ type: "command", command: `bash "${hooksDir}/worktree-remove.sh"` }] }],
+      SubagentStop: [{ hooks: [{ type: "command", command: `bash "${hooksDir}/subagent-worktree-cleanup.sh"` }] }],
+    },
+  }));
+
+  await setup();
+  const settings = JSON.parse(readFileSync(settingsPath, "utf8"));
+  expect(settings.hooks.WorktreeCreate[0].hooks).toEqual([
+    { type: "command", command: "/usr/local/bin/user-worktree-hook" },
+  ]);
+  expect(settings.hooks.WorktreeRemove).toEqual([]);
+  expect(csmEntries(settings, "SubagentStop")).toHaveLength(1); // event logger only
+  for (const script of ["worktree-create.sh", "worktree-remove.sh", "subagent-worktree-cleanup.sh"]) {
+    expect(existsSync(`${hooksDir}/${script}`)).toBe(false);
   }
 });
 

@@ -6,7 +6,7 @@ export PATH="$HOME/.local/bin:$HOME/.bun/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
 # Provide a compact interactive baseline; users can extend it in ~/.zshrc.local.
 if [[ "$OSTYPE" != darwin* ]]; then
   setopt auto_cd share_history hist_ignore_all_dups hist_save_no_dups
-  cdpath=("$HOME/Documents")
+  cdpath=("$HOME/dev")
   HISTSIZE=10000
   SAVEHIST=$HISTSIZE
   HISTFILE="$HOME/.zsh_history"

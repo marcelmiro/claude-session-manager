@@ -232,19 +232,19 @@ export const FIXTURE_TRANSCRIPT = {
 };
 
 export const FIXTURE_REPOS = [
-  { name: "throxy", path: "/Users/throxy/Documents/throxy", branch: "main", isWorktree: false },
-  { name: "throxy", path: "/Users/throxy/Documents/throxy-add-tomba-as-enrichment-provider", branch: "add-tomba-as-enrichment-provider", isWorktree: true },
-  { name: "throxy", path: "/Users/throxy/Documents/throxy-workspace-cleanup", branch: "feature/workspace-context-cleanup", isWorktree: true },
-  { name: "csm", path: "/Users/throxy/Documents/csm", branch: "main", isWorktree: false },
-  { name: "customeros", path: "/Users/throxy/Documents/customeros", branch: "main", isWorktree: false },
-  { name: "customeros", path: "/Users/throxy/Documents/customeros-ticket-output-piping", branch: "ticket-output-piping", isWorktree: true },
+  { name: "throxy", path: "/Users/throxy/dev/throxy", branch: "main", isWorktree: false },
+  { name: "throxy", path: "/Users/throxy/dev/throxy/.claude/worktrees/add-tomba-as-enrichment-provider", branch: "add-tomba-as-enrichment-provider", isWorktree: true },
+  { name: "throxy", path: "/Users/throxy/dev/throxy/.claude/worktrees/workspace-cleanup", branch: "feature/workspace-context-cleanup", isWorktree: true },
+  { name: "csm", path: "/Users/throxy/dev/csm", branch: "main", isWorktree: false },
+  { name: "customeros", path: "/Users/throxy/dev/customeros", branch: "main", isWorktree: false },
+  { name: "customeros", path: "/Users/throxy/dev/customeros/.claude/worktrees/ticket-output-piping", branch: "ticket-output-piping", isWorktree: true },
   { name: "~", path: "/Users/throxy", branch: "", isWorktree: false },
-  { name: "wiki", path: "/Users/throxy/Documents/wiki", branch: "main", isWorktree: false },
+  { name: "wiki", path: "/Users/throxy/dev/wiki", branch: "main", isWorktree: false },
 ];
 
 // Branch-vs-base changed files for the changed-files card/list demo (latest-modified first).
 const FIXTURE_CHANGES = {
-  root: "/Users/throxy/Documents/csm",
+  root: "/Users/throxy/dev/csm",
   branch: "eng-2687-cookie-auth",
   base: "main",
   files: [
@@ -363,7 +363,7 @@ const FIXTURE_HISTORY = {
     },
   ],
   before: null,
-  // cortex lives outside repoPaths in this fixture → no chip (rows still list).
+  // cortex lives outside configured repository roots in this fixture → no chip (rows still list).
   repos: [
     { repo: "csm", count: 4 },
     { repo: "throxy", count: 1 },

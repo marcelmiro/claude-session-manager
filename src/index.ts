@@ -12,7 +12,7 @@ import { loadConfig } from "./core/config";
 import { loadState, saveState, loadPaneSessions } from "./core/state";
 import { listPendingApprovals, decideApproval, decideQuestion, buildAnswersMap } from "./core/approval";
 import { syncWindowPrefix, buildBaseName, abbreviateRepo } from "./core/notifications";
-import { discoverRepos, listBranches, fetchRepo, getDefaultBranch, branchCheckedOutPath } from "./core/git";
+import { discoverRepos, listBranches, fetchRepo, getDefaultBranch, branchCheckedOutPath, ensureWorktreeIgnore } from "./core/git";
 import { buildLaunchCommand, USER_SHELL } from "./core/launch-command";
 import { copyToClipboard } from "./core/clipboard";
 import { initWizard, renderWizard, renderWizardPreview, renderWizardStatusBar, handleWizardKey, setWizardBranches } from "./ui/wizard";
@@ -51,7 +51,13 @@ let isRefreshing = false;
 let previewGeneration = 0;
 let showArchived = false;
 let nameCache: NameCache = { version: 5, names: {}, sources: {}, pinned: {} };
-let notifConfig: CsmConfig = { statusMonitor: true, windowPrefix: true, nativeNotification: true, repoPaths: [] };
+let notifConfig: CsmConfig = {
+  schemaVersion: 1,
+  repositories: { roots: [], priority: [] },
+  terminal: { defaultTarget: "local", remoteHost: null, localSession: "main", remoteSession: "main" },
+  ui: { statusMonitor: true, windowPrefix: true },
+  notifications: { native: true },
+};
 
 // Wizard state (null = not in wizard mode)
 let wizardState: WizardState | null = null;
@@ -477,7 +483,7 @@ async function refresh(opts?: { skipArchivedSummaries?: boolean }) {
       }
     }
 
-    const groups = groupSessions(sessions, notifConfig.priorityRepos ?? [], needsAttention);
+    const groups = groupSessions(sessions, notifConfig.repositories.priority, needsAttention);
 
     if (groups.length === 0) {
       listBox.setContent(
@@ -1068,7 +1074,11 @@ screen.key(["n"], async () => {
   const sessionRepos = getUniqueRepos(rows);
 
   // Discover repos (merge session repos + config paths)
-  const repos = await discoverRepos(sessionRepos, notifConfig.repoPaths ?? [], notifConfig.priorityRepos ?? []);
+  const repos = await discoverRepos(
+    sessionRepos,
+    notifConfig.repositories.roots,
+    notifConfig.repositories.priority,
+  );
 
   if (repos.length === 0) {
     flashStatusMessage(`{${C.dim}-fg}No repos found{/${C.dim}-fg}`);
@@ -1558,6 +1568,14 @@ async function handleWizardLaunch(
     const existing = await branchCheckedOutPath(repo.path, branch.name);
     if (existing) {
       return `${branch.name} is already checked out at ${existing}`;
+    }
+  }
+
+  if (mode === "reuse" || mode === "new-branch") {
+    try {
+      await ensureWorktreeIgnore(repo.path);
+    } catch (error) {
+      return `Could not prepare .claude/worktrees: ${error instanceof Error ? error.message : String(error)}`;
     }
   }
 

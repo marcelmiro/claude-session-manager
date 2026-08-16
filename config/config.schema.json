@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/marcelmiro/claude-session-manager/blob/main/config/config.schema.json",
+  "title": "Claude Session Manager configuration",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "repositories", "terminal", "ui", "notifications"],
+  "properties": {
+    "$schema": { "type": "string" },
+    "schemaVersion": { "const": 1 },
+    "repositories": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["roots", "priority"],
+      "properties": {
+        "roots": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "minLength": 1 },
+          "description": "Directories scanned one level deep for canonical Git repositories."
+        },
+        "priority": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "description": "Repository names pinned to the top of CSM lists."
+        }
+      }
+    },
+    "terminal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["defaultTarget", "remoteHost", "localSession", "remoteSession"],
+      "properties": {
+        "defaultTarget": { "enum": ["local", "remote"] },
+        "remoteHost": { "type": ["string", "null"] },
+        "localSession": { "type": "string", "minLength": 1 },
+        "remoteSession": { "type": "string", "minLength": 1 }
+      }
+    },
+    "ui": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["statusMonitor", "windowPrefix"],
+      "properties": {
+        "statusMonitor": { "type": "boolean" },
+        "windowPrefix": { "type": "boolean" }
+      }
+    },
+    "notifications": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["native"],
+      "properties": {
+        "native": { "type": "boolean" }
+      }
+    }
+  }
+}

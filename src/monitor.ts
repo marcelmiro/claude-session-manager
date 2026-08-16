@@ -330,7 +330,11 @@ async function main(): Promise<void> {
   // Dispatch notifications only for sessions that still have attention
   const notableWithAttention = notable.filter((e) => needsAttention.has(e.sessionKey));
   if (notableWithAttention.length > 0) {
-    await dispatchNotifications(notableWithAttention, config);
+    await dispatchNotifications(notableWithAttention, {
+      statusMonitor: config.ui.statusMonitor,
+      windowPrefix: config.ui.windowPrefix,
+      nativeNotification: config.notifications.native,
+    });
   }
 
   // Approvals HELD by the PreToolUse hook never render the pane picker, so the

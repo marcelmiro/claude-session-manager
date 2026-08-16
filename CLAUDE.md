@@ -78,7 +78,7 @@ src/
 │   ├── tmux.ts           # tmux wrappers: list-panes, capture-pane, switch, kill, rename, bell
 │   ├── process.ts        # Find claude processes via ps, PID→TTY mapping
 │   ├── status.ts         # Status detection from pane capture (spinner/prompt patterns), context %, time formatting
-│   ├── config.ts         # ~/.config/csm/config.json — notification settings + repoPaths
+│   ├── config.ts         # ~/.config/csm/config.json — all user-owned CSM settings
 │   ├── state.ts          # ~/.config/csm/state.json — shared TUI↔monitor attention state
 │   ├── names.ts          # AI naming (claude -p), heuristic fallback, name cache
 │   ├── git.ts            # Git operations: repo discovery, branch listing, checkout, worktree creation, base repo/default-branch resolution
@@ -166,7 +166,7 @@ Neovim which-key style popup at bottom-left. Press a key to select an action:
 | idle | ○ | No claude process on pane |
 | archived | ○ | Modified in last 24h, no active pane |
 
-Sort order mirrors portkey's list (`compareSessions` in `bridge/public/app.js`): attention (⚡) first, then waiting → running → ready → idle → archived, then last-turn recency desc (`lastTurnAt`; never a live session's `modified` fallback — that's stamped per refresh and would shuffle the list). Priority repos pinned at top (default matches portkey's `REPO_ORDER`: throxy, customeros, ~, csm).
+Sort order mirrors portkey's list (`compareSessions` in `bridge/public/app.js`): attention (⚡) first, then waiting → running → ready → idle → archived, then last-turn recency desc (`lastTurnAt`; never a live session's `modified` fallback — that's stamped per refresh and would shuffle the list). User-configured priority repos are pinned at the top; the default is alphabetical.
 
 ### Session labels
 
@@ -204,15 +204,15 @@ Lightweight poller for `tmux status-right` and sole authority for window naming.
 
 Inline step-through UI that replaces the session list (no modal). Steps: repo → branch → worktree? → launch.
 
-- **Repo step**: always-visible filter bar — type to search, arrows navigate (plain `j`/`k` type into the filter; `^J`/`^K` also move but aren't advertised). Repos discovered from active sessions + `repoPaths` config dirs. Worktrees are **collapsed by default** (base rows show a `▸/▾ N` chevron+count). Two ways to see a repo's worktrees: (1) **browse** — `→`/`Tab` on a base expands its worktrees nested inline (`←`/`Tab` collapses; `←` on a worktree collapses its parent); (2) **filter** — typing a query reveals matching worktrees flat, where a worktree matches by its branch **or** its base repo name (so typing the repo name surfaces its worktrees). Empty filter → base repos only. Enter on a base advances to the branch step; Enter on a worktree launches Claude there directly (`mode:"current"`). Preview pane shows a base-repo info panel (recent commits, worktree count, active-session indicator, path). Single repo auto-skips. Preselects the base repo of the home-screen selection. Expand keys (`→`/`←`) only apply in the browse view; while filtering they move the text cursor. Ctrl nav quirk: `^J` arrives as blessed keyName `linefeed` (not `C-j`); `^K` is `C-k`
+- **Repo step**: always-visible filter bar — type to search, arrows navigate (plain `j`/`k` type into the filter; `^J`/`^K` also move but aren't advertised). Repos discovered from active sessions + `repositories.roots` config dirs. Worktrees are **collapsed by default** (base rows show a `▸/▾ N` chevron+count). Two ways to see a repo's worktrees: (1) **browse** — `→`/`Tab` on a base expands its worktrees nested inline (`←`/`Tab` collapses; `←` on a worktree collapses its parent); (2) **filter** — typing a query reveals matching worktrees flat, where a worktree matches by its branch **or** its base repo name (so typing the repo name surfaces its worktrees). Empty filter → base repos only. Enter on a base advances to the branch step; Enter on a worktree launches Claude there directly (`mode:"current"`). Preview pane shows a base-repo info panel (recent commits, worktree count, active-session indicator, path). Single repo auto-skips. Preselects the base repo of the home-screen selection. Expand keys (`→`/`←`) only apply in the browse view; while filtering they move the text cursor. Ctrl nav quirk: `^J` arrives as blessed keyName `linefeed` (not `C-j`); `^K` is `C-k`
 - **Branch step**: arrows navigate (`^J`/`^K` also work), type activates type-to-filter (Esc clears). Preview pane shows `git log` for highlighted branch
 - **Worktree-choice step**: Only shown when selected branch != current. Three options (fixed order): "New worktree + new branch" (fork off the selected branch), "New worktree on this branch" (reuse the branch as-is — no fork, so an agent's feature branch stays one branch/one PR), "Checkout in place" (last). Default cursor is context-aware: trunk (`origin/HEAD`, or main/master) → new-branch; feature branch → reuse. Reuse pre-checks `branchCheckedOutPath` and flashes a conflict (staying in the wizard) if the branch is already checked out elsewhere.
-- **Worktree name step**: For new-branch, the field edits the new branch name; for reuse, it edits the worktree **directory** name (pre-filled with the branch name minus any `prefix/`, e.g. `cursor/ev-4-x` → `ev-4-x`). The dir is always `../{repo}-{name}` (the `{repo}-` prefix is required by worktree grouping).
+- **Worktree name step**: For new-branch, the field edits the new branch name; for reuse, it edits the worktree **directory** name (pre-filled with the branch name minus any `prefix/`, e.g. `cursor/ev-4-x` → `ev-4-x`). The directory is always repo-local at `<repo>/.claude/worktrees/<name>`.
 - **Launch**: The git setup + `claude` run as one shell command inside the spawned tmux window (built by `buildLaunchCommand` in `core/launch-command.ts`), then exits the TUI. `^O` instead of Enter launches without Claude (git setup + plain shell — for using the wizard as a worktree creator); it works at every point where Enter would launch (worktree name step, existing-worktree row, current branch, checkout in place) and is hinted in the status bar only there
 
 Refresh loop paused during wizard. Esc pops back one step (or cancels from the repo step). Git errors flash as status messages and keep wizard open for retry. Progress messages shown during checkout/worktree operations.
 
-Config `repoPaths` (default `["~/Documents"]`): directories scanned 1-level deep for git repos to include alongside session repos.
+Config `repositories.roots` (default `["~/dev"]`): directories scanned 1-level deep for git repos to include alongside session repos. Repositories remain flat under each root; linked worktrees live inside their base at `<repo>/.claude/worktrees/`.
 
 ### AI naming (`names.ts`)
 

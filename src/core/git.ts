@@ -1,4 +1,6 @@
 import { homedir } from "os";
+import { dirname } from "node:path";
+import { mkdir, readFile, appendFile } from "node:fs/promises";
 import type { WizardRepo, WizardBranch } from "../types";
 
 /** Extract a Linear/Jira-style ticket ID from a branch name (e.g. ENG-2687). */
@@ -23,12 +25,37 @@ export async function getBaseRepoPath(repoPath: string): Promise<string> {
     return basePath;
   } catch {
     // git failed — directory may be deleted (orphaned worktree).
-    // Try to find a sibling git repo whose name is a prefix of this directory.
-    // Worktrees are named "../reponame-branchname", so the repo name is a prefix.
-    const basePath = await inferBaseRepoFromSiblings(repoPath);
+    // Managed worktrees encode their base structurally. Keep the old sibling
+    // inference as a migration fallback for pre-v17 sessions.
+    const basePath = await inferManagedBaseRepo(repoPath) ?? await inferBaseRepoFromSiblings(repoPath);
     baseRepoCache.set(repoPath, basePath);
     return basePath;
   }
+}
+
+/** Infer `<base>` from a deleted `<base>/.claude/worktrees/<name>` path. */
+async function inferManagedBaseRepo(repoPath: string): Promise<string | null> {
+  const marker = "/.claude/worktrees/";
+  const at = repoPath.indexOf(marker);
+  if (at <= 0) return null;
+  const candidate = repoPath.slice(0, at);
+  return await Bun.file(`${candidate}/.git/HEAD`).exists() ? candidate : null;
+}
+
+/**
+ * Keep Claude's managed worktree directory out of the canonical checkout
+ * without dirtying a tracked .gitignore. Safe and idempotent per repository.
+ */
+export async function ensureWorktreeIgnore(repoPath: string): Promise<void> {
+  const common = (await Bun.$`git -C ${repoPath} rev-parse --path-format=absolute --git-common-dir`.quiet().text()).trim();
+  const exclude = `${common}/info/exclude`;
+  await mkdir(dirname(exclude), { recursive: true });
+  let content = "";
+  try { content = await readFile(exclude, "utf8"); } catch {}
+  const pattern = "/.claude/worktrees/";
+  if (content.split(/\r?\n/).some((line) => line.trim() === pattern)) return;
+  const prefix = content.length > 0 && !content.endsWith("\n") ? "\n" : "";
+  await appendFile(exclude, `${prefix}${pattern}\n`, "utf8");
 }
 
 /**
@@ -182,7 +209,7 @@ export function compareRepos(
  */
 export async function discoverRepos(
   sessionRepos: Array<{ name: string; path: string }>,
-  repoPaths: string[],
+  repositoryRoots: string[],
   priorityRepos: string[],
 ): Promise<WizardRepo[]> {
   const bases = new Map<string, { name: string; path: string; hasSession: boolean }>();
@@ -196,10 +223,10 @@ export async function discoverRepos(
     else bases.set(basePath, { name: baseName, path: basePath, hasSession: true });
   }
 
-  // Scan configured repoPaths 1-level deep (these are always base repos: a real
+  // Scan configured repository roots 1-level deep (these are always base repos: a real
   // repo has a `.git/` dir, whereas a worktree's `.git` is a file — so scanning
   // never picks up worktree dirs; those come from `git worktree list` below).
-  for (let rp of repoPaths) {
+  for (let rp of repositoryRoots) {
     rp = rp.replace(/^~/, homedir());
     try {
       const glob = new Bun.Glob("*");

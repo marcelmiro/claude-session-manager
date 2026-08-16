@@ -1,4 +1,5 @@
 import { resolve } from "path";
+import { createHash } from "node:crypto";
 import type { WorktreeMode } from "../types";
 import { cleanBranchToDir } from "./git";
 
@@ -16,9 +17,16 @@ export function shellQuote(s: string): string {
   return `'${s.replace(/'/g, "'\\''")}'`;
 }
 
-/** Compute worktree directory path from repo name + branch name. Sanitizes / → - for flat sibling dirs. */
-export function worktreeDirName(repoName: string, branchName: string): string {
-  return `../${repoName}-${branchName.replace(/\//g, "-")}`;
+/**
+ * Claude-native, repo-local worktree path. Friendly names stay untouched; a
+ * transformed name gets a short hash so `a/b` can never collide with `a-b`.
+ */
+export function worktreeDirName(name: string): string {
+  const slug = name
+    .replace(/[^a-zA-Z0-9._-]+/g, "-")
+    .replace(/^-+|-+$/g, "") || "worktree";
+  const suffix = slug === name ? "" : `-${createHash("sha256").update(name).digest("hex").slice(0, 8)}`;
+  return `.claude/worktrees/${slug}${suffix}`;
 }
 
 interface LaunchRepo {
@@ -60,7 +68,7 @@ export function buildLaunchCommand(
     : "";
 
   if (mode === "new-branch") {
-    const wtAbs = resolve(repo.path, worktreeDirName(repo.name, cleanBranchToDir(text)));
+    const wtAbs = resolve(repo.path, worktreeDirName(cleanBranchToDir(text)));
     const baseRef = branch.isRemote ? `origin/${branch.name}` : branch.name;
     // Braces group the create-or-fallback so the fetch's && short-circuits the whole worktree step on failure.
     return `${fetchPrefix}{ git worktree add ${shellQuote(wtAbs)} -b ${shellQuote(text)} --end-of-options ${shellQuote(baseRef)} 2>/dev/null || git worktree add ${shellQuote(wtAbs)} ${shellQuote(text)}; } && cd ${shellQuote(wtAbs)}${claudeTail}`;
@@ -70,7 +78,7 @@ export function buildLaunchCommand(
     // Reuse the selected branch as-is — one branch, one PR. The bare
     // `worktree add <path> <branch>` DWIMs a local tracking branch for a
     // remote-only ref. The dir name is editable; branch stays fixed.
-    const wtAbs = resolve(repo.path, worktreeDirName(repo.name, cleanBranchToDir(text || branch.name)));
+    const wtAbs = resolve(repo.path, worktreeDirName(cleanBranchToDir(text || branch.name)));
     return `${fetchPrefix}git worktree add ${shellQuote(wtAbs)} ${shellQuote(branch.name)} && cd ${shellQuote(wtAbs)}${claudeTail}`;
   }
 

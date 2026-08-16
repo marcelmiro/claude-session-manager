@@ -16,6 +16,7 @@ function help() {
     \x1b[36mswitch <name>\x1b[0m       Fuzzy-match a session by name and switch to it
     \x1b[36mnotify <message>\x1b[0m    Web-push a message to every subscribed device
     \x1b[36msetup\x1b[0m               Install CSM commands, hooks, and terminal integration
+    \x1b[36mconfig\x1b[0m              Print the absolute user config path
     \x1b[36mterminal [command]\x1b[0m  Manage local/remote terminal attachment
     \x1b[36msave-sessions\x1b[0m       Snapshot pane→session map for tmux-resurrect
     \x1b[36mrestore-sessions\x1b[0m    Restore Claude sessions after tmux-resurrect restore
@@ -34,12 +35,10 @@ function terminalHelp() {
   \x1b[1mcsm terminal\x1b[0m — Manage terminal attachment
 
   \x1b[1mUsage:\x1b[0m
-    \x1b[36mcsm terminal\x1b[0m                   Attach using the saved default
+    \x1b[36mcsm terminal\x1b[0m                   Attach using config.json's defaultTarget
     \x1b[36mcsm terminal local\x1b[0m             Attach to local tmux for this invocation
     \x1b[36mcsm terminal remote\x1b[0m            Attach to the configured remote host
-    \x1b[36mcsm terminal default <mode>\x1b[0m    Set the default to local or remote
-    \x1b[36mcsm terminal host <host>\x1b[0m       Set the machine-local remote host
-    \x1b[36mcsm terminal status\x1b[0m            Show the saved terminal configuration
+    \x1b[36mcsm terminal status\x1b[0m            Show the effective terminal configuration
 
   \x1b[1mOptions:\x1b[0m
     \x1b[36m-h, --help\x1b[0m                     Show this help message
@@ -93,15 +92,18 @@ switch (cmd) {
   case "setup":
     await import("../src/cli").then((m) => m.setup());
     break;
+  case "config": {
+    const { PATHS, ensureUserConfig } = await import("../src/core/config");
+    await ensureUserConfig();
+    console.log(PATHS.config);
+    break;
+  }
   case "terminal": {
     const args = process.argv.slice(3);
     const subcommand = args[0];
     if (args.some((arg) => arg === "-h" || arg === "--help" || arg === "help")) {
       terminalHelp();
       break;
-    }
-    if (subcommand === "default") {
-      await runTerminal(["use", process.argv[4] ?? ""]);
     }
     await runTerminal(args);
     break;
