@@ -95,6 +95,22 @@ test("detached + Task (subagent dispatch) exits neutral", async () => {
   expect(r.pendingWritten).toBe(false);
 });
 
+test("detached + subagent tool call exits neutral", async () => {
+  const r = await runHook(
+    base({
+      agent_id: "a11876444fb3fbef8",
+      agent_type: "Explore",
+      tool_name: "Bash",
+      session_id: "itest-subagent",
+      tool_input: { command: "git status --short" },
+    }),
+    { timeoutMs: 1000 },
+  );
+  expect(r.exitCode).toBe(0);
+  expect(r.stdout.trim()).toBe("");
+  expect(r.pendingWritten).toBe(false);
+});
+
 test("detached + bypassPermissions mode never blocks, even for Bash", async () => {
   const r = await runHook(
     base({ tool_name: "Bash", permission_mode: "bypassPermissions", session_id: "itest-bypass", tool_input: { command: "rm -rf x" } }),

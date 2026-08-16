@@ -467,7 +467,7 @@ function isSubsequence(sub: string, str: string): boolean {
 // csm setup
 // ---------------------------------------------------------------------------
 
-export const HOOK_VERSION = 16;
+export const HOOK_VERSION = 17;
 
 // SessionStart pane→session mapper. Writes one file per pane (panes/<paneId> → sessionId)
 // atomically (temp+rename) — the hook OWNS the map, so there's no shared-file write race and
@@ -539,6 +539,13 @@ SESS=$(tmux display-message -p -t "\$TMUX_PANE" '#{session_name}' 2>/dev/null)
 # Tool + tool_use_id, derived once for the approval block-poll below.
 TOOL=$(printf '%s' "\$INPUT" | grep -oE '"tool_name"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | cut -d'"' -f4)
 TUID=$(printf '%s' "\$INPUT" | grep -oE '"tool_use_id"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | cut -d'"' -f4)
+
+# Subagents share their parent session_id and can execute concurrently. The approval IPC
+# has one pending/decision slot per session, so holding subagent calls here lets them
+# overwrite one another and strand pollers until the 600s deadline. Exit neutral — this
+# does not approve the tool; Claude's own permission handling remains authoritative.
+AGENT_ID=$(printf '%s' "\$INPUT" | grep -oE '"agent_id"[[:space:]]*:[[:space:]]*"[^"]+"' | head -1 | cut -d'"' -f4)
+[ -n "\$AGENT_ID" ] && exit 0
 
 # AskUserQuestion is handled by question-pretooluse.sh — a separate, matcher-scoped
 # registration whose kill timeout matches the hours-long question hold. This script's
