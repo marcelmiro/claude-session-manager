@@ -60,8 +60,13 @@ test("setup installs CSM-owned terminal fragments and imports them idempotently"
   await setup();
   await setup();
 
-  expect(readFileSync(`${csmDir}/shell.zsh`, "utf8")).not.toContain("alias csm-local=");
-  expect(readFileSync(`${csmDir}/tmux.conf`, "utf8")).toContain("display-popup -E");
+  const shellFragment = readFileSync(`${csmDir}/shell.zsh`, "utf8");
+  const tmuxFragment = readFileSync(`${csmDir}/tmux.conf`, "utf8");
+  expect(shellFragment).not.toContain("PROMPT=");
+  expect(tmuxFragment).toContain("display-popup -E");
+  expect(tmuxFragment).toContain("@csm_status");
+  expect(tmuxFragment).not.toContain("@plugin");
+  expect(tmuxFragment).not.toContain("catppuccin");
   expect(readlinkSync(`${TEST_HOME}/.local/bin/csm`)).toBe(`${import.meta.dir}/../bin/csm.ts`);
   expect(readFileSync(`${csmDir}/terminal-launcher`, "utf8")).toContain(
     "MOSH_SERVER_NETWORK_TMOUT=2592000",

@@ -788,29 +788,11 @@ async function installTerminalIntegration(home: string): Promise<string[]> {
     }
   }
 
-  // Persistence is part of CSM's contract, not a dotfiles prerequisite. Avoid
-  // network access under CSM_HOME so tests and contained installs stay hermetic;
-  // Linux provisioning installs the same plugins before `csm setup` runs.
-  if (!process.env.CSM_HOME && Bun.which("git")) {
-    const plugins = [
-      { name: "tmux-resurrect", repo: "https://github.com/tmux-plugins/tmux-resurrect" },
-      { name: "tmux-continuum", repo: "https://github.com/tmux-plugins/tmux-continuum" },
-    ];
-    for (const plugin of plugins) {
-      const dir = `${home}/.config/tmux/plugins/${plugin.name}`;
-      if (!(await Bun.file(`${dir}/README.md`).exists())) {
-        await Bun.$`mkdir -p ${home}/.config/tmux/plugins`.quiet();
-        const clone = await Bun.$`git clone -q --depth 1 ${plugin.repo} ${dir}`.quiet().nothrow();
-        if (clone.exitCode === 0) changed.push(`tmux plugin ${plugin.name}`);
-      }
-    }
-  }
-
   // Apply updates to an existing server without creating one. CSM_HOME is the
   // test seam and must never touch the developer's real tmux server.
   if (!process.env.CSM_HOME && Bun.which("tmux")) {
     await Bun.$`tmux has-session`.quiet().nothrow().then(async (result) => {
-      if (result.exitCode === 0) await Bun.$`tmux source-file ${home}/.config/csm/tmux.conf`.quiet().nothrow();
+      if (result.exitCode === 0) await Bun.$`tmux source-file ${home}/.config/csm/tmux.conf`.quiet();
     });
   }
 

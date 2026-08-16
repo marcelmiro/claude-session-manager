@@ -32,6 +32,9 @@ table in the plan (copy vs regenerate vs discard); decisions: ADRs 14–17.
 ## B. Provision
 
 ```sh
+git clone git@github.com:marcelmiro/dotfiles.git ~/.dotfiles
+~/.dotfiles/install linux                                  # common tmux UI + Linux shell profile + TPM
+~/.dotfiles/bin/setup-linux                                # personal zsh, Neovim, and Linux tools
 mkdir -p ~/dev
 git clone https://github.com/marcelmiro/claude-session-manager ~/dev/csm
 ~/dev/csm/deploy/provision.sh --tz Europe/Madrid --swap-gb 16

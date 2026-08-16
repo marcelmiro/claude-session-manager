@@ -22,7 +22,8 @@ ln -sf "$PWD/bin/csm.ts" ~/.local/bin/csm
 csm setup
 ```
 
-`csm setup` is idempotent. It installs Claude hooks plus CSM-owned extensions at:
+`csm setup` is idempotent. It installs Claude hooks plus narrowly scoped
+CSM-owned extensions at:
 
 ```text
 ~/.config/csm/tmux.conf
@@ -32,7 +33,8 @@ csm setup
 ```
 
 It adds one import line to `~/.tmux.conf` and `~/.zshrc`; it does not replace
-personal dotfiles.
+personal dotfiles or install tmux themes/plugins. The dotfiles profile owns
+presentation, navigation, clipboard behavior, and TPM.
 
 ### Migrating an existing `~/Documents` installation
 
@@ -90,18 +92,23 @@ are fields in the machine-local `~/.config/csm/config.json`, never committed to 
 The remote Mosh server keeps a reconnect window of 30 days so ordinary laptop
 sleep, roaming, and travel do not strand an open terminal.
 
-On Linux, CSM provides a compact interactive zsh baseline and then sources
-`~/.zshrc.local` when present. Put personal prompt/theme setup there; `csm setup`
-updates its own fragment without overwriting that file.
+On Linux, install the optional Linux profile from the dotfiles repository for
+the same tmux UI, bindings, plugins, and portable shell defaults used on macOS.
+CSM contributes only its command path and application integration.
 
 ## Provision an always-on Linux host
 
-Ubuntu 24.04 hosts are self-contained and do not need personal dotfiles:
+Install the explicit Linux dotfiles profile before provisioning CSM:
 
 ```sh
+git clone git@github.com:marcelmiro/dotfiles.git ~/.dotfiles
+~/.dotfiles/install linux
+~/.dotfiles/bin/setup-linux
+
 cd ~/dev/csm
 ./deploy/provision.sh --tz Europe/Madrid --swap-gb 16
 csm setup
+~/.dotfiles/doctor
 ./deploy/doctor.sh
 ```
 

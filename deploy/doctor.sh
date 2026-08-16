@@ -3,6 +3,12 @@
 # prints credentials or the bridge token.
 set -uo pipefail
 
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CSM_TMUX_SOURCE="if-shell 'test -f ~/.config/csm/tmux.conf' 'source-file ~/.config/csm/tmux.conf' ''"
+# Literal line expected in the user's zsh configuration.
+# shellcheck disable=SC2016
+CSM_ZSH_SOURCE='[[ -r "$HOME/.config/csm/shell.zsh" ]] && source "$HOME/.config/csm/shell.zsh"'
+
 failures=0
 warnings=0
 
@@ -19,7 +25,7 @@ expect_eq() {
   fi
 }
 
-printf 'CSM Linux host doctor\n\n'
+printf 'CSM Linux service doctor\n\n'
 
 case "$(uname -s)" in
   Linux) pass "host is Linux ($(uname -m))" ;;
@@ -53,16 +59,6 @@ fi
 
 if tmux has-session -t main 2>/dev/null; then
   pass "tmux session main is alive"
-  expect_eq "tmux escape-time" "$(tmux show-options -sv escape-time 2>/dev/null)" 10
-  expect_eq "tmux window-size" "$(tmux show-options -gv window-size 2>/dev/null)" largest
-  expect_eq "tmux set-clipboard" "$(tmux show-options -sv set-clipboard 2>/dev/null)" on
-  if tmux show-options -sv get-clipboard >/dev/null 2>&1; then
-    expect_eq "tmux get-clipboard" "$(tmux show-options -sv get-clipboard 2>/dev/null)" both
-  else
-    pass "tmux uses refresh-client -l for clipboard reads (3.4 compatibility)"
-  fi
-  expect_eq "tmux allow-passthrough" "$(tmux show-options -gv allow-passthrough 2>/dev/null)" on
-  expect_eq "continuum auto-restore" "$(tmux show-options -gv @continuum-restore 2>/dev/null)" off
 
   tmux_path=$(tmux show-environment -g PATH 2>/dev/null | sed -n 's/^PATH=//p')
   if [[ ":$tmux_path:" == *":$HOME/.bun/bin:"* && ":$tmux_path:" == *":$HOME/.local/bin:"* ]]; then
@@ -76,47 +72,34 @@ if tmux has-session -t main 2>/dev/null; then
     fail "csm is not resolvable through the tmux server PATH"
   fi
 
-  clients=$(tmux list-clients -F '#{client_termname}|#{client_termfeatures}|#{client_session}' 2>/dev/null || true)
-  if [ -n "$clients" ]; then
-    printf '%s\n' "$clients" | while IFS='|' read -r term features session; do
-      printf '  attached client: term=%s features=%s session=%s\n' "$term" "$features" "$session"
-    done
-    if printf '%s\n' "$clients" | grep -q 'clipboard'; then
-      pass "an attached terminal advertises OSC 52 clipboard support"
-    else
-      fail "attached terminal does not advertise the clipboard feature"
-    fi
-    if printf '%s\n' "$clients" | grep -q 'bpaste'; then
-      pass "an attached terminal advertises bracketed paste"
-    else
-      warn "attached terminal does not advertise bracketed paste"
-    fi
-  else
-    warn "no terminal is attached; clipboard client capabilities cannot be checked"
-  fi
+  csm_status=$(tmux show-options -gqv @csm_status 2>/dev/null || true)
+  if [[ "$csm_status" == *"csm status"* ]]; then pass "CSM status segment is active"; else fail "@csm_status is missing or inactive"; fi
+  csm_popup=$(tmux list-keys -T prefix a 2>/dev/null || true)
+  if [[ "$csm_popup" == *"display-popup"* && "$csm_popup" == *"csm"* ]]; then pass "CSM popup binding is active"; else fail "prefix+a is not bound to the CSM popup"; fi
+
 else
   fail "tmux session main is not alive"
 fi
 
-if [ -f "$HOME/.config/csm/tmux.conf" ]; then
-  pass "CSM-owned tmux fragment is installed"
+if cmp -s "$here/../config/tmux.conf" "$HOME/.config/csm/tmux.conf" 2>/dev/null; then
+  pass "current CSM-owned tmux fragment is installed"
 else
-  fail "missing CSM-owned tmux fragment: $HOME/.config/csm/tmux.conf"
+  fail "CSM-owned tmux fragment is missing or stale: $HOME/.config/csm/tmux.conf"
 fi
-if grep -qF "source-file ~/.config/csm/tmux.conf" "$HOME/.tmux.conf" 2>/dev/null; then
-  pass "~/.tmux.conf imports the CSM fragment"
+if grep -Fxq "$CSM_TMUX_SOURCE" "$HOME/.tmux.conf" 2>/dev/null; then
+  pass "$HOME/.tmux.conf imports the CSM fragment"
 else
-  fail "~/.tmux.conf does not import the CSM fragment"
+  fail "$HOME/.tmux.conf does not import the CSM fragment"
 fi
-if [ -f "$HOME/.config/csm/shell.zsh" ]; then
-  pass "CSM-owned zsh fragment is installed"
+if cmp -s "$here/../config/shell.zsh" "$HOME/.config/csm/shell.zsh" 2>/dev/null; then
+  pass "current CSM-owned zsh fragment is installed"
 else
-  fail "missing CSM-owned zsh fragment: $HOME/.config/csm/shell.zsh"
+  fail "CSM-owned zsh fragment is missing or stale: $HOME/.config/csm/shell.zsh"
 fi
-if grep -qF '.config/csm/shell.zsh' "$HOME/.zshrc" 2>/dev/null; then
-  pass "~/.zshrc imports the CSM fragment"
+if grep -Fxq "$CSM_ZSH_SOURCE" "$HOME/.zshrc" 2>/dev/null; then
+  pass "$HOME/.zshrc imports the CSM fragment"
 else
-  fail "~/.zshrc does not import the CSM fragment"
+  fail "$HOME/.zshrc does not import the CSM fragment"
 fi
 
 csm_config="$HOME/.config/csm/config.json"
@@ -125,14 +108,6 @@ if jq -e '.schemaVersion == 1 and (.repositories.roots | type == "array") and (.
 else
   fail "missing or invalid schemaVersion 1 CSM config: $csm_config"
 fi
-
-for plugin in \
-  catppuccin/tmux/catppuccin.tmux \
-  tmux-resurrect/resurrect.tmux \
-  tmux-continuum/continuum.tmux; do
-  path="$HOME/.config/tmux/plugins/$plugin"
-  if [ -f "$path" ]; then pass "tmux plugin: $plugin"; else fail "missing tmux plugin: $path"; fi
-done
 
 if gh auth status >/dev/null 2>&1; then
   pass "GitHub CLI is authenticated"
@@ -147,8 +122,11 @@ fi
 
 bridge_env="$HOME/.config/csm/bridge.env"
 if [ -r "$bridge_env" ]; then
-  # shellcheck disable=SC1090 -- generated EnvironmentFile, fixed local path
-  set -a; . "$bridge_env"; set +a
+  # Generated EnvironmentFile at a fixed local path.
+  set -a
+  # shellcheck disable=SC1090
+  . "$bridge_env"
+  set +a
   if [ -n "${CSM_BRIDGE_TOKEN:-}" ]; then
     payload=$(jq -cn --arg token "$CSM_BRIDGE_TOKEN" '{token:$token}')
     code=$(curl -sS -o /dev/null -w '%{http_code}' -X POST \

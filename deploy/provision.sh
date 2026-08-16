@@ -50,8 +50,8 @@ else
   note "packages already present"
 fi
 
-# The CSM shell fragment is zsh syntax and provides the Linux host's minimal
-# interactive profile. Change the login shell once; it takes effect next login.
+# The Linux dotfiles profile is zsh-based. Change the login shell once; it takes
+# effect next login.
 zsh_bin=$(command -v zsh)
 login_shell=$(getent passwd "$USER" | cut -d: -f7)
 if [ "$login_shell" != "$zsh_bin" ]; then
@@ -197,69 +197,22 @@ else
   skip "no systemd — skipping linger, user units, bridge token"
 fi
 
-# ── 9. CSM-owned shell + tmux integration ──────────────────────────────────────
-# This is the same fragment `csm setup` installs on macOS and Linux. A fresh VM
-# therefore needs no dotfiles checkout; ~/.tmux.conf contains only an import and
-# remains available for optional personal settings.
-TMUX_SOURCE="$here/../config/tmux.conf"
-TMUX_SNIPPET="$HOME/.config/csm/tmux.conf"
-mkdir -p "$HOME/.config/csm"
-if ! cmp -s "$TMUX_SOURCE" "$TMUX_SNIPPET" 2>/dev/null; then
-  note "installing tmux snippet → $TMUX_SNIPPET"
-  cp "$TMUX_SOURCE" "$TMUX_SNIPPET"
-fi
-SOURCE_LINE="if-shell 'test -f ~/.config/csm/tmux.conf' 'source-file ~/.config/csm/tmux.conf' ''"
-if [ ! -f "$HOME/.tmux.conf" ] || ! grep -qF "$SOURCE_LINE" "$HOME/.tmux.conf"; then
-  note "sourcing snippet from ~/.tmux.conf"
-  printf '\n%s\n' "$SOURCE_LINE" >> "$HOME/.tmux.conf"
-fi
-
-SHELL_SOURCE="$here/../config/shell.zsh"
-SHELL_SNIPPET="$HOME/.config/csm/shell.zsh"
-if ! cmp -s "$SHELL_SOURCE" "$SHELL_SNIPPET" 2>/dev/null; then
-  note "installing zsh snippet → $SHELL_SNIPPET"
-  cp "$SHELL_SOURCE" "$SHELL_SNIPPET"
-fi
-ZSH_SOURCE_LINE='[[ -r "$HOME/.config/csm/shell.zsh" ]] && source "$HOME/.config/csm/shell.zsh"'
-if [ ! -f "$HOME/.zshrc" ] || ! grep -qF "$ZSH_SOURCE_LINE" "$HOME/.zshrc"; then
-  note "sourcing CSM shell fragment from ~/.zshrc"
-  printf '\n%s\n' "$ZSH_SOURCE_LINE" >> "$HOME/.zshrc"
-fi
-
-# ── 9b. tmux persistence plugins ───────────────────────────────────────────────
-# Catppuccin gives the VM the same status-line presentation as the Mac. Resurrect
-# and continuum provide layout persistence. Use the XDG path expected by the
-# the CSM fragment and by tmux.service.
-PLUGIN_DIR="$HOME/.config/tmux/plugins"
-mkdir -p "$PLUGIN_DIR"
-declare -A PLUGIN_REPOS=(
-  [catppuccin]="https://github.com/catppuccin/tmux"
-  [tmux-resurrect]="https://github.com/tmux-plugins/tmux-resurrect"
-  [tmux-continuum]="https://github.com/tmux-plugins/tmux-continuum"
-)
-for plugin in catppuccin tmux-resurrect tmux-continuum; do
-  if [ ! -d "$PLUGIN_DIR/$plugin" ]; then
-    # Preserve an already-installed pre-XDG plugin without recloning it.
-    if [ -d "$HOME/.tmux/plugins/$plugin" ]; then
-      note "linking existing $plugin into XDG plugin directory"
-      ln -s "$HOME/.tmux/plugins/$plugin" "$PLUGIN_DIR/$plugin"
-    else
-      note "cloning $plugin"
-      git clone -q --depth 1 "${PLUGIN_REPOS[$plugin]}" "$PLUGIN_DIR/$plugin"
-    fi
+# ── 9. Personal terminal profile prerequisite ──────────────────────────────────
+# Host presentation, bindings, shell behavior, and TPM plugins belong to the
+# explicit Linux profile in the dotfiles repository. CSM provisioning must not
+# manufacture a second, divergent terminal environment.
+for profile_file in \
+  "$HOME/.tmux.conf" \
+  "$HOME/.config/tmux/common.conf" \
+  "$HOME/.config/tmux/final.conf" \
+  "$HOME/.config/tmux/plugins/tpm/tpm" \
+  "$HOME/.config/tmux/plugins/tmux-resurrect/resurrect.tmux"; do
+  if [ ! -f "$profile_file" ]; then
+    printf 'missing Linux dotfiles profile file: %s\nRun ~/.dotfiles/install linux first.\n' "$profile_file" >&2
+    exit 1
   fi
 done
-# Catppuccin has historically used both direct and nested checkout layouts.
-if [ -f "$PLUGIN_DIR/catppuccin/catppuccin.tmux" ] && [ ! -e "$PLUGIN_DIR/catppuccin/tmux" ]; then
-  ln -s . "$PLUGIN_DIR/catppuccin/tmux"
-fi
-
-# Applying only the CSM fragment is safe with live panes: it changes server
-# options, bindings, and hooks without recreating sessions.
-if tmux has-session 2>/dev/null; then
-  note "reloading VM tmux settings in the live server"
-  tmux source-file "$TMUX_SNIPPET"
-fi
+note "Linux dotfiles terminal profile is installed"
 
 # ── 10. Tailscale ──────────────────────────────────────────────────────────────
 if ! have tailscale; then
