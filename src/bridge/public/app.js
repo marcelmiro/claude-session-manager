@@ -101,6 +101,31 @@ const filesView = signal(false); // full changed-files list pushed over the deta
 // replaced `sessions`, so on a quiet list a row sat at "2m" for an hour. Ticking a
 // signal re-renders them on their own; paused while hidden and resynced on resume.
 const tick = signal(Date.now());
+// Home view during the inbox rollout: "inbox" (lifecycle sections, ADR 0013) or
+// "classic" (the pre-inbox repo-grouped list). Persisted; toggled from the list header.
+const viewMode = signal(
+  (() => {
+    try {
+      return localStorage.getItem("csm-view") || "inbox";
+    } catch {
+      return "inbox";
+    }
+  })(),
+);
+function toggleView() {
+  viewMode.value = viewMode.value === "inbox" ? "classic" : "inbox";
+  try {
+    localStorage.setItem("csm-view", viewMode.value);
+  } catch {
+    /* private mode — the toggle still works for this page's life */
+  }
+}
+// The daemon's inbox snapshot is older than 10s (or absent) — sections render from the
+// last known state with a banner. Server-computed; classic view ignores it.
+const inboxStale = signal(false);
+// A wrapped `{sessions, inboxStale}` payload has been applied this page-life — gates the
+// "inbox zero" empty state, so a stale pre-inbox localStorage hydration never shows it.
+const inboxAware = signal(false);
 
 // File-editing tools, shared by the rewind-checkpoint calc (canCode) and the edit chips.
 // Edit chips gate additionally on an edited path — `file_path` for most, `notebook_path`
@@ -281,11 +306,15 @@ async function refreshSessions() {
     const r = await fetch("/sessions");
     if (r.status === 401) return (authed.value = false);
     if (!r.ok) return;
-    const list = await r.json();
-    if (!Array.isArray(list)) return; // malformed payload — never poison the render with it
+    const data = await r.json();
+    // Payload is `{sessions, inboxStale}`; a bare array (older server) still parses.
+    const list = Array.isArray(data) ? data : data && Array.isArray(data.sessions) ? data.sessions : null;
+    if (!list) return; // malformed payload — never poison the render with it
     if (seq < listAppliedSeq) return; // a newer response already applied — never regress
     listAppliedSeq = seq;
     sessions.value = list;
+    inboxStale.value = !Array.isArray(data) && !!data.inboxStale;
+    if (!Array.isArray(data)) inboxAware.value = true;
     followClearedSession(); // /clear or /compact on the open session → follow to its successor
     authed.value = true;
     if (error.value === "bridge unreachable") error.value = ""; // recovered — drop the banner
@@ -1371,6 +1400,15 @@ function formatAge(iso) {
   return formatTimeAgo(iso, { now: tick.value, verbose: true });
 }
 
+// Relative time UNTIL a wake (the Mac sidebar's fmtWake): "45m" / "3h" / "2d".
+function wakeIn(until) {
+  const m = Math.max(0, Math.ceil((until - tick.value) / 60_000));
+  if (m < 60) return `${m}m`;
+  const h = Math.ceil(m / 60);
+  if (h < 24) return `${h}h`;
+  return `${Math.ceil(h / 24)}d`;
+}
+
 // Row title mirrors `csm list`: the tmux-style AI name (repo is the group header, so
 // just the name). Falls back to the summary/branch label only when unnamed.
 function listTitle(s) {
@@ -1462,6 +1500,54 @@ function List() {
           : html`<span class="age">${formatAge(activityAt(s))}</span>`}
       </button>`;
   };
+  // Inbox view (ADR 0013): rows arrive pre-ordered and pre-sectioned from the server
+  // (`inbox.section` per row, payload order = the store's sort) — the client only groups
+  // by section tag. Empty sections are omitted; rows without `inbox` (idle panes,
+  // History-bound archived) don't show here.
+  const inbox = viewMode.value === "inbox";
+  const SECTIONS = [
+    ["needs-you", "needs you"],
+    ["running", "running"],
+    ["parked", "parked"],
+    ["done", "recently done"],
+  ];
+  const inboxGroups = !inbox
+    ? []
+    : SECTIONS.map(([key, title]) => ({
+        key,
+        title,
+        rows: all.filter((s) => s.inbox && s.inbox.section === key),
+      })).filter((g) => g.rows.length > 0);
+  const renderInboxRow = (s) => {
+    const ib = s.inbox;
+    // Parked detail replaces the summary: wake countdown for a snooze, note for a block.
+    const parked = ib.wakeAt ? `☾ ${wakeIn(ib.wakeAt)}` : ib.note != null ? `✗ ${ib.note}`.trim() : "";
+    const detail = parked || subLine(s);
+    const repo = s.repo === "~" ? "home" : s.repo;
+    const sub = detail && detail !== repo ? `${repo} · ${detail}` : repo;
+    return html`
+      <button
+        type="button"
+        class="row ${ib.section === "done" ? "done" : ""}"
+        key=${s.id}
+        ...${rowPress(s)}
+        onContextMenu=${(e) => e.preventDefault()}
+      >
+        <span class="dot" style=${dotStyle(s)}></span>
+        <span class="grow">
+          <span class="name"
+            >${ib.woken && html`<span class="wokemark" title="snooze came due">☾</span>`}${s.pendingScripts > 0 &&
+            html`<span class="scriptmark" title="waiting on a background script">⏳</span>`}${listTitle(s)}</span
+          >
+          ${sub && html`<span class="sub">${sub}</span>`}
+        </span>
+        ${s.pending &&
+        html`<span class="pendingbadge ${s.pending === "question" ? "q" : "a"}"
+          >${s.pending === "question" ? "answer" : "approve"}</span
+        >`}
+        <span class="age">${formatAge(new Date(ib.since).toISOString())}</span>
+      </button>`;
+  };
   // Repo groups exclude the "needs you" sessions (shown in the pinned block above).
   const groups = [];
   for (const s of list) {
@@ -1489,12 +1575,16 @@ function List() {
         <div class="listhead">
           <h1>
             portkey
-            ${attnTotal > 0 &&
+            ${!inbox &&
+            attnTotal > 0 &&
             html`<button class="attnchip ${needsYou.length ? "" : "soft"}" onClick=${() => attnTarget && open(attnTarget.id)}>
               ⚡ ${attnTotal} ›
             </button>`}
-            ${runningCount > 0 && html`<span class="runchip">🔄 ${runningCount}</span>`}
+            ${!inbox && runningCount > 0 && html`<span class="runchip">🔄 ${runningCount}</span>`}
           </h1>
+          <button class="viewbtn" onClick=${toggleView} aria-label="Switch home view">
+            ${inbox ? "classic" : "inbox"}
+          </button>
           ${pushEligible.value &&
           html`<button class="bellbtn" onClick=${enablePush} aria-label="Enable notifications">
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor"
@@ -1514,12 +1604,32 @@ function List() {
         </div>
         ${error.value && error.value !== "bridge unreachable" && html`<div class="err">${error.value}</div>`}
         ${launching.value && html`<div class="sub" style="padding:4px 4px 10px">launching ${launching.value}…</div>`}
-        ${needsYou.length > 0 &&
+        ${inbox &&
+        inboxStale.value &&
+        html`<div class="staleband">inbox snapshot is stale — showing last known state</div>`}
+        ${inbox &&
+        inboxAware.value &&
+        inboxGroups.length === 0 &&
+        html`<div class="sub" style="padding:8px">inbox zero — nothing needs you</div>`}
+        ${inbox &&
+        inboxGroups.map(
+          (g) => html`
+            <div class="group" key=${g.key}>
+              <div class="repo ${g.key === "needs-you" ? "needsyou" : g.key === "done" ? "donesec" : ""}">
+                ${g.title} · ${g.rows.length}
+              </div>
+              ${g.rows.map(renderInboxRow)}
+            </div>
+          `,
+        )}
+        ${!inbox &&
+        needsYou.length > 0 &&
         html`<div class="group" key="needs-you">
           <div class="repo needsyou">needs you</div>
           ${needsYou.map(renderRow)}
         </div>`}
-        ${groups.map(
+        ${!inbox &&
+        groups.map(
           (g) => html`
             <div class="group" key=${g.repo}>
               <div class="repo">${g.repo === "~" ? "home" : g.repo}</div>

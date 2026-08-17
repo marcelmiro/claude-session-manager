@@ -10,9 +10,12 @@
 
 // Relative timestamps so the list shows natural ages (2m, 40s, 3h…) whenever it runs.
 const ago = (ms: number) => new Date(Date.now() - ms).toISOString();
+const agoMs = (ms: number) => Date.now() - ms;
 
-// Projected session shape — mirrors projectSession() in server.ts. Covers every status
-// tier; the blocked (waiting + question + unread) session sorts to the top with a glow.
+// Projected session shape — mirrors projectSession() in server.ts, plus the `inbox`
+// meta computeSessionsPayload attaches (rows arrive pre-ordered by section: needs-you →
+// running → parked → done, classic-only rows last). Covers every status tier and every
+// inbox section, incl. a woken snooze and a blocked-with-note row.
 export const FIXTURE_SESSIONS = [
   {
     id: "fix-auth",
@@ -28,6 +31,24 @@ export const FIXTURE_SESSIONS = [
     summary: "Switch the bridge token to an HttpOnly cookie",
     statusSource: "fixture",
     modified: ago(2 * 60_000),
+    inbox: { section: "needs-you", since: agoMs(2 * 60_000) },
+  },
+  {
+    id: "push-retry",
+    repo: "csm",
+    branch: "push-retry-backoff",
+    status: "ready",
+    name: "push-retry",
+    label: "push-retry-backoff",
+    pending: null,
+    unread: true,
+    contextPercent: 21,
+    messageCount: 6,
+    summary: "Retry Web Push sends with backoff",
+    statusSource: "fixture",
+    modified: ago(9 * 60_000),
+    // A snooze that came due: files under needs-you with the ☾ woken mark.
+    inbox: { section: "needs-you", since: agoMs(9 * 60_000), woken: true },
   },
   {
     id: "api-refactor",
@@ -43,6 +64,7 @@ export const FIXTURE_SESSIONS = [
     summary: "Extract session-api helpers from sessions.ts",
     statusSource: "fixture",
     modified: ago(40_000),
+    inbox: { section: "running", since: agoMs(40_000) },
   },
   {
     id: "docs-pass",
@@ -59,8 +81,60 @@ export const FIXTURE_SESSIONS = [
     statusSource: "fixture",
     modified: ago(11 * 60_000),
     // Reads ready but waits on a background script → inline ⏳ after the name,
-    // counted into the header's 🔄 chip.
+    // counted into the header's 🔄 chip; the inbox files script-waits under running.
     pendingScripts: 1,
+    inbox: { section: "running", since: agoMs(11 * 60_000) },
+  },
+  {
+    id: "stripe-keys",
+    repo: "throxy",
+    branch: "billing-stripe",
+    status: "archived",
+    name: "stripe-billing",
+    label: "billing-stripe",
+    pending: null,
+    unread: false,
+    contextPercent: 0,
+    messageCount: 22,
+    summary: "Stripe billing integration",
+    statusSource: "fixture",
+    modified: ago(4 * 3_600_000),
+    restorable: "yes",
+    inbox: { section: "parked", since: agoMs(4 * 3_600_000), wakeAt: agoMs(-4 * 3_600_000) },
+  },
+  {
+    id: "blocked-deploy",
+    repo: "throxy",
+    branch: "deploy-pipeline",
+    status: "archived",
+    name: "deploy-pipeline",
+    label: "deploy-pipeline",
+    pending: null,
+    unread: false,
+    contextPercent: 0,
+    messageCount: 17,
+    summary: "Deploy pipeline hardening",
+    statusSource: "fixture",
+    modified: ago(26 * 3_600_000),
+    restorable: "yes",
+    inbox: { section: "parked", since: agoMs(26 * 3_600_000), note: "waiting on infra access" },
+  },
+  {
+    id: "done-usage",
+    repo: "csm",
+    branch: "usage-readout",
+    status: "archived",
+    name: "usage-readout",
+    label: "usage-readout",
+    pending: null,
+    unread: false,
+    contextPercent: 0,
+    messageCount: 11,
+    summary: "Token-usage readout thresholds",
+    statusSource: "fixture",
+    modified: ago(2 * 3_600_000),
+    restorable: "yes",
+    inbox: { section: "done", since: agoMs(2 * 3_600_000) },
   },
   {
     id: "ingest",
@@ -394,7 +468,7 @@ const FIXTURE_HISTORY_SEARCH = {
  * caller falls through to the real handler — e.g. `/stream` keeps its live SSE).
  */
 export function fixtureData(method: string, path: string, params?: URLSearchParams): unknown | undefined {
-  if (method === "GET" && path === "/sessions") return FIXTURE_SESSIONS;
+  if (method === "GET" && path === "/sessions") return { sessions: FIXTURE_SESSIONS, inboxStale: false };
   if (method === "GET" && path === "/repos") return FIXTURE_REPOS;
   if (method === "GET" && path === "/history") {
     return params?.get("q") ? FIXTURE_HISTORY_SEARCH : FIXTURE_HISTORY;

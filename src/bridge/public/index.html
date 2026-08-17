@@ -765,6 +765,32 @@
         justify-content: center;
       }
       .histbtn:active { background: var(--hover); }
+      /* inbox/classic view toggle — same chip family, text instead of an icon */
+      .viewbtn {
+        flex: none;
+        height: 30px;
+        padding: 0 12px;
+        border-radius: 999px;
+        border: 1px solid var(--dim);
+        background: var(--surface);
+        color: var(--muted);
+        font-size: 12px;
+        line-height: 1;
+      }
+      .viewbtn:active { background: var(--hover); }
+
+      /* --- inbox view (ADR 0013) -------------------------------------------- */
+      .staleband {
+        color: var(--peach);
+        background: var(--peach-tint);
+        border-radius: 8px;
+        padding: 6px 10px;
+        margin: 0 4px 10px;
+        font-size: 12px;
+      }
+      .repo.donesec { color: var(--dim); }
+      .row.done { opacity: 0.55; }
+      .row .wokemark { color: var(--peach); margin-right: 4px; font-size: 12px; }
 
       /* --- history screen --------------------------------------------------- */
       .histsearch { padding: 0 4px 10px; }

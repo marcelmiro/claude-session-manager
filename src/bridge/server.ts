@@ -76,6 +76,9 @@ import {
 } from "../core/names";
 import { buildSessionLabel, disambiguateNames } from "../core/session-label";
 import { loadState, saveState } from "../core/state";
+import { InboxStore } from "../core/inbox-store";
+import { composeSessions, type InboxSession } from "../core/inbox-model";
+import { orderInboxRows, type DiscoverySeen } from "./inbox-payload";
 import { withDeadline } from "../core/deadline";
 import { loadAllSessions, filterAndRankEntries, type SearchEntry } from "../core/search";
 import { fixtureData } from "./fixtures";
@@ -356,6 +359,51 @@ let sessionsCache: { ts: number; value: unknown } | null = null;
 // The full session set from the last completed discovery — reused by /repos so opening
 // the wizard doesn't re-run the ps/tmux/git sweep the projection just paid for.
 let lastDiscovered: Session[] | null = null;
+
+// ---------------------------------------------------------------------------
+// Inbox (ADR 0013) — the store is the section brain; the bridge only joins.
+// ---------------------------------------------------------------------------
+
+// Lazy singleton: the daemon writes the snapshot; the bridge is a WAL reader
+// (plus verb writer). A failed open (unwritable dir, corrupt db) degrades to
+// "no inbox" — the payload then carries the classic rows and inboxStale.
+let inboxStore: InboxStore | null = null;
+function getInboxStore(): InboxStore | null {
+  if (!inboxStore) {
+    try {
+      inboxStore = new InboxStore();
+    } catch {
+      return null;
+    }
+  }
+  return inboxStore;
+}
+
+/**
+ * Minimal projected row for a store-known session outside discovery's window
+ * (pane-less parked, or done approaching the 24h edge): enough for the row +
+ * thread-open + restore bar. Everything richer needs a live discovery hit.
+ */
+async function projectSnapshotOnly(s: InboxSession, since: number) {
+  const at = new Date(since).toISOString();
+  return {
+    id: s.id,
+    repo: s.repo,
+    branch: s.branch ?? "",
+    status: "archived",
+    name: s.name,
+    label: s.name,
+    pending: null,
+    unread: false,
+    contextPercent: 0,
+    messageCount: 0,
+    summary: "",
+    statusSource: "inbox-snapshot",
+    modified: at,
+    lastTurn: at,
+    restorable: await restoreState(s.id, s.repoPath ?? "", ""),
+  };
+}
 
 // The wizard is the only consumer and a repo appearing/disappearing is a human-timescale
 // event; 15s keeps a reopened wizard instant while an expired hit revalidates behind it.
@@ -651,9 +699,55 @@ async function computeSessionsPayload(): Promise<unknown> {
       scriptCounts.get(s.id),
     ),
   );
-  sessionsCache = { ts: now, value };
+  // Inbox view (ADR 0013): the store decides every row's section (composeSessions →
+  // orderInboxRows); the bridge contributes only row detail, joined by id. Inbox rows
+  // come first in section order and carry `inbox` meta; classic-only rows (idle,
+  // 24h-window archived without a store row) follow untagged — the classic view
+  // re-sorts client-side, so their order is irrelevant.
+  let rows: unknown[] = value;
+  let inboxStale = true;
+  const store = getInboxStore();
+  if (store) {
+    try {
+      const composed = composeSessions(store);
+      const snapAt = store.loadSnapshot().map((r) => r.updatedAt);
+      inboxStale = snapAt.length === 0 || Math.max(...snapAt) < now - 10_000;
+      const discovery = new Map<string, DiscoverySeen>(
+        tracked.map((s) => {
+          const pt = pendingById.get(s.id);
+          return [
+            s.id,
+            {
+              status: s.status,
+              live: !!s.tmuxPane,
+              needsYou:
+                !!(s.tmuxPane && unread.has(s.tmuxPane.paneId)) ||
+                approvalIds.has(s.id) ||
+                (pt?.name === "AskUserQuestion" && !!pt.question),
+            },
+          ];
+        }),
+      );
+      const projected = new Map(value.map((r) => [r.id, r]));
+      const ordered: unknown[] = [];
+      const seen = new Set<string>();
+      for (const row of orderInboxRows(composed, discovery, now)) {
+        seen.add(row.id);
+        const detail =
+          projected.get(row.id) ??
+          (row.snapshot ? await projectSnapshotOnly(row.snapshot, row.meta.since) : null);
+        if (detail) ordered.push({ ...detail, inbox: row.meta });
+      }
+      for (const r of value) if (!seen.has(r.id)) ordered.push(r);
+      rows = ordered;
+    } catch {
+      // store unreadable this pass — serve the classic rows, flagged stale
+    }
+  }
+  const payload = { sessions: rows, inboxStale };
+  sessionsCache = { ts: now, value: payload };
   maybeGenerateNames(tracked, nameCache); // fire-and-forget; refreshes via SSE
-  return value;
+  return payload;
 }
 
 // --- Background AI naming -------------------------------------------------
