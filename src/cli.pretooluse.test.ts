@@ -2,9 +2,11 @@
  * Integration coverage for the generated `pretooluse.sh` detached-approval branch,
  * exercising the real installed-shape script (written by `setup()`) against a
  * stubbed `tmux` on PATH. Not pure — spawns bash — but it's the only thing that
- * pins the ADR-3 fix: a DETACHED session must NOT block on calls Claude would
- * auto-approve (bypassPermissions, read-only tools), or autonomous/subagent-heavy
- * runs stall up to 600s per call. Tools that CAN prompt must still block-poll.
+ * pins the ADR-3 fix: an away session must NOT block on calls Claude would
+ * auto-approve (bypassPermissions/auto modes, read-only tools), or autonomous/
+ * subagent-heavy runs stall up to 600s per call — and must not block at all when
+ * no phone is watching (no fresh bridge-consumer marker: nobody could answer).
+ * Tools that CAN prompt, with a phone watching, must still block-poll.
  *
  * `home` helper first — `setup()` writes the hook under the temp $HOME root.
  */
@@ -27,13 +29,16 @@ beforeAll(async () => {
   rmSync(hookPath, { force: true });
   await setup(); // writes the real pretooluse.sh under TEST_HOME/.config/csm/hooks
 
-  // Stub `tmux` so the hook sees a detached session: a session name exists
+  // Stub `tmux`. Default is a detached session: a session name exists
   // (display-message) but no client is attached (list-clients prints nothing).
+  // STUB_ACTIVITY=<epoch> flips it to attached, reporting that client_activity —
+  // the attached-but-idle presence path (the client_activity branch must precede
+  // the bare list-clients one; both args match the wider pattern).
   rmSync(stubBin, { recursive: true, force: true });
   mkdirSync(stubBin, { recursive: true });
   writeFileSync(
     `${stubBin}/tmux`,
-    `#!/bin/bash\ncase "$*" in\n  *display-message*) echo "fakesess" ;;\n  *list-clients*) : ;;\n  *) : ;;\nesac\n`,
+    `#!/bin/bash\ncase "$*" in\n  *display-message*) echo "fakesess" ;;\n  *client_activity*) [ -n "$STUB_ACTIVITY" ] && echo "$STUB_ACTIVITY" ;;\n  *list-clients*) [ -n "$STUB_ACTIVITY" ] && echo "client0: fakesess" ;;\n  *) : ;;\nesac\n`,
   );
   chmodSync(`${stubBin}/tmux`, 0o755);
 });
@@ -44,15 +49,32 @@ interface HookResult {
   pendingWritten: boolean;
 }
 
-/** Run the generated hook with `payload` on stdin against the stubbed tmux. */
-async function runHook(payload: object, opts: { timeoutMs?: number } = {}): Promise<HookResult> {
+/**
+ * Run the generated hook with `payload` on stdin against the stubbed tmux.
+ * A fresh bridge-consumer marker (phone watching) is the default — the hold branch
+ * is unreachable without one; `phoneWatching: false` removes it. `clientActivity`
+ * makes the stubbed session attached with that keystroke epoch.
+ */
+async function runHook(
+  payload: object,
+  opts: { timeoutMs?: number; phoneWatching?: boolean; clientActivity?: number } = {},
+): Promise<HookResult> {
   const sessionId = (payload as any).session_id;
   rmSync(`${pendingDir}/${sessionId}.json`, { force: true });
+  const consumerMarker = `${TEST_HOME}/.config/csm/bridge-consumer`;
+  if (opts.phoneWatching === false) rmSync(consumerMarker, { force: true });
+  else writeFileSync(consumerMarker, "");
   const proc = Bun.spawn(["bash", hookPath], {
     stdin: Buffer.from(JSON.stringify(payload)),
     stdout: "pipe",
     stderr: "pipe",
-    env: { ...process.env, HOME: TEST_HOME, PATH: `${stubBin}:${process.env.PATH}`, TMUX_PANE: "%1" },
+    env: {
+      ...process.env,
+      HOME: TEST_HOME,
+      PATH: `${stubBin}:${process.env.PATH}`,
+      TMUX_PANE: "%1",
+      ...(opts.clientActivity !== undefined ? { STUB_ACTIVITY: String(opts.clientActivity) } : {}),
+    },
   });
 
   // Block-polling tools never exit on their own here — kill after a beat and
@@ -120,12 +142,51 @@ test("detached + bypassPermissions mode never blocks, even for Bash", async () =
   expect(r.pendingWritten).toBe(false);
 });
 
+test("detached + auto mode never blocks, even for Bash", async () => {
+  const r = await runHook(
+    base({ tool_name: "Bash", permission_mode: "auto", session_id: "itest-auto", tool_input: { command: "cat big-file | head -450" } }),
+    { timeoutMs: 5000 },
+  );
+  expect(r.exitCode).toBe(0);
+  expect(r.pendingWritten).toBe(false);
+});
+
+test("no watching phone (no bridge-consumer marker) never blocks — desk prompt + push instead", async () => {
+  const r = await runHook(
+    base({ tool_name: "Bash", session_id: "itest-nophone", tool_input: { command: "echo hi" } }),
+    { timeoutMs: 5000, phoneWatching: false },
+  );
+  expect(r.exitCode).toBe(0);
+  expect(r.stdout.trim()).toBe("");
+  expect(r.pendingWritten).toBe(false);
+});
+
+test("attached-but-idle desk + watching phone blocks for the phone", async () => {
+  const staleKeystroke = Math.floor(Date.now() / 1000) - 300;
+  const r = await runHook(
+    base({ tool_name: "Bash", session_id: "itest-idle", tool_input: { command: "echo hi" } }),
+    { timeoutMs: 2000, clientActivity: staleKeystroke },
+  );
+  expect(r.pendingWritten).toBe(true);
+});
+
+test("a recent desk keystroke wins over a watching phone — no block", async () => {
+  const freshKeystroke = Math.floor(Date.now() / 1000) - 5;
+  const r = await runHook(
+    base({ tool_name: "Bash", session_id: "itest-fresh", tool_input: { command: "echo hi" } }),
+    { timeoutMs: 5000, clientActivity: freshKeystroke },
+  );
+  expect(r.exitCode).toBe(0);
+  expect(r.pendingWritten).toBe(false);
+});
+
 test("the blocked hook stamps its OWN pid on the marker (readers probe it for liveness)", async () => {
   // Must be read while the hook is still blocked: once a decision lands, the hook consumes
   // it and `rm -f`s the marker before exiting, so a post-exit read finds nothing.
   const sid = "itest-pid";
   rmSync(`${decisionsDir}/${sid}.json`, { force: true });
   rmSync(`${pendingDir}/${sid}.json`, { force: true });
+  writeFileSync(`${TEST_HOME}/.config/csm/bridge-consumer`, ""); // fresh marker — the hold branch needs a watching phone
   const payload = base({ tool_name: "Bash", session_id: sid, tool_input: { command: "echo hi" } });
   const proc = Bun.spawn(["bash", hookPath], {
     stdin: Buffer.from(JSON.stringify(payload)),

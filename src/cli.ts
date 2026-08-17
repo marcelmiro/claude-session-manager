@@ -467,7 +467,13 @@ function isSubsequence(sub: string, str: string): boolean {
 // csm setup
 // ---------------------------------------------------------------------------
 
-export const HOOK_VERSION = 17;
+export const HOOK_VERSION = 19;
+
+// A bridge-consumer marker older than this is a dead phone connection: the bridge
+// touches it on SSE connect and every 15s heartbeat, so 40s tolerates one missed
+// heartbeat. Shared by both PreToolUse holds (approval + question) — the gates must
+// agree on what "a phone is watching" means.
+const CONSUMER_FRESH_S = 40;
 
 // SessionStart pane→session mapper. Writes one file per pane (panes/<paneId> → sessionId)
 // atomically (temp+rename) — the hook OWNS the map, so there's no shared-file write race and
@@ -518,8 +524,8 @@ ${LOG_EVENT_SNIPPET}
 `;
 
 // PreToolUse handler. Logs the event (ADR-3b: always before the decision), then
-// attach-aware approval (Inc6, A6): a tmux client attached to the session → exit
-// neutral so the desk TUI prompt appears instantly (no added lag); detached →
+// attach-aware approval (Inc6, A6): user present at the desk → exit neutral so the
+// desk TUI prompt appears instantly (no added lag); away AND a phone watching →
 // write pending/<id>.json and block-poll decisions/<id>.json every 500ms up to the
 // 600s hook timeout, emitting the permission decision (or neutral fallthrough on
 // timeout — the desk prompt is always the floor). Pure shell, no jq/new deps; the
@@ -575,13 +581,25 @@ if [ -n "\$CL" ]; then
   fi
 fi
 
-# Detached → register the pending approval and block-poll for a decision.
+# Away from the desk — but a hold only helps if a phone is actually watching.
+# bridge-consumer mtime <=${CONSUMER_FRESH_S}s (touched on SSE connect + 15s heartbeats, cleared by
+# the goodbye beacon — same signal/threshold as the question intercept) means
+# portkey is open: hold for it. Stale/absent → nobody can answer a hold; fall
+# through so the desk prompt renders and flips status to waiting, which is what
+# fires the Web Push to the phone (a held call reads as running and never pushes).
+M="\$HOME/.config/csm/bridge-consumer"
+MT=$(stat -c %Y "\$M" 2>/dev/null || stat -f %m "\$M" 2>/dev/null || echo 0)
+case "\$MT" in ''|*[!0-9]*) MT=0 ;; esac
+if [ "\$MT" = 0 ] || [ \$(( \$(date +%s) - MT )) -ge ${CONSUMER_FRESH_S} ]; then exit 0; fi
+
+# Phone watching → register the pending approval and block-poll for a decision.
 # ADR-3 fix: don't block on calls Claude would auto-approve anyway, or a detached
 # (autonomous/subagent-heavy) session stalls up to 600s per call. bypassPermissions
-# never prompts; read-only tools never prompt in any mode. Only tools that could
-# actually raise a prompt reach the block-poll below.
+# never prompts; auto mode's classifier approves on its own (and a remote deny just
+# terminates the turn, so a phone hold buys nothing); read-only tools never prompt
+# in any mode. Only tools that could actually raise a prompt reach the block-poll below.
 PERM=$(printf '%s' "\$INPUT" | grep -oE '"permission_mode"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | cut -d'"' -f4)
-[ "\$PERM" = "bypassPermissions" ] && exit 0
+case "\$PERM" in bypassPermissions|auto) exit 0 ;; esac
 case "\$TOOL" in
   Read|Glob|Grep|NotebookRead|TodoWrite|Task) exit 0 ;;
 esac
@@ -643,11 +661,11 @@ SESS=$(tmux display-message -p -t "\$TMUX_PANE" '#{session_name}' 2>/dev/null)
 
 # 1. CSM-tracked pane (rules out an ad-hoc bare-terminal claude).
 [ -f "\$HOME/.config/csm/panes/\$TMUX_PANE" ] || exit 0
-# 2. Live bridge consumer: marker mtime <=40s (tolerates one missed 15s heartbeat).
+# 2. Live bridge consumer: marker mtime <=${CONSUMER_FRESH_S}s (tolerates one missed 15s heartbeat).
 #    Stale/absent → nobody can answer → native widget, no long stall.
 M="\$HOME/.config/csm/bridge-consumer"
 MT=$(stat -c %Y "\$M" 2>/dev/null || stat -f %m "\$M" 2>/dev/null || echo 0)
-if [ "\$MT" = 0 ] || [ $(( $(date +%s) - MT )) -ge 40 ]; then exit 0; fi
+if [ "\$MT" = 0 ] || [ $(( $(date +%s) - MT )) -ge ${CONSUMER_FRESH_S} ]; then exit 0; fi
 # 3. Focus (three-part): active window + attached client (cheap tmux), and only then
 #    the presence probe. Same probes as atMacFocus() in core/tmux.ts (the hold's
 #    release check) — keep the two in sync, but note the OPPOSITE failure polarity:
