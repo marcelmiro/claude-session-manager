@@ -479,7 +479,10 @@ export function fixtureData(method: string, path: string, params?: URLSearchPara
   if (method === "GET" && /^\/sessions\/[^/]+\/diff$/.test(path)) return FIXTURE_DIFF;
   // Stub the mutating actions so the UI's optimistic flows resolve cleanly in a demo.
   if (method === "POST" && path === "/sessions/new") return { ok: true, sessionId: FIXTURE_SESSIONS[0]!.id };
-  if (method === "POST" && /^\/sessions\/[^/]+\/(decision|message|answer|read|rewind)$/.test(path)) {
+  if (
+    method === "POST" &&
+    /^\/sessions\/[^/]+\/(decision|message|answer|read|rewind|snooze|block|unpark|unarchive)$/.test(path)
+  ) {
     return { ok: true };
   }
   return undefined;

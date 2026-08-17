@@ -51,6 +51,42 @@ describe("verbs", () => {
   });
 });
 
+describe("device_id (wake push routing)", () => {
+  test("snooze records the setter device; block and Mac snoozes leave it null", () => {
+    const s = fresh();
+    s.snooze("a", 1000, 1, "phone-dev-1");
+    expect(s.dispositions().get("a")!.deviceId).toBe("phone-dev-1");
+    s.block("a", "waiting", 2); // a later block must not keep the stale device
+    expect(s.dispositions().get("a")!.deviceId).toBeNull();
+    s.snooze("b", 1000, 1);
+    expect(s.dispositions().get("b")!.deviceId).toBeNull();
+  });
+
+  test("guarded ALTER adds the column to a pre-device_id DB, idempotently", async () => {
+    const path = `${process.env.TMPDIR ?? "/tmp"}/inbox-store-migrate-${process.pid}.db`;
+    const { Database } = await import("bun:sqlite");
+    const old = new Database(path, { create: true });
+    old.exec(`CREATE TABLE dispositions(
+      session_id   TEXT PRIMARY KEY,
+      kind         TEXT NOT NULL CHECK(kind IN ('snoozed','blocked')),
+      until        INTEGER,
+      note         TEXT,
+      created_at   INTEGER NOT NULL,
+      auto_resumed INTEGER NOT NULL DEFAULT 0
+    );`);
+    old.exec("INSERT INTO dispositions(session_id, kind, until, created_at) VALUES ('pre', 'snoozed', 5, 1)");
+    old.close();
+    const a = new InboxStore(path); // migrates
+    expect(a.dispositions().get("pre")!.deviceId).toBeNull();
+    a.snooze("pre", 9, 2, "dev-x");
+    a.close();
+    const b = new InboxStore(path); // reopen — ALTER must not re-fire
+    expect(b.dispositions().get("pre")!.deviceId).toBe("dev-x");
+    b.close();
+    await Bun.$`rm -f ${path} ${path}-wal ${path}-shm`.quiet();
+  });
+});
+
 describe("event log", () => {
   test("every verb leaves an event, newest first", () => {
     const s = fresh();

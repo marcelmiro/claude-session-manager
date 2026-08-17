@@ -77,7 +77,7 @@ import {
 import { buildSessionLabel, disambiguateNames } from "../core/session-label";
 import { loadState, saveState } from "../core/state";
 import { InboxStore } from "../core/inbox-store";
-import { composeSessions, type InboxSession } from "../core/inbox-model";
+import { composeSessions, isWakePreset, presetWakeAt, type InboxSession } from "../core/inbox-model";
 import { orderInboxRows, type DiscoverySeen } from "./inbox-payload";
 import { withDeadline } from "../core/deadline";
 import { loadAllSessions, filterAndRankEntries, type SearchEntry } from "../core/search";
@@ -1280,13 +1280,95 @@ async function route(req: Request): Promise<Response> {
   }
 
   // Archive (kill the tmux pane, ending the Claude process; conversation stays resumable).
+  // Also writes the inbox's Done fact — but only when the kill succeeded OR the row is
+  // already pane-less per our own discovery. Never blanket-treat no-pane as success on a
+  // live row: archiveSession's failure exists because a swallowed pane-resolution race
+  // once marked live sessions archived while their process kept running (see
+  // core/session-api.ts) — a store-archive on that race would orphan a live pane invisibly.
   const archive = path.match(/^\/sessions\/([^/]+)\/archive$/);
   if (method === "POST" && archive) {
-    const result = await archiveSession(decodeURIComponent(archive[1]!));
+    const id = decodeURIComponent(archive[1]!);
+    const result = await archiveSession(id);
+    const paneless = !(lastDiscovered ?? []).find((s) => s.id === id)?.tmuxPane;
+    let stored = false;
+    const store = getInboxStore();
+    if (store && (result.ok || paneless)) {
+      try {
+        stored = store.archive(id, Date.now());
+      } catch {
+        // store write failed — the pane-kill result still answers the client
+      }
+    }
     sessionsCache = null; // force re-projection — the killed pane drops from the next list
     historyCache = null; // the just-archived session should surface in History at once
-    broadcast({ type: "session-changed", id: decodeURIComponent(archive[1]!) });
-    return sendResult(result);
+    broadcast({ type: "session-changed", id });
+    // A pane-less inbox row (parked/woken) archives successfully via the store alone.
+    return result.ok || stored ? json({ ok: true }) : sendResult(result);
+  }
+
+  // Inbox verbs (ADR 0013): park / unpark / un-archive from the phone. The store is the
+  // authored layer (the section brain reads it); the pane-kill mirrors the sidebar's
+  // dispositions — parking kills the pane, and only the wake or re-engagement resurrects
+  // it. Kills are best-effort: a pane-less row (re-snoozing a parked session) still parks.
+  const snooze = path.match(/^\/sessions\/([^/]+)\/snooze$/);
+  if (method === "POST" && snooze) {
+    const id = decodeURIComponent(snooze[1]!);
+    const body = (await req.json().catch(() => ({}))) as { preset?: unknown };
+    if (typeof body.preset !== "string" || !isWakePreset(body.preset)) {
+      return json({ ok: false, reason: "bad-args" }, 400);
+    }
+    const store = getInboxStore();
+    if (!store) return json({ ok: false, reason: "no-store" }, 500);
+    const now = Date.now();
+    if (!store.snooze(id, presetWakeAt(now, body.preset), now, deviceOf(req) ?? null)) {
+      return json({ ok: false, reason: "archived" }, 409);
+    }
+    await archiveSession(id).catch(() => {}); // kill the pane; no-pane is fine
+    sessionsCache = null;
+    broadcast({ type: "session-changed", id });
+    return json({ ok: true });
+  }
+
+  const block = path.match(/^\/sessions\/([^/]+)\/block$/);
+  if (method === "POST" && block) {
+    const id = decodeURIComponent(block[1]!);
+    const body = (await req.json().catch(() => ({}))) as { note?: unknown };
+    const note = typeof body.note === "string" ? body.note.trim() : "";
+    const store = getInboxStore();
+    if (!store) return json({ ok: false, reason: "no-store" }, 500);
+    if (!store.block(id, note, Date.now())) return json({ ok: false, reason: "archived" }, 409);
+    await archiveSession(id).catch(() => {});
+    sessionsCache = null;
+    broadcast({ type: "session-changed", id });
+    return json({ ok: true });
+  }
+
+  // Explicit unpark (unblock / unsnooze): the row returns to Needs You pane-less; no pane
+  // is spawned — only re-engagement resumes (ADR 0013: undo does not resurrect the pane).
+  // Reason "manual" is what discovery's preserve rule keys on to keep the pane-less row.
+  const unpark = path.match(/^\/sessions\/([^/]+)\/unpark$/);
+  if (method === "POST" && unpark) {
+    const id = decodeURIComponent(unpark[1]!);
+    const store = getInboxStore();
+    if (!store) return json({ ok: false, reason: "no-store" }, 500);
+    if (store.clearDisposition(id, Date.now(), "manual") === null) {
+      return json({ ok: false, reason: "not-parked" }, 409);
+    }
+    sessionsCache = null;
+    broadcast({ type: "session-changed", id });
+    return json({ ok: true });
+  }
+
+  const unarchive = path.match(/^\/sessions\/([^/]+)\/unarchive$/);
+  if (method === "POST" && unarchive) {
+    const id = decodeURIComponent(unarchive[1]!);
+    const store = getInboxStore();
+    if (!store) return json({ ok: false, reason: "no-store" }, 500);
+    if (!store.unarchive(id, Date.now())) return json({ ok: false, reason: "not-archived" }, 409);
+    sessionsCache = null;
+    historyCache = null;
+    broadcast({ type: "session-changed", id });
+    return json({ ok: true });
   }
 
   // Restore (resume an archived session in a new tmux window; blocks until its prompt is

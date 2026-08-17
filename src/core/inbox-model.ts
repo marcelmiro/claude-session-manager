@@ -61,6 +61,28 @@ export function wakeAt(now: number, n: number, unit: "h" | "d"): number {
   return unit === "h" ? now + n * 3_600_000 : localMidnight(addDays(now, n));
 }
 
+export const WAKE_PRESETS = ["1h", "4h", "tomorrow", "3d", "7d"] as const;
+export type WakePreset = (typeof WAKE_PRESETS)[number];
+
+export function isWakePreset(x: string): x is WakePreset {
+  return (WAKE_PRESETS as readonly string[]).includes(x);
+}
+
+/**
+ * Phone snooze presets: hours are exact; day presets land at 8AM LOCAL on the
+ * target calendar day (tomorrow = next day, 3d/7d = +3/+7) — a snooze "for
+ * days" should greet the user in the morning, not at midnight. Built from
+ * local calendar components (not midnight + 8h) so a DST shift between
+ * midnight and 8AM still yields the wall-clock 8AM.
+ */
+export function presetWakeAt(now: number, preset: WakePreset): number {
+  if (preset === "1h") return now + 3_600_000;
+  if (preset === "4h") return now + 4 * 3_600_000;
+  const days = preset === "tomorrow" ? 1 : preset === "3d" ? 3 : 7;
+  const [y, m, d] = addDays(now, days).split("-").map(Number);
+  return new Date(y!, m! - 1, d!, 8).getTime();
+}
+
 /** A snoozed session whose wake moment has passed — a full attention event. */
 export function isDue(until: number, now: number): boolean {
   return until <= now;

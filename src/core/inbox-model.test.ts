@@ -25,6 +25,39 @@ describe("wakeAt", () => {
   });
 });
 
+import { isWakePreset, presetWakeAt } from "./inbox-model";
+
+describe("presetWakeAt", () => {
+  test("hour presets are exact offsets", () => {
+    expect(presetWakeAt(NOW, "1h")).toBe(NOW + 3_600_000);
+    expect(presetWakeAt(NOW, "4h")).toBe(NOW + 4 * 3_600_000);
+  });
+
+  test("day presets land at 8AM local on the target calendar day", () => {
+    expect(presetWakeAt(NOW, "tomorrow")).toBe(new Date(2026, 7, 12, 8).getTime());
+    expect(presetWakeAt(NOW, "3d")).toBe(new Date(2026, 7, 14, 8).getTime());
+    expect(presetWakeAt(NOW, "7d")).toBe(new Date(2026, 7, 18, 8).getTime());
+  });
+
+  test("pressed just after local midnight, tomorrow is still the NEXT day's 8AM", () => {
+    const justPastMidnight = new Date(2026, 7, 11, 0, 30).getTime();
+    expect(presetWakeAt(justPastMidnight, "tomorrow")).toBe(new Date(2026, 7, 12, 8).getTime());
+  });
+
+  test("day math crosses month and DST boundaries on the local calendar", () => {
+    const aug31 = new Date(2026, 7, 31, 9, 0).getTime();
+    expect(presetWakeAt(aug31, "tomorrow")).toBe(new Date(2026, 8, 1, 8).getTime());
+    // Oct 25 2026 is an EU DST fallback day — wall-clock 8AM, whatever the offset did.
+    const oct24 = new Date(2026, 9, 24, 23, 0).getTime();
+    expect(presetWakeAt(oct24, "tomorrow")).toBe(new Date(2026, 9, 25, 8).getTime());
+  });
+
+  test("isWakePreset gates the route's input", () => {
+    expect(isWakePreset("tomorrow")).toBe(true);
+    expect(isWakePreset("2h")).toBe(false);
+  });
+});
+
 describe("addDays / localMidnight", () => {
   test("round-trip through YMD is local, not UTC", () => {
     expect(localMidnight(addDays(NOW, 0))).toBe(new Date(2026, 7, 11).getTime());

@@ -1244,6 +1244,39 @@ async function archiveSession() {
   await action(`/sessions/${encodeURIComponent(s.id)}/archive`, {});
 }
 
+// Inbox verbs (ADR 0013). Snooze/block are disposals: they kill the pane and park the
+// row, so disposing the open session drops back to the list (same as archive). Unpark
+// and un-archive only edit the row's lifecycle — no navigation.
+async function snoozeSession(preset) {
+  const s = sessionMenu.value;
+  sessionMenu.value = null;
+  if (!s) return;
+  if (selectedId.value === s.id) selectedId.value = null;
+  await action(`/sessions/${encodeURIComponent(s.id)}/snooze`, { preset });
+}
+
+async function blockSession(note) {
+  const s = sessionMenu.value;
+  sessionMenu.value = null;
+  if (!s) return;
+  if (selectedId.value === s.id) selectedId.value = null;
+  await action(`/sessions/${encodeURIComponent(s.id)}/block`, { note });
+}
+
+async function unparkSession() {
+  const s = sessionMenu.value;
+  sessionMenu.value = null;
+  if (!s) return;
+  await action(`/sessions/${encodeURIComponent(s.id)}/unpark`, {});
+}
+
+async function unarchiveSession() {
+  const s = sessionMenu.value;
+  sessionMenu.value = null;
+  if (!s) return;
+  await action(`/sessions/${encodeURIComponent(s.id)}/unarchive`, {});
+}
+
 // Fork the session: close the sheet, show the same "launching …" hint the new-session flow
 // uses (the /fork request BLOCKS until the fork's prompt is live), then open straight into
 // the server-determined fork id. The original session is untouched.
@@ -3326,15 +3359,34 @@ function ActionSheet() {
 // being acted on (status dot + name + repo · subline + age), then the actions. Archive is
 // destructive (kills the live Claude process), so it takes a second tap that swaps the
 // sheet to an explicit confirm — no accidental kills from a fat-fingered long-press.
+// Phone snooze presets — one-tap commit; the server validates the same list and
+// computes the wake (hours exact, day presets at 8AM local).
+const SNOOZE_PRESETS = [
+  ["1h", "1 hour"],
+  ["4h", "4 hours"],
+  ["tomorrow", "Tomorrow 8AM"],
+  ["3d", "3 days"],
+  ["7d", "7 days"],
+];
+
 function SessionSheet() {
   const s = sessionMenu.value;
-  const [confirm, setConfirm] = useState(null); // null | "archive" | "fork" — which action is awaiting its second tap
+  const [confirm, setConfirm] = useState(null); // null | "archive" | "fork" | "snooze" | "block" — the open sub-state
+  const [note, setNote] = useState(""); // block-note draft (block sub-state only)
   // The sheet returns null when closed instead of unmounting, so `confirm` would
   // otherwise persist — reset it each time the target changes (open/close/switch).
-  useEffect(() => setConfirm(null), [s]);
+  useEffect(() => {
+    setConfirm(null);
+    setNote("");
+  }, [s]);
   if (s == null) return null;
   const close = () => (sessionMenu.value = null);
   const sub = subLine(s);
+  // Inbox verbs show on rows the inbox knows (`inbox` tag from the payload), in both
+  // views. Done rows trade the disposal verbs for Un-archive; parked rows add Unpark.
+  const section = s.inbox && s.inbox.section;
+  const canPark = !!s.inbox && section !== "done";
+  const parked = section === "parked";
   return html`
     <div class="scrim" onClick=${close}>
       <div class="sheet" onClick=${(e) => e.stopPropagation()}>
@@ -3350,7 +3402,9 @@ function SessionSheet() {
           ${confirm === "archive"
             ? html`
                 <div class="sheethint">
-                  This ends the live Claude session. Your conversation is saved — resume it from your Mac anytime.
+                  ${s.paneId
+                    ? "This ends the live Claude session. Your conversation is saved — resume it from your Mac anytime."
+                    : "Marks the session done. Your conversation is saved — resume it anytime."}
                 </div>
                 <button class="danger-fill" onClick=${archiveSession}>Archive session</button>
                 <button class="sheetcancel" onClick=${() => setConfirm(null)}>Keep running</button>`
@@ -3361,11 +3415,43 @@ function SessionSheet() {
                   </div>
                   <button class="accent-fill" onClick=${forkSession}>Fork session</button>
                   <button class="sheetcancel" onClick=${() => setConfirm(null)}>Cancel</button>`
-              : html`
-                  <button onClick=${() => (close(), open(s.id))}>Open</button>
-                  <button onClick=${() => setConfirm("fork")}>Fork session</button>
-                  <button class="danger" onClick=${() => setConfirm("archive")}>Archive session</button>
-                  <button class="sheetcancel" onClick=${close}>Cancel</button>`}
+              : confirm === "snooze"
+                ? html`
+                    <div class="sheethint">
+                      Parks the session and ends its live pane — it reopens by itself at the wake time.
+                    </div>
+                    ${SNOOZE_PRESETS.map(
+                      ([preset, label]) =>
+                        html`<button key=${preset} onClick=${() => snoozeSession(preset)}>${label}</button>`,
+                    )}
+                    <button class="sheetcancel" onClick=${() => setConfirm(null)}>Cancel</button>`
+                : confirm === "block"
+                  ? html`
+                      <div class="sheethint">
+                        Parks the session until you unblock it. The pane ends; the note says what it waits on.
+                      </div>
+                      <input
+                        class="blockinput"
+                        placeholder="blocked on…"
+                        value=${note}
+                        onInput=${(e) => setNote(e.target.value)}
+                        onKeyDown=${(e) => e.key === "Enter" && blockSession(note)}
+                      />
+                      <button class="accent-fill" onClick=${() => blockSession(note)}>Block</button>
+                      <button class="sheetcancel" onClick=${() => setConfirm(null)}>Cancel</button>`
+                  : html`
+                      <button onClick=${() => (close(), open(s.id))}>Open</button>
+                      ${canPark && html`<button onClick=${() => setConfirm("snooze")}>Snooze</button>`}
+                      ${canPark && html`<button onClick=${() => setConfirm("block")}>Block</button>`}
+                      ${parked &&
+                      html`<button onClick=${unparkSession}>
+                        ${s.inbox.note != null ? "Unblock" : "Unsnooze"}
+                      </button>`}
+                      ${section === "done" && html`<button onClick=${unarchiveSession}>Un-archive</button>`}
+                      <button onClick=${() => setConfirm("fork")}>Fork session</button>
+                      ${section !== "done" &&
+                      html`<button class="danger" onClick=${() => setConfirm("archive")}>Archive session</button>`}
+                      <button class="sheetcancel" onClick=${close}>Cancel</button>`}
         </div>
       </div>
     </div>

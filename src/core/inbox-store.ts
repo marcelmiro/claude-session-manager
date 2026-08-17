@@ -35,6 +35,8 @@ export interface DispositionRow {
   createdAt: number;
   /** A woken snooze already auto-reopened its pane — never spawn twice. */
   autoResumed: boolean;
+  /** The portkey device that set a snooze (wake push routes to it) — null = Mac-set. */
+  deviceId: string | null;
 }
 
 export interface InboxEvent {
@@ -52,7 +54,8 @@ CREATE TABLE IF NOT EXISTS dispositions(
   until        INTEGER,
   note         TEXT,
   created_at   INTEGER NOT NULL,
-  auto_resumed INTEGER NOT NULL DEFAULT 0
+  auto_resumed INTEGER NOT NULL DEFAULT 0,
+  device_id    TEXT
 );
 CREATE TABLE IF NOT EXISTS archived(
   session_id  TEXT PRIMARY KEY,
@@ -89,6 +92,13 @@ export class InboxStore {
     // throws when the refresher's write overlaps a verb.
     this.db.exec("PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 2000; PRAGMA synchronous = NORMAL;");
     this.db.exec(SCHEMA);
+    // Column-existence-guarded ALTER (not a blanket try/catch, which would also
+    // swallow disk-full/corruption errors): DBs created before device_id existed
+    // get the column added; CREATE IF NOT EXISTS never rewrites an existing table.
+    const cols = this.db.query("PRAGMA table_info(dispositions)").all() as Array<{ name: string }>;
+    if (!cols.some((c) => c.name === "device_id")) {
+      this.db.exec("ALTER TABLE dispositions ADD COLUMN device_id TEXT");
+    }
   }
 
   close(): void {
@@ -112,18 +122,18 @@ export class InboxStore {
   // ── verbs (each refuses invalid targets, mirrors ADR semantics) ──────────
 
   /** Park until `until`. Re-snoozing re-arms the wake auto-reopen. */
-  snooze(sessionId: string, until: number, now: number): boolean {
+  snooze(sessionId: string, until: number, now: number, deviceId: string | null = null): boolean {
     return this.db.transaction(() => {
       if (this.isArchived(sessionId)) return false;
       this.db
         .query(
-          `INSERT INTO dispositions(session_id, kind, until, note, created_at, auto_resumed)
-           VALUES (?, 'snoozed', ?, NULL, ?, 0)
+          `INSERT INTO dispositions(session_id, kind, until, note, created_at, auto_resumed, device_id)
+           VALUES (?, 'snoozed', ?, NULL, ?, 0, ?)
            ON CONFLICT(session_id) DO UPDATE SET
              kind='snoozed', until=excluded.until, note=NULL,
-             created_at=excluded.created_at, auto_resumed=0`,
+             created_at=excluded.created_at, auto_resumed=0, device_id=excluded.device_id`,
         )
-        .run(sessionId, until, now);
+        .run(sessionId, until, now, deviceId);
       this.event(sessionId, now, "snooze", { until });
       return true;
     })();
@@ -138,7 +148,7 @@ export class InboxStore {
            VALUES (?, 'blocked', NULL, ?, ?, 0)
            ON CONFLICT(session_id) DO UPDATE SET
              kind='blocked', until=NULL, note=excluded.note,
-             created_at=excluded.created_at, auto_resumed=0`,
+             created_at=excluded.created_at, auto_resumed=0, device_id=NULL`,
         )
         .run(sessionId, note, now);
       this.event(sessionId, now, "block", { note });
@@ -215,7 +225,7 @@ export class InboxStore {
 
   dispositions(): Map<string, DispositionRow> {
     const rows = this.db
-      .query("SELECT session_id, kind, until, note, created_at, auto_resumed FROM dispositions")
+      .query("SELECT session_id, kind, until, note, created_at, auto_resumed, device_id FROM dispositions")
       .all() as Array<{
       session_id: string;
       kind: DispositionKind;
@@ -223,6 +233,7 @@ export class InboxStore {
       note: string | null;
       created_at: number;
       auto_resumed: number;
+      device_id: string | null;
     }>;
     return new Map(
       rows.map((r) => [
@@ -234,6 +245,7 @@ export class InboxStore {
           note: r.note,
           createdAt: r.created_at,
           autoResumed: !!r.auto_resumed,
+          deviceId: r.device_id,
         },
       ]),
     );

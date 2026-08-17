@@ -935,6 +935,18 @@
         word-break: break-word;
       }
       .sheethint { color: var(--muted); font-size: 13px; line-height: 1.4; padding: 14px 18px 16px; text-align: center; }
+      /* block-note field in the session sheet — reads like a sheet row, types like an input */
+      .blockinput {
+        width: 100%;
+        padding: 12px 18px;
+        background: transparent;
+        border: none;
+        border-top: 0.5px solid var(--sheet-line);
+        border-radius: 0;
+        color: var(--fg);
+        font-size: 15px;
+      }
+      .blockinput:focus { outline: none; background: var(--peach-tint); }
       /* session action-sheet header: identifies the row being acted on (dot + name +
          repo·sub + age), reusing the list-row .name/.sub/.age/.dot type rules */
       .sheethead { display: flex; align-items: center; gap: 10px; padding: 13px 16px; text-align: left; border-bottom: 0.5px solid var(--sheet-line); }
