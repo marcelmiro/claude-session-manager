@@ -187,57 +187,47 @@ finish() {
 
 # ──────────────────────────────────────────────────────────────────────────
 # STAGES — author this section. One stage() per step the human takes.
-# STAGES — account + filesystem cutover. This wizard intentionally has a
-# prepare phase and a finish phase because logging out terminates the first run.
+# STAGES — macOS account cutover after the development layout is already in
+# ~/dev. This wizard intentionally has prepare and finish phases because logout
+# terminates the first run.
 # ──────────────────────────────────────────────────────────────────────────
 
 PHASE="${1:-prepare}"
 
 if [[ "$PHASE" == "prepare" ]]; then
-  TOTAL_STAGES=4
-  TOTAL_MINUTES=25
-  banner "CSM development-layout cutover — prepare"
+  TOTAL_STAGES=3
+  TOTAL_MINUTES=15
+  banner "CSM macOS account cutover — prepare"
 
-  stage "Confirm recoverability" 5
-  say "Keep two independent backups before changing the macOS account short name."
-  step "Confirm Time Machine (or another full-home backup) completed successfully."
-  step "Confirm the latest CSM manifest reports zero BLOCKER lines:"
-  note "bun run scripts/migrate-dev-layout.ts preflight --target-home /Users/marcel"
-  warn "A manifest protects Git/Claude path state; it is not a replacement for a home backup."
-  pause "Backups and the zero-blocker manifest are confirmed?"
+  stage "Confirm staged layout" 3
+  step "Confirm ~/dev/csm exists and ~/Documents/csm does not."
+  step "Confirm the VM already reports marcel, /Users/marcel, and a green doctor."
+  warn "A full backup is still recommended. Continuing without one accepts possible data loss."
+  pause "The staged Mac layout and completed VM migration are confirmed?"
 
-  stage "Create a temporary recovery administrator" 7
+  stage "Test the recovery administrator" 5
   open_url "https://support.apple.com/en-us/102547"
-  step "Open System Settings → Users & Groups → Add User."
-  step "Create a temporary Administrator account with a distinct name and password."
-  step "If FileVault is enabled, allow that administrator to unlock this Mac."
-  step "Log into the temporary account once, then return here; this proves it works."
-  warn "Do not remove the temporary administrator until Mac and VM verification both pass."
+  step "Restart and select Migration Admin at the first login screen."
+  step "Confirm its desktop loads, then log out and return to throxy."
+  warn "Do not remove Migration Admin until the renamed Mac passes verification."
   pause "The recovery administrator can log in and unlock the Mac?"
 
-  stage "Prepare the VM manifest" 5
-  say "The VM needs its own manifest because its linked-worktree inventory can differ."
-  step "Copy this standalone script into VM migration state (not into a repo):"
-  note "ssh vm 'mkdir -p ~/.config/csm/migrations'"
-  note "scp scripts/migrate-dev-layout.ts vm:.config/csm/migrations/migrate-dev-layout.ts"
-  step "Run the VM preflight and confirm zero blockers:"
-  note "ssh vm 'bun run ~/.config/csm/migrations/migrate-dev-layout.ts preflight --target-home /Users/marcel'"
-  step "Record an alternate/root-capable SSH or provider-console login; the throxy session must be stopped during rename."
-  pause "The VM manifest and alternate login are ready?"
-
-  stage "Stop and rename the Mac account" 8
+  stage "Preflight and rename the Mac account" 7
+  step "Generate a fresh home-only manifest and confirm zero BLOCKER lines:"
+  note "cd /Users/throxy/dev/csm"
+  note "bun run scripts/migrate-dev-layout.ts preflight --target-home /Users/marcel --source-root /Users/throxy/dev --target-root /Users/marcel/dev"
   step "Finish active Claude work, then stop CSM/tmux and quit editors/terminals using this account."
   step "Log out of throxy and log into the temporary administrator."
   step "Rename /Users/throxy to /Users/marcel, then control-click throxy in Users & Groups → Advanced Options."
   step "Set Account name to marcel and Home directory to /Users/marcel. Do not change the password."
   step "Restart, log into marcel, and run:"
-  note "/Users/marcel/Documents/csm/scripts/migrate-dev-layout-wizard.sh finish"
+  note "/Users/marcel/dev/csm/scripts/migrate-dev-layout-wizard.sh finish"
   warn "This prepare process will end when you log out; that is expected."
   finish
 elif [[ "$PHASE" == "finish" ]]; then
-  TOTAL_STAGES=4
-  TOTAL_MINUTES=25
-  banner "CSM development-layout cutover — finish"
+  TOTAL_STAGES=3
+  TOTAL_MINUTES=15
+  banner "CSM macOS account cutover — finish"
 
   stage "Verify the renamed Mac account" 4
   step "Confirm: whoami prints marcel and printf '%s\\n' \"$HOME\" prints /Users/marcel."
@@ -246,35 +236,19 @@ elif [[ "$PHASE" == "finish" ]]; then
   warn "If either check is wrong, stop and use the recovery administrator to correct Advanced Options."
   pause "The account name, home, owner, login, and secure token are correct?"
 
-  stage "Apply and verify the Mac layout" 6
-  step "Run the manifest-driven move (it refuses collisions and keeps path-state backups):"
-  note "cd /Users/marcel/Documents/csm && bun run scripts/migrate-dev-layout.ts apply"
-  step "Reinstall generated CSM integration from its new location:"
-  note "cd /Users/marcel/dev/csm && bun install && bun run bin/csm.ts setup"
+  stage "Repair the renamed home" 6
+  step "Apply the latest home-only manifest; repositories stay in ~/dev while absolute paths are repaired:"
+  note "cd /Users/marcel/dev/csm && bun run scripts/migrate-dev-layout.ts apply"
+  step "Reinstall generated CSM integration:"
+  note "bun install && bun run bin/csm.ts setup"
   step "Run bun run /Users/marcel/dev/csm/bin/csm.ts config, open the printed file, and confirm repositories.roots is [\"~/dev\"]."
   step "Verify: git -C ~/dev/csm worktree list; csm terminal status; csm"
-  pause "The Mac layout and CSM checks pass?"
-
-  stage "Rename and migrate the VM account" 10
-  say "Use the alternate/root-capable session, not a shell owned by throxy."
-  step "Stop user services/processes, then rename the login and home:"
-  note "sudo loginctl disable-linger throxy"
-  note "OLD_UID=\$(id -u throxy); sudo systemctl stop \"user@\$OLD_UID.service\""
-  note "sudo usermod -l marcel throxy"
-  note "getent group throxy >/dev/null && sudo groupmod -n marcel throxy || true"
-  note "sudo usermod -d /Users/marcel -m marcel"
-  step "Change any leading throxy: entry to marcel: in /etc/subuid and /etc/subgid; validate sudoers with visudo."
-  step "Enable persistence for the renamed login: sudo loginctl enable-linger marcel"
-  step "Update the Mac's SSH Host vm entry to User marcel, reconnect, then apply:"
-  note "ssh vm 'bun run ~/.config/csm/migrations/migrate-dev-layout.ts apply'"
-  step "From ~/dev/csm run bun install, csm setup, deploy/provision.sh, and deploy/doctor.sh."
-  pause "The VM doctor passes under marcel?"
+  pause "The Mac account, paths, Git worktrees, and CSM checks pass?"
 
   stage "Close the recovery window" 5
-  step "On both hosts verify ~/dev is flat and every linked worktree is under its base repo's .claude/worktrees/."
-  step "Resume one pre-migration Claude session on each host and confirm its transcript continues."
-  step "Reboot the VM and confirm linger restores the user services without an SSH login."
-  step "Only now remove the temporary Mac administrator. Keep its home only if it holds recovery data."
+  step "Restart the Mac once more and confirm marcel can unlock FileVault and log in."
+  step "Resume one pre-migration Claude session and confirm its transcript continues."
+  step "Only then remove Migration Admin. Keep its home only if it holds recovery data."
   step "Keep ~/.config/csm/migrations/*-backup until the next normal backup cycle succeeds."
   finish
 else
