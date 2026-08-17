@@ -5,7 +5,7 @@ import type { DispositionRow } from "./inbox-store";
 const NOW = 1_000_000;
 
 function snoozed(id: string, until: number, over: Partial<DispositionRow> = {}): [string, DispositionRow] {
-  return [id, { sessionId: id, kind: "snoozed", until, note: null, createdAt: NOW - 5_000, autoResumed: false, ...over }];
+  return [id, { sessionId: id, kind: "snoozed", until, note: null, createdAt: NOW - 5_000, autoResumed: false, deviceId: null, ...over }];
 }
 
 describe("dueWakes", () => {
@@ -17,11 +17,21 @@ describe("dueWakes", () => {
       snoozed("claimed", NOW - 1, { autoResumed: true }),
       snoozed("archived", NOW - 1),
       snoozed("live", NOW - 1),
-      ["blocked", { sessionId: "blocked", kind: "blocked" as const, until: null, note: "x", createdAt: 0, autoResumed: false }] as [string, DispositionRow],
+      ["blocked", { sessionId: "blocked", kind: "blocked" as const, until: null, note: "x", createdAt: 0, autoResumed: false, deviceId: null }] as [string, DispositionRow],
     ]);
     const woken = dueWakes(disp, new Map([["archived", NOW - 100]]), new Set(["live"]), NOW);
     expect(woken.map((w) => w.sessionId).sort()).toEqual(["due", "exactly-now"]);
     expect(woken[0]!.snoozedAt).toBe(NOW - 5_000);
+  });
+
+  test("the setter device rides along, so the wake push can target it", () => {
+    const disp = new Map([
+      snoozed("phone-set", NOW - 1, { deviceId: "dev-1" }),
+      snoozed("mac-set", NOW - 1),
+    ]);
+    const woken = dueWakes(disp, new Map(), new Set(), NOW);
+    expect(woken.find((w) => w.sessionId === "phone-set")!.deviceId).toBe("dev-1");
+    expect(woken.find((w) => w.sessionId === "mac-set")!.deviceId).toBeNull();
   });
 
   test("empty inputs wake nothing", () => {

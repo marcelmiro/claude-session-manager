@@ -19,6 +19,8 @@ import { capturePane, listPanes } from "./tmux";
 export interface DueWake {
   sessionId: string;
   snoozedAt: number;
+  /** The portkey device that set the snooze — the wake push targets it. Null = Mac-set. */
+  deviceId: string | null;
 }
 
 /**
@@ -36,7 +38,7 @@ export function dueWakes(
   for (const [id, d] of dispositions) {
     if (d.kind !== "snoozed" || d.until === null || d.until > now) continue;
     if (d.autoResumed || archived.has(id) || liveSessionIds.has(id)) continue;
-    due.push({ sessionId: id, snoozedAt: d.createdAt });
+    due.push({ sessionId: id, snoozedAt: d.createdAt, deviceId: d.deviceId });
   }
   return due;
 }
@@ -166,27 +168,30 @@ export async function wakePass(store: InboxStore, now = Date.now()): Promise<voi
       // Alert tier: a wake is an alarm the user set, so it alerts like any
       // attention event. Only once the session is genuinely ready — a resume
       // that never boots must not announce itself. On darwin that's the
-      // native banner; a headless host has no banner tier, so the wake
-      // broadcasts a Web Push to every device instead — a snooze set days
-      // ago has no meaningful "driving device" to target (the general wake
-      // push stays deferred per ADR 0013 addendum 2; this replaces a tier
-      // that cannot exist off-darwin, it doesn't add one). Both media share
-      // the nativeNotification gate on purpose: it is the "alert me on
-      // wake" toggle, and which medium delivers it is the platform's
-      // business, not a second setting.
+      // native banner. The push tier routes by who set the alarm: a snooze
+      // set FROM A PHONE (disposition carries its deviceId) pushes to that
+      // device on either platform — the darwin banner alone would wake only
+      // the Mac for an alarm the phone asked for. Without a setter
+      // subscription, darwin has already alerted via the banner; a headless
+      // host has no banner tier, so it broadcasts to every device instead
+      // (replacing a tier that cannot exist off-darwin, not adding one).
+      // All media share the nativeNotification gate on purpose: it is the
+      // "alert me on wake" toggle, and which medium delivers it is the
+      // platform's business, not a second setting.
       if (stamped && config.notifications.native) {
         const title = `☾ Woke — ${row.name ?? row.repo ?? w.sessionId.slice(0, 8)}`;
         const body = `snoozed ${snoozeSpan(w.snoozedAt, now)} ago — due now`;
-        if (process.platform === "darwin") {
-          sendNativeNotification(title, body, win);
-        } else {
-          try {
-            const { listDeviceIds, sendWebPush } = await import("./web-push");
-            await Promise.all(
-              listDeviceIds().map((id) => sendWebPush(id, { title, body, sessionId: w.sessionId })),
-            );
-          } catch {}
-        }
+        if (process.platform === "darwin") sendNativeNotification(title, body, win);
+        try {
+          const { getSubscription, listDeviceIds, sendWebPush } = await import("./web-push");
+          const targets =
+            w.deviceId && getSubscription(w.deviceId)
+              ? [w.deviceId]
+              : process.platform === "darwin"
+                ? []
+                : listDeviceIds();
+          await Promise.all(targets.map((id) => sendWebPush(id, { title, body, sessionId: w.sessionId })));
+        } catch {}
       }
     } catch {
       // best-effort per session; the claim stands (no wake retry storm), the

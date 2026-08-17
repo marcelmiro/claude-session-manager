@@ -9,19 +9,12 @@ describe("wakeAt", () => {
     expect(wakeAt(NOW, 16, "h")).toBe(NOW + 16 * 3_600_000);
   });
 
-  test("days land on local midnight, not a 24h offset", () => {
-    expect(wakeAt(NOW, 1, "d")).toBe(new Date(2026, 7, 12).getTime());
-    expect(wakeAt(NOW, 3, "d")).toBe(new Date(2026, 7, 14).getTime());
-  });
-
-  test("a 1d snooze pressed just after local midnight wakes the NEXT midnight", () => {
+  test("days are exact relative offsets too (1d = 24h from now, not midnight)", () => {
+    expect(wakeAt(NOW, 1, "d")).toBe(NOW + 86_400_000);
+    expect(wakeAt(NOW, 3, "d")).toBe(NOW + 3 * 86_400_000);
+    // pressed just after local midnight, 1d still means a full 24h away
     const justPastMidnight = new Date(2026, 7, 11, 0, 30).getTime();
-    expect(wakeAt(justPastMidnight, 1, "d")).toBe(new Date(2026, 7, 12).getTime());
-  });
-
-  test("day math crosses month boundaries on the local calendar", () => {
-    const aug31 = new Date(2026, 7, 31, 9, 0).getTime();
-    expect(wakeAt(aug31, 1, "d")).toBe(new Date(2026, 8, 1).getTime());
+    expect(wakeAt(justPastMidnight, 1, "d")).toBe(justPastMidnight + 86_400_000);
   });
 });
 

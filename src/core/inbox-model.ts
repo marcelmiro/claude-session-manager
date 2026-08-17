@@ -6,7 +6,7 @@
 // never race to write transitions.
 
 export type Disposition =
-  | { kind: "snoozed"; until: number } // ms timestamp; day snoozes land on local midnight
+  | { kind: "snoozed"; until: number } // ms timestamp; Mac day snoozes are exact 24h offsets, phone day presets land at 8AM local
   | { kind: "blocked"; note: string };
 
 export interface InboxSession {
@@ -56,9 +56,14 @@ export function localMidnight(ymd: string): number {
   return new Date(y!, m! - 1, d!).getTime();
 }
 
-/** Wake timestamp for a snooze: hours are exact, days land on local midnight. */
+/**
+ * Wake timestamp for a Mac digits-then-unit snooze: exact relative offsets on
+ * both units (1d = 24h from now). Days landed on local midnight until the
+ * portkey inbox landed; the user re-confirmed exact-relative as the intended
+ * Mac semantics, with the morning-anchored day wake living in presetWakeAt.
+ */
 export function wakeAt(now: number, n: number, unit: "h" | "d"): number {
-  return unit === "h" ? now + n * 3_600_000 : localMidnight(addDays(now, n));
+  return unit === "h" ? now + n * 3_600_000 : now + n * 86_400_000;
 }
 
 export const WAKE_PRESETS = ["1h", "4h", "tomorrow", "3d", "7d"] as const;

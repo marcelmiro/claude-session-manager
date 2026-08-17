@@ -154,3 +154,46 @@ Settled against ADR 15/16's single-host cutover, built ahead of it:
   still waits for the portkey inbox.
 - **Unit ownership stays split by platform**: provision.sh owns systemd
   units (like bridge/monitor), `csm setup` owns launchd and no-ops off-darwin.
+
+## Addendum 6: the portkey inbox (2026-08-18, grilled)
+
+Portkey's Home migrated to the inbox, as addendum 2 anticipated. Settled:
+
+- **Home IS the inbox** — the sectioned list replaces the repo-grouped list
+  rather than sitting beside it. A transitional `localStorage` toggle keeps
+  the classic view during rollout; it dies once the inbox has been lived
+  with. The navbar ⚡/🔄 chips are gone in inbox view: section header counts
+  answer the same question in place.
+- **The bridge serves sections pre-derived from the store** — one section
+  brain (`composeSessions` → `deriveSections`) for the sidebar and the
+  phone, so the two surfaces cannot disagree. The bridge's own discovery
+  contributes row detail only (pending, unread, scripts, names), joined by
+  id; discovery-only newborns map directly from status until the daemon's
+  next tick snapshots them. Re-deriving sections bridge-side from its own
+  discovery was rejected: two derivations drift.
+- **Verbs live in the long-press sheet**, one tap deep — snooze presets
+  `1h / 4h / Tomorrow 8AM / 3d / 7d`, block with a free-text note (empty
+  allowed), unpark, un-archive. Disposing from an open thread returns to
+  the list: the inbox-zero loop is action-and-move-on.
+- **Day-snooze semantics fork by surface** (user-decided): phone day
+  presets anchor at **8AM local** on the target calendar day — a
+  days-long park should greet the morning, not midnight. The Mac's
+  digits-then-unit day snoozes became **exact relative** (1d = 24h from
+  now) at the same moment — a deliberate revision of the shipped
+  local-midnight rule, re-confirmed when flagged; `fmtWakeAbs` grew a time
+  part for >24h wakes accordingly.
+- **The wake push targets the setter device.** The snooze disposition
+  records which portkey device set it (`device_id`, null = Mac-set); when
+  it comes due, the wake pass pushes to that device on either daemon
+  platform (darwin keeps its native banner beside the push — banner-only
+  would wake the Mac for an alarm the phone asked for). Mac-set snoozes
+  keep the platform behavior of addendum 5: banner on darwin, broadcast
+  off-darwin. This narrows addendum 2's deferred "general wake push" to
+  the one case that now has a meaningful target.
+- **Phone archives now write the store's Done fact.** The bridge's
+  `/archive` only killed the pane before, so phone archives never reached
+  RECENT. The store write is gated on the kill succeeding or the row being
+  pane-less per the bridge's own discovery — never blanket no-pane, which
+  would mark a live session done on a pane-resolution race.
+- **No History surface in v1** — Recently done keeps its 24h window; the
+  existing History screen remains the windowless archive.

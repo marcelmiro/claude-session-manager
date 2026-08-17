@@ -90,14 +90,14 @@ export function fmtWake(until: number, now: number): string {
   return `${Math.ceil(h / 24)}d`;
 }
 
-// Exact wake for the detail line: clock time within a day, else day/month
-// (>24h is always a day snooze, which wakes at local midnight — no time part).
+// Exact wake for the detail line: clock time within a day, else day/month plus
+// clock time — day snoozes are exact relative offsets (and phone-set day wakes
+// land at 8AM local), so a >24h wake has a meaningful time part.
 export function fmtWakeAbs(until: number, now: number): string {
   const dt = new Date(until);
-  if (until - now < 86_400_000) {
-    return `${dt.getHours()}:${String(dt.getMinutes()).padStart(2, "0")}`;
-  }
-  return `${dt.getDate()}/${dt.getMonth() + 1}`;
+  const hm = `${dt.getHours()}:${String(dt.getMinutes()).padStart(2, "0")}`;
+  if (until - now < 86_400_000) return hm;
+  return `${dt.getDate()}/${dt.getMonth() + 1} ${hm}`;
 }
 
 // Branch names bury the ticket ID mid-string; the prefix before it is the
