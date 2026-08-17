@@ -481,7 +481,9 @@ export function fixtureData(method: string, path: string, params?: URLSearchPara
   if (method === "POST" && path === "/sessions/new") return { ok: true, sessionId: FIXTURE_SESSIONS[0]!.id };
   if (
     method === "POST" &&
-    /^\/sessions\/[^/]+\/(decision|message|answer|read|rewind|snooze|block|unpark|unarchive)$/.test(path)
+    // `archive` included: its real handler now writes the inbox store even for pane-less
+    // ids (fixtures mode never populates discovery), which would pollute the real inbox.db.
+    /^\/sessions\/[^/]+\/(decision|message|answer|read|rewind|snooze|block|unpark|unarchive|archive)$/.test(path)
   ) {
     return { ok: true };
   }
