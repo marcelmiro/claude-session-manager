@@ -198,7 +198,10 @@ export async function buildManifest(options: {
     const name = basename(sourcePath);
     const targetPath = join(targetRoot, name);
     const targetBeforeAccountRename = replacePathPrefix(targetPath, targetHome, sourceHome);
-    if (await exists(targetPath) || await exists(targetBeforeAccountRename)) {
+    if (
+      (targetPath !== sourcePath && await exists(targetPath))
+      || (targetBeforeAccountRename !== sourcePath && await exists(targetBeforeAccountRename))
+    ) {
       blockers.push(`repository destination already exists: ${targetPath}`);
     }
     const listed = git(["worktree", "list", "--porcelain"], sourcePath);
@@ -218,7 +221,10 @@ export async function buildManifest(options: {
         blockers.push(`dirty or unreadable initialized submodule in ${record.path}`);
       }
       const wtTargetBeforeAccountRename = replacePathPrefix(wtTarget, targetHome, sourceHome);
-      if (await exists(wtTarget) || await exists(wtTargetBeforeAccountRename)) {
+      if (
+        (wtTarget !== record.path && await exists(wtTarget))
+        || (wtTargetBeforeAccountRename !== record.path && await exists(wtTargetBeforeAccountRename))
+      ) {
         blockers.push(`worktree destination already exists: ${wtTarget}`);
       }
       worktrees.push({

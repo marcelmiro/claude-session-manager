@@ -94,4 +94,51 @@ describe("dev-layout migration path handling", () => {
     expect(readFileSync(join(finalProjectDir, "session.jsonl"), "utf8")).toContain(finalWorktree);
     expect(readlinkSync(join(targetHome, ".local", "bin", "tool"))).toBe(join(finalRepo, "bin", "tool"));
   });
+
+  test("applies a home-only pass when repositories and worktrees already use the dev layout", async () => {
+    const root = mkdtempSync(`${realpathSync(tmpdir())}/csm-home-only-`);
+    const sourceHome = join(root, "old-user");
+    const targetHome = join(root, "new-user");
+    const sourceRoot = join(sourceHome, "dev");
+    const targetRoot = join(targetHome, "dev");
+    const repo = join(sourceRoot, "repo");
+    const worktree = join(repo, ".claude", "worktrees", "feature");
+    mkdirSync(repo, { recursive: true });
+    runGit(repo, "init", "-q", "-b", "main");
+    runGit(repo, "config", "user.email", "test@example.com");
+    runGit(repo, "config", "user.name", "Test");
+    writeFileSync(join(repo, "README.md"), "test\n");
+    runGit(repo, "add", "README.md");
+    runGit(repo, "commit", "-qm", "init");
+    runGit(repo, "branch", "feature");
+    mkdirSync(join(repo, ".claude", "worktrees"), { recursive: true });
+    runGit(repo, "worktree", "add", "-q", worktree, "feature");
+
+    const oldProjectName = encodeClaudeProjectPath(worktree);
+    const oldProjectDir = join(sourceHome, ".claude", "projects", oldProjectName);
+    mkdirSync(oldProjectDir, { recursive: true });
+    writeFileSync(join(oldProjectDir, "session.jsonl"), `${JSON.stringify({ cwd: worktree })}\n`);
+    mkdirSync(join(sourceHome, ".config", "csm", "migrations"), { recursive: true });
+
+    const manifest = await buildManifest({ sourceHome, targetHome, sourceRoot, targetRoot });
+    expect(manifest.blockers).toEqual([]);
+    const manifestRelative = join(".config", "csm", "migrations", "home-only-manifest.json");
+    writeFileSync(join(sourceHome, manifestRelative), `${JSON.stringify(manifest, null, 2)}\n`);
+    renameSync(sourceHome, targetHome);
+
+    const script = join(import.meta.dir, "migrate-dev-layout.ts");
+    const applied = Bun.spawnSync(["bun", "run", script, "apply", "--manifest", join(targetHome, manifestRelative)], {
+      cwd: targetHome,
+      env: { ...process.env, HOME: targetHome },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    expect(applied.exitCode, applied.stderr.toString()).toBe(0);
+
+    const finalRepo = join(targetRoot, "repo");
+    const finalWorktree = join(finalRepo, ".claude", "worktrees", "feature");
+    expect(runGit(finalRepo, "worktree", "list", "--porcelain")).toContain(`worktree ${finalWorktree}`);
+    const finalProjectDir = join(targetHome, ".claude", "projects", encodeClaudeProjectPath(finalWorktree));
+    expect(readFileSync(join(finalProjectDir, "session.jsonl"), "utf8")).toContain(finalWorktree);
+  });
 });
