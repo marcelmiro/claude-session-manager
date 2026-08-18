@@ -970,13 +970,17 @@
         text-align: center;
       }
       .snoozerow button:active { background: var(--peach-tint); }
-      /* /model & /effort selection options: left-aligned label + optional sub, ✓ on the current */
+      /* /model & /effort selection options: left-aligned label + optional sub, ✓ on the
+         current. Same row metrics as .vrow so all sheets share one rhythm. */
       .sheet .cfgopt {
         display: flex;
         align-items: center;
         justify-content: space-between;
         text-align: left;
         gap: 12px;
+        color: var(--fg);
+        font-size: 16px;
+        padding: 14px 18px;
       }
       .sheet .cfgopt.current { color: var(--mint); }
       .cfglabel { display: flex; align-items: baseline; gap: 8px; min-width: 0; }

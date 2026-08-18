@@ -3376,6 +3376,10 @@ function Detail() {
 // busy (the picker only opens at the prompt).
 function ActionSheet() {
   const m = menuText.value;
+  // Rewind discards the thread's tail (and, for "both", file changes) — like the session
+  // sheet's Archive, it takes a second tap that swaps the sheet to an explicit confirm.
+  const [confirm, setConfirm] = useState(null); // null | "conversation" | "both"
+  useEffect(() => setConfirm(null), [m]);
   if (m == null) return null;
   const close = () => (menuText.value = null);
   const session = sessions.value.find((s) => s.id === selectedId.value);
@@ -3385,18 +3389,39 @@ function ActionSheet() {
       <div class="sheet" onClick=${(e) => e.stopPropagation()}>
         <div class="sheetgroup">
           <div class="sheetpreview">${m.text}</div>
-          <button onClick=${() => copyMessage(m.text)}>Copy</button>
-          ${!m.assistant &&
-          !busy &&
-          m.upCount > 0 &&
-          html`<button class="danger" onClick=${() => rewind("conversation")}>Rewind conversation to here</button>`}
-          ${!m.assistant &&
-          !busy &&
-          m.upCount > 0 &&
-          m.canCode &&
-          html`<button class="danger" onClick=${() => rewind("both")}>Rewind code + conversation</button>`}
-          ${!m.assistant && !m.copyOnly && busy && html`<div class="sheethint">Rewind is available at the prompt.</div>`}
-          <button class="sheetcancel" onClick=${close}>Cancel</button>
+          ${confirm
+            ? html`
+                <div class="sheethint">
+                  ${confirm === "both"
+                    ? "Removes everything after this message and resets code files to that point — changes made since are discarded. The message returns to the composer."
+                    : "Removes everything after this message from the conversation. The message returns to the composer; code files stay as they are."}
+                </div>
+                <button class="danger-fill" onClick=${() => rewind(confirm)}>
+                  ${confirm === "both" ? "Rewind code + conversation" : "Rewind conversation"}
+                </button>
+                <button class="sheetcancel" onClick=${() => setConfirm(null)}>Cancel</button>`
+            : html`
+                <button class="vrow" onClick=${() => copyMessage(m.text)}>
+                  <span class="vg">${vicon(VICONS.copy)}</span>Copy
+                </button>
+                ${!m.assistant &&
+                !busy &&
+                m.upCount > 0 &&
+                html`<button class="vrow danger" onClick=${() => setConfirm("conversation")}>
+                  <span class="vg">${vicon(VICONS.undo)}</span>Rewind conversation to here
+                </button>`}
+                ${!m.assistant &&
+                !busy &&
+                m.upCount > 0 &&
+                m.canCode &&
+                html`<button class="vrow danger" onClick=${() => setConfirm("both")}>
+                  <span class="vg">${vicon(VICONS.code)}</span>Rewind code + conversation
+                </button>`}
+                ${!m.assistant &&
+                !m.copyOnly &&
+                busy &&
+                html`<div class="sheethint">Rewind is available at the prompt.</div>`}
+                <button class="sheetcancel" onClick=${close}>Cancel</button>`}
         </div>
       </div>
     </div>
@@ -3407,8 +3432,8 @@ function ActionSheet() {
 // being acted on (status dot + name + repo · subline + age), then the actions. Archive is
 // destructive (kills the live Claude process), so it takes a second tap that swaps the
 // sheet to an explicit confirm — no accidental kills from a fat-fingered long-press.
-// Stroke icons for the session sheet's glyph column — same feather family as the
-// bell/history buttons, tinted via currentColor (the reason these aren't emoji).
+// Stroke icons for the sheets' glyph columns (session, message) — same feather family
+// as the bell/history buttons, tinted via currentColor (the reason these aren't emoji).
 const vicon = (paths) =>
   html`<svg
     width="16"
@@ -3428,6 +3453,8 @@ const VICONS = {
   undo: '<path d="M1 4v6h6"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/>',
   fork: '<line x1="6" y1="3" x2="6" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/>',
   done: '<path d="M20 6L9 17l-5-5"/>',
+  copy: '<rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>',
+  code: '<polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/>',
 };
 
 // Phone snooze presets — one-tap chips in the session sheet; the server validates the
