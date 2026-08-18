@@ -466,9 +466,10 @@
       .navbar { display: flex; align-items: center; gap: 8px; padding-bottom: 4px; margin-bottom: 4px; }
       /* ≥44px hit area (Apple HIG) without shifting layout — negative margin offsets the pad */
       .iconbtn { background: none; border: none; padding: 11px 12px; margin: -11px -6px; min-width: 44px; min-height: 44px; display: inline-flex; align-items: center; justify-content: center; color: var(--muted); font-size: 20px; line-height: 1; }
-      .navtitle { flex: 1; min-width: 0; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-      .meta { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); }
-      .usage { font-variant-numeric: tabular-nums; }
+      /* title = list-row anatomy (status dot + AI name) so the detail header and the
+         home row read as the same object; the dot replaces the old status glyph */
+      .navtitle { flex: 1; min-width: 0; display: flex; align-items: center; gap: 4px; }
+      .navtitle .navname { flex: 1; min-width: 0; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
       .attn { background: none; border: 1px solid var(--peach); color: var(--peach); border-radius: 14px; padding: 4px 10px; font-size: 12px; font-weight: 600; white-space: nowrap; }
       .attn:active { background: var(--hover); }
 
@@ -950,6 +951,28 @@
       .sheet .accent-fill { color: var(--bg); background: var(--mint); font-weight: 700; }
       .sheet .accent-fill:active { background: var(--mint); filter: brightness(0.88); }
       .sheetcancel { font-weight: 600; color: var(--muted); }
+      /* verb rows: left-aligned menu rows with a glyph column — scan the glyphs, not the
+         words. Neutral text; red stays reserved for the destructive row. */
+      .sheet .vrow { display: flex; align-items: center; gap: 12px; text-align: left; color: var(--fg); font-size: 16px; padding: 14px 18px; }
+      .sheet .vrow.danger { color: var(--red); }
+      .sheet .vg { flex: none; width: 20px; text-align: center; color: var(--muted); font-size: 15px; }
+      .sheet .vrow.danger .vg { color: var(--red); }
+      /* one-tap snooze presets: a chip per wake, inline where the Snooze row would be */
+      .snoozerow { display: flex; align-items: center; gap: 8px; padding: 11px 18px; border-top: 0.5px solid var(--sheet-line); }
+      .snoozerow button {
+        display: inline-block;
+        width: auto;
+        flex: 1;
+        padding: 9px 0;
+        border: 1px solid var(--dim);
+        border-top: 1px solid var(--dim);
+        border-radius: 9px;
+        background: var(--surface);
+        color: var(--fg);
+        font-size: 14px;
+        text-align: center;
+      }
+      .snoozerow button:active { background: var(--peach-tint); }
       /* /model & /effort selection options: left-aligned label + optional sub, ✓ on the current */
       .sheet .cfgopt {
         display: flex;

@@ -1303,7 +1303,6 @@ async function forkSession() {
 
 // --- views --------------------------------------------------------------
 
-const DOT = { waiting: "⏸", running: "⦿", ready: "●", idle: "○", archived: "○" };
 const DOT_COLOR = {
   waiting: "var(--red)",
   running: "var(--mint)",
@@ -3306,7 +3305,10 @@ function Detail() {
               html`<div class=${"flash" + (flashKind.value ? ` ${flashKind.value}` : "")}>${flash.value}</div>`}
           <div class="navbar">
             <button class="iconbtn" onClick=${back} aria-label="Back to sessions">‹</button>
-            <div class="navtitle">${session ? session.label || session.repo : "session"}</div>
+            <div class="navtitle">
+              ${session && html`<span class="dot" style=${dotStyle(session)}></span>`}
+              <span class="navname">${session ? listTitle(session) : "session"}</span>
+            </div>
             ${(agents.length > 0 || scripts.length > 0) &&
             html`<button
               class="agentspill${activeWork > 0 ? "" : " archive"}"
@@ -3320,12 +3322,6 @@ function Detail() {
                       : ""}${scripts.length > 0 && html`⏳ <span class="run">${scripts.length}</span>`}`
                 : html`🤖 ${agents.length}`}
             </button>`}
-            <span class="meta">
-              ${status && html`<span style=${`color:${DOT_COLOR[status] ?? "var(--dim)"}`}>${DOT[status]}</span>`}
-              ${!statusline &&
-              usage &&
-              html`<span class="usage" style=${`color:${usageColor(usage.percent)}`}>${usage.percent}%</span>`}
-            </span>
             ${session &&
             html`<button
               class="iconbtn morebtn"
@@ -3339,10 +3335,13 @@ function Detail() {
               ⚡ ${otherAttention} ›
             </button>`}
           </div>
-          ${(statusline || mode) &&
+          ${(statusline || mode || usage) &&
           html`<div class="statusbar">
             ${mode && html`<span class="modebadge" style=${`color:${modeColor}`}>${mode}</span>`}
-            ${statusline && html`<span class="sltext">${statusline}</span>`}
+            ${statusline
+              ? html`<span class="sltext">${statusline}</span>`
+              : usage &&
+                html`<span class="sltext" style=${`color:${usageColor(usage.percent)}`}>${usage.percent}%</span>`}
           </div>`}
           ${questions
             ? html`<${QuestionCard} questions=${questions} toolUseId=${t.pendingTool && t.pendingTool.toolUseId} />`
@@ -3391,14 +3390,14 @@ function ActionSheet() {
 // being acted on (status dot + name + repo · subline + age), then the actions. Archive is
 // destructive (kills the live Claude process), so it takes a second tap that swaps the
 // sheet to an explicit confirm — no accidental kills from a fat-fingered long-press.
-// Phone snooze presets — one-tap commit; the server validates the same list and
-// computes the wake (hours exact, day presets at 8AM local).
+// Phone snooze presets — one-tap chips in the session sheet; the server validates the
+// same list and computes the wake (hours exact, day presets at 8AM local).
 const SNOOZE_PRESETS = [
-  ["1h", "1 hour"],
-  ["4h", "4 hours"],
-  ["tomorrow", "Tomorrow 8AM"],
-  ["3d", "3 days"],
-  ["7d", "7 days"],
+  ["1h", "1h"],
+  ["4h", "4h"],
+  ["tomorrow", "tmrw"],
+  ["3d", "3d"],
+  ["7d", "7d"],
 ];
 
 function SessionSheet() {
@@ -3447,44 +3446,53 @@ function SessionSheet() {
                   </div>
                   <button class="accent-fill" onClick=${forkSession}>Fork session</button>
                   <button class="sheetcancel" onClick=${() => setConfirm(null)}>Cancel</button>`
-              : confirm === "snooze"
+              : confirm === "block"
                 ? html`
                     <div class="sheethint">
-                      Parks the session and ends its live pane — it reopens by itself at the wake time.
+                      Parks the session until you unblock it. The pane ends; the note says what it waits on.
                     </div>
-                    ${SNOOZE_PRESETS.map(
-                      ([preset, label]) =>
-                        html`<button key=${preset} onClick=${() => snoozeSession(preset)}>${label}</button>`,
-                    )}
+                    <input
+                      class="blockinput"
+                      placeholder="blocked on…"
+                      value=${note}
+                      onInput=${(e) => setNote(e.target.value)}
+                      onKeyDown=${(e) => e.key === "Enter" && blockSession(note)}
+                    />
+                    <button class="accent-fill" onClick=${() => blockSession(note)}>Block</button>
                     <button class="sheetcancel" onClick=${() => setConfirm(null)}>Cancel</button>`
-                : confirm === "block"
-                  ? html`
-                      <div class="sheethint">
-                        Parks the session until you unblock it. The pane ends; the note says what it waits on.
-                      </div>
-                      <input
-                        class="blockinput"
-                        placeholder="blocked on…"
-                        value=${note}
-                        onInput=${(e) => setNote(e.target.value)}
-                        onKeyDown=${(e) => e.key === "Enter" && blockSession(note)}
-                      />
-                      <button class="accent-fill" onClick=${() => blockSession(note)}>Block</button>
-                      <button class="sheetcancel" onClick=${() => setConfirm(null)}>Cancel</button>`
-                  : html`
-                      ${selectedId.value !== s.id &&
-                      html`<button onClick=${() => (close(), open(s.id))}>Open</button>`}
-                      ${canPark && html`<button onClick=${() => setConfirm("snooze")}>Snooze</button>`}
-                      ${canPark && html`<button onClick=${() => setConfirm("block")}>Block</button>`}
-                      ${parked &&
-                      html`<button onClick=${unparkSession}>
-                        ${s.inbox.note != null ? "Unblock" : "Unsnooze"}
-                      </button>`}
-                      ${section === "done" && html`<button onClick=${unarchiveSession}>Un-archive</button>`}
-                      <button onClick=${() => setConfirm("fork")}>Fork session</button>
-                      ${section !== "done" &&
-                      html`<button class="danger" onClick=${() => setConfirm("archive")}>Archive session</button>`}
-                      <button class="sheetcancel" onClick=${close}>Cancel</button>`}
+                : html`
+                    ${selectedId.value !== s.id &&
+                    html`<button class="vrow" onClick=${() => (close(), open(s.id))}>
+                      <span class="vg">›</span>Open
+                    </button>`}
+                    ${canPark &&
+                    html`<div class="snoozerow">
+                      <span class="vg" title="snooze until…">☾</span>
+                      ${SNOOZE_PRESETS.map(
+                        ([preset, label]) =>
+                          html`<button key=${preset} onClick=${() => snoozeSession(preset)}>${label}</button>`,
+                      )}
+                    </div>`}
+                    ${canPark &&
+                    html`<button class="vrow" onClick=${() => setConfirm("block")}>
+                      <span class="vg">✗</span>Block…
+                    </button>`}
+                    ${parked &&
+                    html`<button class="vrow" onClick=${unparkSession}>
+                      <span class="vg">↺</span>${s.inbox.note != null ? "Unblock" : "Unsnooze"}
+                    </button>`}
+                    ${section === "done" &&
+                    html`<button class="vrow" onClick=${unarchiveSession}>
+                      <span class="vg">↺</span>Un-archive
+                    </button>`}
+                    <button class="vrow" onClick=${() => setConfirm("fork")}>
+                      <span class="vg">⑂</span>Fork session…
+                    </button>
+                    ${section !== "done" &&
+                    html`<button class="vrow danger" onClick=${() => setConfirm("archive")}>
+                      <span class="vg">✓</span>Archive session…
+                    </button>`}
+                    <button class="sheetcancel" onClick=${close}>Cancel</button>`}
         </div>
       </div>
     </div>
