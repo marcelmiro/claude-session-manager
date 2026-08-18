@@ -111,6 +111,9 @@ export function runSidebarRenderer(): void {
   // the new pane onto the row yet (~3s), so a second Enter must commit into
   // this window instead of double-spawning
   const resumedWindows = new Map<string, string>();
+  // tmux server start time from the last tick — a change means every window id
+  // the daemon remembers may now name an unrelated window (see the tick)
+  let tmuxEpoch: string | null = null;
   // peeked sessionId → when its window was last the viewed one (grace anchor)
   const peekLastActive = new Map<string, number>();
   let standing = false; // currently active (markers allow, prototype absent)
@@ -1320,6 +1323,17 @@ export function runSidebarRenderer(): void {
     if (firstTick || tickCount % 30 === 0) await installTmuxWiring();
     phase = "relays";
     if (firstTick) await respawnRelays();
+    // tmux reissues window ids from zero after a server restart, and the
+    // daemon (with its in-memory maps) lives on. resumedWindows is sound for
+    // one server lifetime — ids are never reused within it — but across a
+    // restart a stale entry names whatever unrelated window inherited its id,
+    // and Enter would commit the user into it. Epoch = server start time.
+    phase = "epoch";
+    try {
+      const epoch = (await Bun.$`tmux display-message -p ${"#{start_time}"}`.quiet().text()).trim();
+      if (tmuxEpoch !== null && epoch !== tmuxEpoch) resumedWindows.clear();
+      tmuxEpoch = epoch;
+    } catch {}
     phase = "ensure";
     await ensure();
     phase = "topology";

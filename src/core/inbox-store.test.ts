@@ -120,6 +120,39 @@ describe("snapshot + kv", () => {
     expect(JSON.parse(rows[0]!.data)).toEqual({ y: 2 });
   });
 
+  test("the replace keeps fact-holding rows a mid-tick verb seeded", () => {
+    const s = fresh();
+    // a verb + seed landing between a tick's preserve-input read and its save
+    s.snooze("seeded", 99, 1);
+    s.seedSnapshotRow("seeded", '{"id":"seeded"}');
+    s.seedSnapshotRow("factless", '{"id":"factless"}');
+    s.saveSnapshot([{ sessionId: "live", data: '{"id":"live"}' }], 2);
+    const ids = s.loadSnapshot().map((r) => r.sessionId);
+    expect(ids.sort()).toEqual(["live", "seeded"]); // factless seed wiped, fact kept
+  });
+
+  test("the replace does not pin History-aged archived rows", () => {
+    const s = fresh();
+    const day = 86_400_000;
+    s.archive("old", 1);
+    s.seedSnapshotRow("old", '{"id":"old"}');
+    s.saveSnapshot([], 2 * day); // archived >24h ago — History's business now
+    expect(s.loadSnapshot()).toHaveLength(0);
+  });
+
+  test("seeding never overwrites a discovery row, and stays stale for the inboxStale probe", () => {
+    const s = fresh();
+    s.saveSnapshot([{ sessionId: "a", data: '{"real":true}' }], 5);
+    s.snooze("a", 99, 5);
+    s.seedSnapshotRow("a", '{"seed":true}');
+    const rows = s.loadSnapshot();
+    expect(JSON.parse(rows[0]!.data)).toEqual({ real: true });
+    expect(rows[0]!.updatedAt).toBe(5);
+    s.snooze("b", 99, 5);
+    s.seedSnapshotRow("b", '{"seed":true}');
+    expect(s.loadSnapshot().find((r) => r.sessionId === "b")!.updatedAt).toBe(0);
+  });
+
   test("kv round-trips", () => {
     const s = fresh();
     expect(s.getKV("parked")).toBeNull();

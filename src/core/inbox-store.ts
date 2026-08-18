@@ -362,12 +362,28 @@ export class InboxStore {
     return r ? { parentId: r.parent_id, kind: r.kind } : null;
   }
 
-  // ── snapshot (opaque derived-activity cache, replaced wholesale) ─────────
+  // ── snapshot (opaque derived-activity cache, replaced per tick) ──────────
 
   saveSnapshot(rows: Array<{ sessionId: string; data: string }>, now: number): void {
     this.db.transaction(() => {
-      this.db.query("DELETE FROM snapshot").run();
-      const ins = this.db.query("INSERT INTO snapshot(session_id, data, updated_at) VALUES (?, ?, ?)");
+      // Not a blind DELETE-all: a bridge verb can write a fact + seed a snapshot
+      // row DURING a discovery tick — after the tick loaded its preserve inputs,
+      // before this save — and a wholesale wipe would strand that fact invisibly
+      // (composeSessions has nothing to overlay it onto). Keeping fact-holding
+      // rows here makes the replace atomic with the fact tables, closing the
+      // read-compute-write race in the one place every writer goes through.
+      // Archived is recency-bounded to the 24h RECENT window so History-aged ids
+      // don't pin snapshot rows forever.
+      this.db
+        .query(
+          `DELETE FROM snapshot
+           WHERE session_id NOT IN (SELECT session_id FROM dispositions)
+             AND session_id NOT IN (SELECT session_id FROM archived WHERE archived_at > ?)`,
+        )
+        .run(now - 86_400_000);
+      const ins = this.db.query(
+        "INSERT OR REPLACE INTO snapshot(session_id, data, updated_at) VALUES (?, ?, ?)",
+      );
       for (const r of rows) ins.run(r.sessionId, r.data, now);
     })();
   }

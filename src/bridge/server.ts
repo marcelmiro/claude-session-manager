@@ -358,6 +358,12 @@ async function reposPayload(): Promise<Array<{ name: string; path: string; branc
 }
 
 let sessionsCache: { ts: number; value: unknown } | null = null;
+// Stable age anchor for sessions whose transcript holds no timestamped turn yet
+// (lastTurnAt absent): first time this bridge saw the id. A fresh `now` per
+// recompute would make the payload differ every pass and self-sustain the
+// change-broadcast → refetch cycle (see DiscoverySeen.since). Pruned to the
+// tracked set each pass, so it can't grow unbounded.
+const firstSeenAt = new Map<string, number>();
 // The full session set from the last completed discovery — reused by /repos so opening
 // the wizard doesn't re-run the ps/tmux/git sweep the projection just paid for.
 let lastDiscovered: Session[] | null = null;
@@ -751,6 +757,14 @@ async function computeSessionsPayload(): Promise<unknown> {
       const composed = composeSessions(store);
       const snapAt = store.loadSnapshot().map((r) => r.updatedAt);
       inboxStale = snapAt.length === 0 || Math.max(...snapAt) < now - 10_000;
+      const trackedIds = new Set(tracked.map((s) => s.id));
+      for (const id of firstSeenAt.keys()) if (!trackedIds.has(id)) firstSeenAt.delete(id);
+      const firstSeen = (id: string): number => {
+        const v = firstSeenAt.get(id);
+        if (v !== undefined) return v;
+        firstSeenAt.set(id, now);
+        return now;
+      };
       const discovery = new Map<string, DiscoverySeen>(
         tracked.map((s) => {
           const pt = pendingById.get(s.id);
@@ -763,7 +777,7 @@ async function computeSessionsPayload(): Promise<unknown> {
                 !!(s.tmuxPane && unread.has(s.tmuxPane.paneId)) ||
                 approvalIds.has(s.id) ||
                 (pt?.name === "AskUserQuestion" && !!pt.question),
-              since: s.lastTurnAt?.getTime(),
+              since: s.lastTurnAt?.getTime() ?? firstSeen(s.id),
             },
           ];
         }),
