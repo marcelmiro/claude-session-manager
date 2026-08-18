@@ -1549,11 +1549,16 @@ function List() {
   ];
   const inboxGroups = !inbox
     ? []
-    : SECTIONS.map(([key, title]) => ({
-        key,
-        title,
-        rows: all.filter((s) => s.inbox && s.inbox.section === key),
-      })).filter((g) => g.rows.length > 0);
+    : SECTIONS.map(([key, title]) => {
+        const rows = all.filter((s) => s.inbox && s.inbox.section === key);
+        // Blocked-on-you floats above the prompt-sitters: answering an open question/
+        // approval unblocks compute, a ready session just waits for instructions.
+        // Stable sort, so oldest-first survives as the tiebreak within each band.
+        if (key === "needs-you") {
+          rows.sort((a, b) => (a.pending || a.status === "waiting" ? 0 : 1) - (b.pending || b.status === "waiting" ? 0 : 1));
+        }
+        return { key, title, rows };
+      }).filter((g) => g.rows.length > 0);
   const renderInboxRow = (s) => {
     const ib = s.inbox;
     // Sub-line = repo + the parked detail (wake countdown / block note) only. The
@@ -1567,17 +1572,16 @@ function List() {
     // Marks are inline prefixes of the name (like ⏳/☾ always were) — a reserved dot
     // column read as an empty gutter on rows with nothing to say. Pending/unread keep
     // the glowing dot, running keeps its mint, parked shows its state glyph.
-    // Row marks speak the tmux window-name vocabulary — ⚡ unread, 🔄 turn running,
-    // ⏳ script-waiting — so the phone and the Mac read the same. Unlike the window
-    // name's single prefix slot, marks stack here: ⚡ is the "have I seen it" axis,
-    // the state mark is "what's it doing". The only dot left is the pending alarm.
+    // Row marks speak the tmux window-name vocabulary (⚡ unread, ⏳ script-waiting)
+    // and mark the EXCEPTION, never the section's default — a running row inside
+    // RUNNING carries nothing, ⏳ earns its place by contradicting the section
+    // ("looks running, the AI is actually done"). Marks stack (⚡ is the "have I
+    // seen it" axis); the only dot left is the pending alarm.
     const mark = parked
       ? html`<span class="markglyph ${blocked ? "blocked" : ""}">${blocked ? "✗" : "☾"}</span>`
       : s.pending
         ? html`<span class="markdot" style=${dotStyle(s)}></span>`
-        : s.status === "running"
-          ? html`<span class="runmark" title="running">🔄</span>`
-          : null;
+        : null;
     const zap = s.unread && html`<span class="zapmark" title="unread">⚡</span>`;
     return html`
       <button
