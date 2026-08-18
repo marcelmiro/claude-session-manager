@@ -59,7 +59,10 @@
         --code-bg: #000; /* code blocks: deliberately darker than --bg */
         --border: #222; /* nav/dock hairline dividers */
         --sheet-bg: #1f1f1f; /* iOS action-sheet group surface (lighter than --surface) */
-        --sheet-line: #343434; /* action-sheet row dividers */
+        /* action-sheet row dividers — translucent at 1px, not 0.5px solid: iOS rounds
+           half-pixel borders away when the edge lands off the pixel grid, which made
+           some sheet hairlines (e.g. above the snooze row) vanish on device */
+        --sheet-line: rgba(255, 255, 255, 0.09);
         --user-bubble: #2f2a24; /* warm-tinted user message bubble */
         --user-bubble-border: #3a3026;
         --scrim: rgba(0, 0, 0, 0.45); /* action-sheet backdrop */
@@ -811,8 +814,10 @@
       /* ⚡ = unread, the same mark the Mac puts on the tmux window name */
       .row .zapmark { font-size: 11px; margin-right: 4px; vertical-align: 1px; }
       /* inbox sections breathe more than repo groups — they're different queues,
-         not one list's subheadings */
+         not one list's subheadings. The header hugs its own rows (tight below) while
+         the big top margin does the separating. */
       .group.inboxsec { margin-top: 26px; }
+      .group.inboxsec .repo { margin-bottom: 2px; }
       .group.inboxsec:first-child { margin-top: 4px; }
       /* recently-done header doubles as its collapse toggle — reset the button chrome
          so it renders exactly like the other section headers, plus a chevron */
@@ -935,7 +940,7 @@
         font-size: 17px;
         color: var(--peach);
       }
-      .sheet button + button, .sheetgroup button { border-top: 0.5px solid var(--sheet-line); }
+      .sheet button + button, .sheetgroup button { border-top: 1px solid var(--sheet-line); }
       .sheetgroup > button:first-child { border-top: none; }
       .sheet button:active { background: var(--hover); }
       .sheet .danger { color: var(--red); }
@@ -955,7 +960,7 @@
       .sheet .vg { flex: none; width: 20px; display: inline-flex; align-items: center; justify-content: center; color: var(--muted); }
       .sheet .vrow.danger .vg { color: var(--red); }
       /* one-tap snooze presets: a chip per wake, inline where the Snooze row would be */
-      .snoozerow { display: flex; align-items: center; gap: 8px; padding: 11px 18px; border-top: 0.5px solid var(--sheet-line); }
+      .snoozerow { display: flex; align-items: center; gap: 8px; padding: 11px 18px; border-top: 1px solid var(--sheet-line); }
       .snoozerow button {
         display: inline-block;
         width: auto;
@@ -992,7 +997,7 @@
         line-height: 1.35;
         color: var(--muted);
         text-align: left;
-        border-bottom: 0.5px solid var(--sheet-line);
+        border-bottom: 1px solid var(--sheet-line);
         max-height: 64px;
         overflow: hidden;
         white-space: pre-wrap;
@@ -1005,7 +1010,7 @@
         padding: 12px 18px;
         background: transparent;
         border: none;
-        border-top: 0.5px solid var(--sheet-line);
+        border-top: 1px solid var(--sheet-line);
         border-radius: 0;
         color: var(--fg);
         font-size: 15px;
@@ -1013,7 +1018,7 @@
       .blockinput:focus { outline: none; background: var(--peach-tint); }
       /* session action-sheet header: identifies the row being acted on (dot + name +
          repo·sub + age), reusing the list-row .name/.sub/.age/.dot type rules */
-      .sheethead { display: flex; align-items: center; gap: 10px; padding: 13px 16px; text-align: left; border-bottom: 0.5px solid var(--sheet-line); }
+      .sheethead { display: flex; align-items: center; gap: 10px; padding: 13px 16px; text-align: left; border-bottom: 1px solid var(--sheet-line); }
       .sheethead .name { font-size: 15px; }
 
       /* card context label (question / approve / running) — was unstyled body text */
