@@ -16,7 +16,11 @@ import {
 
 export interface InboxRowMeta {
   section: Section;
-  /** The age the row displays: effectiveSince, or archivedAt for done rows. */
+  /**
+   * The age the row displays: effectiveSince, archivedAt for done rows, and
+   * the script handover for script-waiting running rows — the same anchor the
+   * sidebar ages those rows from, so the two surfaces show the same number.
+   */
   since: number;
   /** Wake timestamp — snoozed-and-not-yet-due rows only. */
   wakeAt?: number;
@@ -37,7 +41,12 @@ export interface DiscoverySeen {
 function metaOf(s: InboxSession, section: Section, now: number): InboxRowMeta {
   const m: InboxRowMeta = {
     section,
-    since: section === "done" ? (s.archivedAt ?? s.since) : effectiveSince(s, now),
+    since:
+      section === "done"
+        ? (s.archivedAt ?? s.since)
+        : s.script
+          ? (s.scriptSince ?? s.since)
+          : effectiveSince(s, now),
   };
   if (s.disposition?.kind === "snoozed" && s.disposition.until > now) m.wakeAt = s.disposition.until;
   if (s.disposition?.kind === "blocked") m.note = s.disposition.note;

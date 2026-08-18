@@ -43,6 +43,20 @@ describe("orderInboxRows", () => {
     expect(rows[0]!.meta).toEqual({ section: "needs-you", since: NOW - 5 * 60_000, woken: true });
   });
 
+  test("a script-waiting running row ages from the script handover, like the sidebar", () => {
+    const rows = orderInboxRows(
+      [
+        sess({ id: "scr", running: { finishAt: Number.MAX_SAFE_INTEGER }, script: true, scriptSince: NOW - 10 * 60_000 }),
+        sess({ id: "turn", running: { finishAt: Number.MAX_SAFE_INTEGER } }),
+      ],
+      new Map(),
+      NOW,
+    );
+    const by = Object.fromEntries(rows.map((r) => [r.id, r.meta.since]));
+    expect(by["scr"]).toBe(NOW - 10 * 60_000);
+    expect(by["turn"]).toBe(NOW - H);
+  });
+
   test("archived >24h is History — dropped entirely", () => {
     const rows = orderInboxRows([sess({ id: "old", archivedAt: NOW - D - 1 })], new Map(), NOW);
     expect(rows).toEqual([]);
