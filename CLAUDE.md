@@ -300,6 +300,7 @@ Sessions carry a lifecycle (Needs you → Running → Parked → Recently done);
 - **Types**: all in `src/types.ts`. `DisplayRow` = `"repo-header" | "separator" | "session" | "session-detail" | "archive-collapsed"`
 - **Error handling**: all shell/IO in try/catch returning empty defaults. Never crash the TUI
 - **No external deps** beyond `blessed`
+- **Transcript IO in long-lived processes** (bridge, daemon): stream via `jsonlLines()` or windowed byte reads — never `.text()` a multi-MB JSONL. Freed malloc pages don't return to the OS, so one full read permanently ratchets RSS (bridge hit a ~1GB plateau with a 3MB JS heap; `Bun.gc(true)` doesn't lower it)
 
 ## Vesper Color Palette
 
@@ -361,6 +362,7 @@ Restore: `resurrect-sessions.json` (coordinate→{sessionId, cwd}) + `tmux list-
 ## Key references
 
 - `docs/adr/` — decision records: why something is the way it is, and what was rejected
+- `docs/portkey-design-loop.md` — how to view/drive portkey in a real browser (fixtures bridge + inspect-ui)
 - `ideas.txt` — feature backlog (worktrees, search, Cursor integration, etc.)
 - Session data: `~/.claude/projects/*/sessions-index.json`
 - Session logs: `~/.claude/projects/*/{sessionId}.jsonl`
