@@ -372,6 +372,22 @@ export class InboxStore {
     })();
   }
 
+  /**
+   * Insert a snapshot row for a session discovery has never seen — a verb
+   * (snooze/block/archive) on such an id writes a fact composeSessions has no
+   * row to overlay onto, so the session would vanish from the inbox instead of
+   * filing under Parked/Done. INSERT OR IGNORE keeps discovery the snapshot's
+   * owner: an existing row is never touched, and the preserve rule carries the
+   * seeded row (its disposition/archived fact) across wholesale replaces.
+   * updated_at is 0, not now: it feeds the inboxStale probe, which measures the
+   * DAEMON's last tick — a bridge-side seed must not mask a dead daemon.
+   */
+  seedSnapshotRow(sessionId: string, data: string): void {
+    this.db
+      .query("INSERT OR IGNORE INTO snapshot(session_id, data, updated_at) VALUES (?, ?, 0)")
+      .run(sessionId, data);
+  }
+
   loadSnapshot(): Array<{ sessionId: string; data: string; updatedAt: number }> {
     const rows = this.db.query("SELECT session_id, data, updated_at FROM snapshot").all() as Array<{
       session_id: string;

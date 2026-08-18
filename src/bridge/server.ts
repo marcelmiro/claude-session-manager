@@ -102,6 +102,8 @@ const STATIC: Record<string, string> = {
   "/diff-lines.js": "../../shared/diff-lines.js",
   // Notification-tap attribution, shared with its test suite — served unbuilt.
   "/tap-target.js": "../../shared/tap-target.js",
+  // Wake countdown, shared with the sidebar (sidebar/ansi.ts) — served unbuilt.
+  "/wake-format.js": "../../shared/wake-format.js",
   "/manifest.json": "manifest.json",
   "/icon-512.png": "icon-512.png",
   "/apple-touch-icon.png": "apple-touch-icon.png",
@@ -380,11 +382,48 @@ function getInboxStore(): InboxStore | null {
 }
 
 /**
+ * A verb (snooze/block/archive) on a session the daemon has never snapshotted —
+ * born since its last 3s tick, or the daemon down since before the session
+ * existed — writes a fact composeSessions can't surface: the overlay only lands
+ * on snapshot rows, so the session would vanish from the inbox and the fact
+ * would sit stranded. Seed a minimal snapshot row from the bridge's own
+ * discovery; the daemon's preserve rule then carries it like any parked/done
+ * row. Best-effort — with no discovery row to describe the session, the verb
+ * still applies and the id degrades to History-only, as before.
+ */
+function seedInboxRow(store: InboxStore, id: string, now: number): void {
+  try {
+    const s = (lastDiscovered ?? []).find((x) => x.id === id);
+    if (!s) return;
+    const row: InboxSession = {
+      id,
+      repo: s.repo,
+      name: s.name,
+      reason: "turn-done",
+      since: s.lastTurnAt?.getTime() ?? now,
+      repoPath: s.repoPath,
+      branch: s.branch,
+    };
+    store.seedSnapshotRow(id, JSON.stringify(row));
+  } catch {
+    // seed is visibility-only; the verb's own write already succeeded
+  }
+}
+
+/** The /sessions row schema — projectSession is its single source of truth. */
+type ProjectedRow = ReturnType<typeof projectSession>;
+
+/**
  * Minimal projected row for a store-known session outside discovery's window
  * (pane-less parked, or done approaching the 24h edge): enough for the row +
  * thread-open + restore bar. Everything richer needs a live discovery hit.
+ * Typed against ProjectedRow so a renamed/retyped field in projectSession is a
+ * compile error here instead of a silently diverging phone row.
  */
-async function projectSnapshotOnly(s: InboxSession, since: number) {
+async function projectSnapshotOnly(
+  s: InboxSession,
+  since: number,
+): Promise<Omit<ProjectedRow, "statusSource"> & { statusSource: "inbox-snapshot" }> {
   const at = new Date(since).toISOString();
   return {
     id: s.id,
@@ -724,6 +763,7 @@ async function computeSessionsPayload(): Promise<unknown> {
                 !!(s.tmuxPane && unread.has(s.tmuxPane.paneId)) ||
                 approvalIds.has(s.id) ||
                 (pt?.name === "AskUserQuestion" && !!pt.question),
+              since: s.lastTurnAt?.getTime(),
             },
           ];
         }),
@@ -1289,12 +1329,18 @@ async function route(req: Request): Promise<Response> {
   if (method === "POST" && archive) {
     const id = decodeURIComponent(archive[1]!);
     const result = await archiveSession(id);
-    const paneless = !(lastDiscovered ?? []).find((s) => s.id === id)?.tmuxPane;
+    // Discovery-never-ran is UNKNOWN, not pane-less: a null lastDiscovered would
+    // otherwise classify every id as pane-less and let the store write through a
+    // failed kill — exactly the race the gate exists to block.
+    const paneless =
+      lastDiscovered !== null && !lastDiscovered.find((s) => s.id === id)?.tmuxPane;
     let stored = false;
     const store = getInboxStore();
     if (store && (result.ok || paneless)) {
       try {
-        stored = store.archive(id, Date.now());
+        const now = Date.now();
+        seedInboxRow(store, id, now);
+        stored = store.archive(id, now);
       } catch {
         // store write failed — the pane-kill result still answers the client
       }
@@ -1323,6 +1369,7 @@ async function route(req: Request): Promise<Response> {
     if (!store.snooze(id, presetWakeAt(now, body.preset), now, deviceOf(req) ?? null)) {
       return json({ ok: false, reason: "archived" }, 409);
     }
+    seedInboxRow(store, id, now);
     await archiveSession(id).catch(() => {}); // kill the pane; no-pane is fine
     sessionsCache = null;
     broadcast({ type: "session-changed", id });
@@ -1337,6 +1384,7 @@ async function route(req: Request): Promise<Response> {
     const store = getInboxStore();
     if (!store) return json({ ok: false, reason: "no-store" }, 500);
     if (!store.block(id, note, Date.now())) return json({ ok: false, reason: "archived" }, 409);
+    seedInboxRow(store, id, Date.now());
     await archiveSession(id).catch(() => {});
     sessionsCache = null;
     broadcast({ type: "session-changed", id });

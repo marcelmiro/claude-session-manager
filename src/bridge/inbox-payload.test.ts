@@ -77,6 +77,15 @@ describe("orderInboxRows", () => {
     expect(rows[1]!.snapshot).toBeUndefined();
   });
 
+  test("a newborn with a discovery age anchor keeps it, so recomputes stay byte-stable", () => {
+    const rows = orderInboxRows(
+      [],
+      new Map([["born", seen({ status: "ready", since: NOW - 5 * 60_000 })]]),
+      NOW,
+    );
+    expect(rows[0]!.meta).toEqual({ section: "needs-you", since: NOW - 5 * 60_000 });
+  });
+
   test("discovery ids already in the inbox are never duplicated as newborns", () => {
     const rows = orderInboxRows(
       [sess({ id: "a" })],

@@ -1162,6 +1162,15 @@ export function runSidebarRenderer(): void {
         peekLastActive.delete(id);
         continue;
       }
+      // A turn in flight must never be reaped: answering an approval or an
+      // AskUserQuestion is a single keystroke that writes no prompt record, so
+      // the transcript re-check below is blind to that engagement — but the
+      // discovery snapshot sees the running turn it started. Keep and re-arm;
+      // the window becomes reapable again once the turn ends.
+      if (s?.running && s.running.finishAt > now) {
+        peekLastActive.set(id, now);
+        continue;
+      }
       let engaged = false;
       try {
         const path = await resolveTranscriptPath(id);
@@ -1173,6 +1182,24 @@ export function runSidebarRenderer(): void {
           return true;
         });
       } else {
+        // tmux reassigns @N ids after a server restart, so a durable peek
+        // record can name an unrelated window that inherited the id. Kill only
+        // a window still hosting this session's `claude -r`; any other
+        // occupant means the peek window itself is gone — drop the record.
+        let hostsSession = false;
+        try {
+          const cmds =
+            await Bun.$`tmux list-panes -t ${peek.windowId} -F ${"#{pane_start_command}"}`.quiet().text();
+          hostsSession = cmds.includes(id);
+        } catch {}
+        if (!hostsSession) {
+          applyVerb(() => {
+            store.clearPeek(id);
+            return true;
+          });
+          peekLastActive.delete(id);
+          continue;
+        }
         const win = wins.get(peek.windowId);
         if (win?.stubPane) paneToWin.delete(win.stubPane);
         wins.delete(peek.windowId);

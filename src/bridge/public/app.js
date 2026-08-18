@@ -10,6 +10,8 @@ import { Marked } from "marked";
 import { formatTimeAgo } from "/time-ago.js";
 // Unified-patch parser, served unbuilt and covered by shared/diff-lines.test.ts.
 import { parseDiffLines, narrowIndent } from "/diff-lines.js";
+// Wake countdown — the same module the Mac sidebar renders from (sidebar/ansi.ts).
+import { formatWakeIn } from "/wake-format.js";
 // Notification-tap attribution, served unbuilt and covered by shared/tap-target.test.ts.
 import { tapTarget } from "/tap-target.js";
 
@@ -1436,15 +1438,6 @@ function formatAge(iso) {
   return formatTimeAgo(iso, { now: tick.value, verbose: true });
 }
 
-// Relative time UNTIL a wake (the Mac sidebar's fmtWake): "45m" / "3h" / "2d".
-function wakeIn(until) {
-  const m = Math.max(0, Math.ceil((until - tick.value) / 60_000));
-  if (m < 60) return `${m}m`;
-  const h = Math.ceil(m / 60);
-  if (h < 24) return `${h}h`;
-  return `${Math.ceil(h / 24)}d`;
-}
-
 // Row title mirrors `csm list`: the tmux-style AI name (repo is the group header, so
 // just the name). Falls back to the summary/branch label only when unnamed.
 function listTitle(s) {
@@ -1563,7 +1556,13 @@ function List() {
     const parked = ib.section === "parked";
     const blocked = ib.note != null;
     const repo = s.repo === "~" ? "home" : s.repo;
-    const detail = parked ? (blocked ? ib.note : ib.wakeAt ? `in ${wakeIn(ib.wakeAt)}` : "") : "";
+    const detail = parked
+      ? blocked
+        ? ib.note
+        : ib.wakeAt
+          ? `in ${formatWakeIn(ib.wakeAt, tick.value)}`
+          : ""
+      : "";
     const sub = detail ? `${repo} · ${detail}` : repo;
     // Marks are inline prefixes of the name (like ⏳/☾ always were) — a reserved dot
     // column read as an empty gutter on rows with nothing to say. Pending/unread keep

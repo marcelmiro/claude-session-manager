@@ -81,14 +81,9 @@ export function fmtAge(ms: number): string {
 
 // Wake display on rows: RELATIVE ("in how long"), matching the age style —
 // "8-14" style dates read as noise at a glance. Exact moment lives in the
-// selection detail line via fmtWakeAbs.
-export function fmtWake(until: number, now: number): string {
-  const m = Math.max(0, Math.ceil((until - now) / 60_000));
-  if (m < 60) return `${m}m`;
-  const h = Math.ceil(m / 60);
-  if (h < 24) return `${h}h`;
-  return `${Math.ceil(h / 24)}d`;
-}
+// selection detail line via fmtWakeAbs. The math lives in shared/wake-format.js
+// because portkey renders the same countdown (served as /wake-format.js).
+export { formatWakeIn as fmtWake } from "../shared/wake-format";
 
 // Exact wake for the detail line: clock time within a day, else day/month plus
 // clock time — day snoozes are exact relative offsets (and phone-set day wakes

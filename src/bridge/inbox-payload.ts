@@ -30,12 +30,21 @@ export interface InboxRowMeta {
   woken?: boolean;
 }
 
+import type { Session } from "../types";
+
 /** What the bridge's own discovery knows about a session id this pass. */
 export interface DiscoverySeen {
-  status: string;
+  status: Session["status"];
   live: boolean;
   /** Pending approval/question or unread ⚡ — the classic list's reachability safeguard. */
   needsYou: boolean;
+  /**
+   * Stable age anchor for a newborn row (the session's last turn). Must not
+   * change across recomputes: a fresh `now` re-stamp makes the payload differ
+   * every pass, and the change-broadcast → refetch cycle then self-sustains
+   * for as long as a newborn exists (permanently, when the daemon is down).
+   */
+  since?: number;
 }
 
 function metaOf(s: InboxSession, section: Section, now: number): InboxRowMeta {
@@ -78,18 +87,20 @@ export function orderInboxRows(
 ): InboxRow[] {
   const sections = deriveSections(composed, now);
   const inInbox = new Set(composed.map((s) => s.id));
-  const newborn: { "needs-you": string[]; running: string[] } = { "needs-you": [], running: [] };
+  type Newborn = { id: string; since: number };
+  const newborn: { "needs-you": Newborn[]; running: Newborn[] } = { "needs-you": [], running: [] };
   for (const [id, d] of discovery) {
     if (inInbox.has(id)) continue;
-    if (d.live && d.status === "running") newborn.running.push(id);
+    const born = { id, since: d.since ?? now };
+    if (d.live && d.status === "running") newborn.running.push(born);
     else if ((d.live && (d.status === "waiting" || d.status === "ready")) || d.needsYou) {
-      newborn["needs-you"].push(id);
+      newborn["needs-you"].push(born);
     }
   }
   const out: InboxRow[] = [];
-  const pushSection = (list: InboxSession[], section: Section, extras: string[] = []) => {
+  const pushSection = (list: InboxSession[], section: Section, extras: Newborn[] = []) => {
     for (const s of list) out.push({ id: s.id, meta: metaOf(s, section, now), snapshot: s });
-    for (const id of extras) out.push({ id, meta: { section, since: now } });
+    for (const b of extras) out.push({ id: b.id, meta: { section, since: b.since } });
   };
   pushSection(sections.needsYou, "needs-you", newborn["needs-you"]);
   pushSection(sections.running, "running", newborn.running);
