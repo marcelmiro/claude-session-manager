@@ -789,6 +789,24 @@
         font-size: 12px;
       }
       .repo.donesec { color: var(--dim); }
+      /* needs-you header is red only while something actually blocks (pending/waiting);
+         plain prompt-sitters get peach — mirrors the classic attnchip's loud/soft split */
+      .repo.needsyou.soft { color: var(--peach); }
+      /* parked rows swap the (near-invisible dim ring) dot for their state glyph:
+         ☾ snoozed / ✗ blocked — the state IS the indicator */
+      .row .dot.glyph {
+        width: 13px;
+        height: auto;
+        margin: 0 2px;
+        border-radius: 0;
+        background: none;
+        text-align: center;
+        font-size: 12px;
+        line-height: 1;
+        color: var(--peach);
+        opacity: 0.75;
+      }
+      .row .dot.glyph.blocked { color: var(--red); }
       /* inbox sections breathe more than repo groups — they're different queues,
          not one list's subheadings */
       .group.inboxsec { margin-top: 26px; }

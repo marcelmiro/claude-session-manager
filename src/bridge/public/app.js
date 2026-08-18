@@ -1557,11 +1557,14 @@ function List() {
       })).filter((g) => g.rows.length > 0);
   const renderInboxRow = (s) => {
     const ib = s.inbox;
-    // Parked detail replaces the summary: wake countdown for a snooze, note for a block.
-    const parked = ib.wakeAt ? `☾ ${wakeIn(ib.wakeAt)}` : ib.note != null ? `✗ ${ib.note}`.trim() : "";
-    const detail = parked || subLine(s);
+    // Sub-line = repo + the parked detail (wake countdown / block note) only. The
+    // summary is deliberately absent: sections mix repos so every row already pays for
+    // a repo label, and truncated first-prompt fragments read as bloat at a glance.
+    const parked = ib.section === "parked";
+    const blocked = ib.note != null;
     const repo = s.repo === "~" ? "home" : s.repo;
-    const sub = detail && detail !== repo ? `${repo} · ${detail}` : repo;
+    const detail = parked ? (blocked ? ib.note : ib.wakeAt ? `in ${wakeIn(ib.wakeAt)}` : "") : "";
+    const sub = detail ? `${repo} · ${detail}` : repo;
     return html`
       <button
         type="button"
@@ -1570,7 +1573,9 @@ function List() {
         ...${rowPress(s)}
         onContextMenu=${(e) => e.preventDefault()}
       >
-        <span class="dot" style=${dotStyle(s)}></span>
+        ${parked
+          ? html`<span class="dot glyph ${blocked ? "blocked" : ""}">${blocked ? "✗" : "☾"}</span>`
+          : html`<span class="dot" style=${dotStyle(s)}></span>`}
         <span class="grow">
           <span class="name"
             >${ib.woken && html`<span class="wokemark" title="snooze came due">☾</span>`}${s.pendingScripts > 0 &&
@@ -1582,7 +1587,7 @@ function List() {
         html`<span class="pendingbadge ${s.pending === "question" ? "q" : "a"}"
           >${s.pending === "question" ? "answer" : "approve"}</span
         >`}
-        <span class="age">${formatAge(new Date(ib.since).toISOString())}</span>
+        <span class="age">${formatTimeAgo(new Date(ib.since).toISOString(), { now: tick.value })}</span>
       </button>`;
   };
   // Repo groups exclude the "needs you" sessions (shown in the pinned block above).
@@ -1659,7 +1664,13 @@ function List() {
                   >
                     <span class="chev">${showDone.value ? "▾" : "▸"}</span> ${g.title} · ${g.rows.length}
                   </button>`
-                : html`<div class="repo ${g.key === "needs-you" ? "needsyou" : ""}">
+                : html`<div
+                    class="repo ${g.key !== "needs-you"
+                      ? ""
+                      : g.rows.some((r) => r.pending || r.status === "waiting")
+                        ? "needsyou"
+                        : "needsyou soft"}"
+                  >
                     ${g.title} · ${g.rows.length}
                   </div>`}
               ${(g.key !== "done" || showDone.value) && g.rows.map(renderInboxRow)}
