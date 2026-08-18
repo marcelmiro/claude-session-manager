@@ -813,13 +813,12 @@
       .row .markglyph { color: var(--muted); margin-right: 7px; font-size: 12px; }
       /* ⚡ = unread, the same mark the Mac puts on the tmux window name */
       .row .zapmark { font-size: 11px; margin-right: 4px; vertical-align: 1px; }
-      /* inbox sections breathe more than repo groups — they're different queues, not
-         one list's subheadings. The header hugs its own rows (tight below) while the
-         top margin does the separating. Both visible gaps are pinned to the same 22px:
-         between sections 16px margin + the last card's 6px bottom margin, and under
-         the app header 10px margin + the listhead's 12px bottom padding. */
-      .group.inboxsec { margin-top: 16px; }
-      .listhead + .group.inboxsec { margin-top: 10px; }
+      /* inbox sections use classic's group rhythm: every visible gap is the same 16px —
+         between sections 10px margin + the last card's 6px bottom margin, and under the
+         app header 4px margin + the listhead's 12px bottom padding. The header hugs its
+         own rows (tight below) while the top margin does the separating. */
+      .group.inboxsec { margin-top: 10px; }
+      .listhead + .group.inboxsec { margin-top: 4px; }
       .group.inboxsec .repo { margin-bottom: 2px; }
       .group.inboxsec:first-child { margin-top: 4px; }
       /* recently-done header doubles as its collapse toggle — reset the button chrome
