@@ -788,7 +788,7 @@
         margin: 0 4px 10px;
         font-size: 12px;
       }
-      .repo.donesec { color: var(--dim); }
+      .repo.donesec { color: var(--muted); }
       /* needs-you header is red only while something actually blocks (pending/waiting);
          plain prompt-sitters get peach — mirrors the classic attnchip's loud/soft split */
       .repo.needsyou.soft { color: var(--peach); }
@@ -806,7 +806,12 @@
         color: var(--peach);
         opacity: 0.75;
       }
-      .row .dot.glyph.blocked { color: var(--red); }
+      /* blocked is a QUIET state (parked on something external) — red would read as
+         "act now", which is the pending badge's meaning, not this one's */
+      .row .dot.glyph.blocked { color: var(--muted); }
+      /* sections already say the status, so a status-colored dot per row is redundant —
+         the slot stays (alignment) but only renders when it adds signal (pending/unread) */
+      .row .dot.none { background: none; border: none; }
       /* inbox sections breathe more than repo groups — they're different queues,
          not one list's subheadings */
       .group.inboxsec { margin-top: 26px; }

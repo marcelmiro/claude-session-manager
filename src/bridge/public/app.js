@@ -1575,7 +1575,9 @@ function List() {
       >
         ${parked
           ? html`<span class="dot glyph ${blocked ? "blocked" : ""}">${blocked ? "✗" : "☾"}</span>`
-          : html`<span class="dot" style=${dotStyle(s)}></span>`}
+          : s.pending || s.unread
+            ? html`<span class="dot" style=${dotStyle(s)}></span>`
+            : html`<span class="dot none"></span>`}
         <span class="grow">
           <span class="name"
             >${ib.woken && html`<span class="wokemark" title="snooze came due">☾</span>`}${s.pendingScripts > 0 &&
@@ -3324,6 +3326,14 @@ function Detail() {
               usage &&
               html`<span class="usage" style=${`color:${usageColor(usage.percent)}`}>${usage.percent}%</span>`}
             </span>
+            ${session &&
+            html`<button
+              class="iconbtn morebtn"
+              onClick=${() => (sessionMenu.value = session)}
+              aria-label="Session actions"
+            >
+              ⋯
+            </button>`}
             ${otherAttention > 0 &&
             html`<button class="attn" onClick=${gotoNextAttention} aria-label="Next session needing attention">
               ⚡ ${otherAttention} ›
@@ -3462,7 +3472,8 @@ function SessionSheet() {
                       <button class="accent-fill" onClick=${() => blockSession(note)}>Block</button>
                       <button class="sheetcancel" onClick=${() => setConfirm(null)}>Cancel</button>`
                   : html`
-                      <button onClick=${() => (close(), open(s.id))}>Open</button>
+                      ${selectedId.value !== s.id &&
+                      html`<button onClick=${() => (close(), open(s.id))}>Open</button>`}
                       ${canPark && html`<button onClick=${() => setConfirm("snooze")}>Snooze</button>`}
                       ${canPark && html`<button onClick=${() => setConfirm("block")}>Block</button>`}
                       ${parked &&
