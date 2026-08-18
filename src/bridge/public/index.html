@@ -817,6 +817,9 @@
          not one list's subheadings. The header hugs its own rows (tight below) while
          the big top margin does the separating. */
       .group.inboxsec { margin-top: 26px; }
+      /* …but the first section sits right under the app header, which already provides
+         the separation — don't stack the inter-section gap on top of it */
+      .listhead + .group.inboxsec { margin-top: 2px; }
       .group.inboxsec .repo { margin-bottom: 2px; }
       .group.inboxsec:first-child { margin-top: 4px; }
       /* recently-done header doubles as its collapse toggle — reset the button chrome
@@ -961,13 +964,14 @@
       .sheet .vrow.danger .vg { color: var(--red); }
       /* one-tap snooze presets: a chip per wake, inline where the Snooze row would be */
       .snoozerow { display: flex; align-items: center; gap: 8px; padding: 11px 18px; border-top: 1px solid var(--sheet-line); }
-      .snoozerow button {
+      /* .sheet .snoozerow (not bare .snoozerow): must outrank `.sheet button + button`,
+         which otherwise repaints pills 2+'s top border in the row-divider grey */
+      .sheet .snoozerow button {
         display: inline-block;
         width: auto;
         flex: 1;
         padding: 9px 0;
         border: 1px solid var(--dim);
-        border-top: 1px solid var(--dim);
         border-radius: 9px;
         background: var(--surface);
         color: var(--fg);
