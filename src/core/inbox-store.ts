@@ -37,6 +37,12 @@ export interface DispositionRow {
   autoResumed: boolean;
 }
 
+/** A provisional resume of a parked/done row (see setPeek). */
+export interface Peek {
+  windowId: string;
+  openedAt: number;
+}
+
 export interface InboxEvent {
   id: number;
   sessionId: string;
@@ -280,6 +286,22 @@ export class InboxStore {
     return rows.map((r) => ({ id: r.id, sessionId: r.session_id, at: r.at, type: r.type, meta: r.meta }));
   }
 
+  /**
+   * Reply observed (organically, or a peek that engaged): the parked/archived
+   * overlay no longer describes reality. Drops any peek record, disposition,
+   * and archive in one transaction — the single implementation of the
+   * "reply observed" rule for discovery's gate and the renderer's reaper.
+   * Returns the disposition kind cleared (drives the ↺ marker), null if none.
+   */
+  replyObserved(sessionId: string, now: number): DispositionKind | null {
+    return this.db.transaction(() => {
+      this.clearPeek(sessionId);
+      const was = this.clearDisposition(sessionId, now, "reply");
+      this.unarchive(sessionId, now);
+      return was;
+    })();
+  }
+
   // ── peeks (provisional resumes of parked/done rows) ──────────────────────
 
   /**
@@ -297,7 +319,7 @@ export class InboxStore {
     this.event(sessionId, now, "peek", { windowId });
   }
 
-  peeks(): Map<string, { windowId: string; openedAt: number }> {
+  peeks(): Map<string, Peek> {
     const rows = this.db.query("SELECT session_id, window_id, opened_at FROM peeks").all() as Array<{
       session_id: string;
       window_id: string;

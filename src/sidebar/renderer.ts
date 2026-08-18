@@ -265,8 +265,13 @@ export function runSidebarRenderer(): void {
     if (tmuxSession) await showToClients(tmuxSession);
     const target = wins.get(targetWin);
     if (!target?.stubPane) return; // no sidebar there (hidden?) — window shown, done
+    await landInSidebar(from, target, sessionId);
+  }
+
+  // Focus a window's sidebar with the row selected. The FROM sidebar drops
+  // its chrome eagerly — its focus-out escape can lag a tick.
+  async function landInSidebar(from: WinState, target: WinState, sessionId: string): Promise<void> {
     if (target !== from && from.focused) {
-      // don't leave the old sidebar wearing chrome until its focus-out lands
       from.focused = false;
       from.clickArmed = false;
       paint(from);
@@ -451,6 +456,9 @@ export function runSidebarRenderer(): void {
         store.setPeek(s.id, spawned, Date.now());
         return true;
       });
+      // fresh grace anchor: a re-peek must not inherit the previous peek's
+      // (possibly hours-old) last-active time and get reaped on first sight
+      peekLastActive.set(s.id, Date.now());
     }
     // land in the new window's sidebar NOW instead of waiting for a tick to
     // split it (ctlToggle's sequence: ensure → sync → select stub → paint)
@@ -459,18 +467,9 @@ export function runSidebarRenderer(): void {
       syncTopology(await listAllPanes());
       const target = wins.get(spawned);
       if (target?.stubPane) {
-        if (target !== win && win.focused) {
-          win.focused = false;
-          win.clickArmed = false;
-          paint(win);
-        }
-        cancelPendingFocus(target);
-        target.focused = true;
-        target.clickArmed = true;
-        target.selectedId = s.id; // seedSelection can't find it — `real` lags discovery
+        // selection set explicitly — seedSelection can't find it, `real` lags discovery
         if (peeked) showFlash(target, section === "parked" ? "peek — stays parked" : "peek — stays in recent");
-        await Bun.$`tmux select-pane -t ${target.stubPane}`.quiet();
-        paint(target);
+        await landInSidebar(win, target, s.id);
       }
     } catch {}
   }
@@ -1133,13 +1132,21 @@ export function runSidebarRenderer(): void {
       peekLastActive.clear();
       return;
     }
+    // anchors for records other writers cleared (discovery graduation) must
+    // not survive to poison a later re-peek of the same session
+    for (const id of peekLastActive.keys()) {
+      if (!peeks.has(id)) peekLastActive.delete(id);
+    }
     const now = Date.now();
     const windows = new Set(panes.map((p) => p.windowId));
     const viewed = new Set(panes.filter((p) => p.windowActive && p.attached).map((p) => p.windowId));
     for (const [id, peek] of peeks) {
       const s = findSession(id);
+      // section, not overlay-presence: a DUE snooze files under needs-you —
+      // a window demanding attention must not be reaped out from under it
+      const sec = s ? sectionOf(s, now) : null;
       const verdict = peekVerdict({
-        parkedOrDone: !!(s && (s.disposition || s.archivedAt)),
+        parkedOrDone: sec === "parked" || sec === "done",
         windowAlive: windows.has(peek.windowId),
         viewed: viewed.has(peek.windowId),
         lastActiveAt: peekLastActive.get(id) ?? now, // first sight arms the grace
@@ -1162,9 +1169,7 @@ export function runSidebarRenderer(): void {
       } catch {}
       if (engaged) {
         applyVerb(() => {
-          store.clearPeek(id);
-          store.clearDisposition(id, now, "reply");
-          store.unarchive(id, now);
+          store.replyObserved(id, now);
           return true;
         });
       } else {

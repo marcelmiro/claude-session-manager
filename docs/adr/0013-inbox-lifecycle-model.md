@@ -154,3 +154,43 @@ Settled against ADR 15/16's single-host cutover, built ahead of it:
   still waits for the portkey inbox.
 - **Unit ownership stays split by platform**: provision.sh owns systemd
   units (like bridge/monitor), `csm setup` owns launchd and no-ops off-darwin.
+
+## Addendum 6: question band, Enter grammar, peek (2026-08-18)
+
+Three grammar revisions from living with the sidebar, all shipped together:
+
+**Needs You is two bands.** An open question/approval floats above plain
+prompt-sitters (answering one unblocks compute; a ready session just waits
+for more instructions), oldest first within each band. The band lives in
+`deriveSections` so every inbox surface inherits it; discovery stamps
+`reason: "question"` from the hook log's pending AskUserQuestion — the same
+source as the bridge's `pendingKind`, so the phone and the sidebar agree on
+what sits on top. Portkey's client-side re-sort becomes a no-op and gets
+deleted on its own branch. Rejected alongside: surfacing session *content*
+(question text, last-message gists) in rows or on highlight — the inbox
+stays labels-only.
+
+**Enter is select-then-commit, like clicks.** Enter on a row in another
+window shows that window and lands focused in *its* sidebar with the row
+selected; Enter on the current window's row commits into the session pane.
+Navigating N sessions is N Enters without ever re-focusing the sidebar. A
+pane-less row resumes into a new window and lands in that window's sidebar;
+a second Enter before discovery stamps the new pane commits into the spawned
+window (`resumedWindows`) instead of double-spawning.
+
+**Enter on Parked/Recent is a peek, not a re-entry.** The disposition/
+archive stays put — the row keeps filing where it was — and a `peeks` store
+record marks the window provisional. Engagement is *a prompt newer than the
+peek* (`peekEngaged`): discovery's reply-observed clear is gated on it,
+which also fixes a real bug — a `claude -r` boot spinner reads as running,
+and a preserved row's `real` is undefined, so first sight always counted as
+a transition and silently unparked the row within one tick. The renderer
+reaps a peek window unviewed for 60s (`PEEK_GRACE_MS`), after a final
+transcript check so a prompt whose whole turn fit inside one discovery tick
+still graduates the row instead of dying with the window. A due snooze
+files under Needs You, so the reaper drops the record and *keeps* the
+window — never kill what demands attention. Explicit re-entry stays `b`
+(unpark); explicit restore stays `e` on Recent. "Reply observed" has one
+implementation, `store.replyObserved` (peek + disposition + archive in one
+transaction), shared by discovery's gate and the reaper. Deferred, recorded
+in ideas.txt: `x` dismiss (archive with no RECENT trace).

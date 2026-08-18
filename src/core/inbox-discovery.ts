@@ -117,10 +117,7 @@ export async function discoveryTick(store: InboxStore): Promise<void> {
     if (statusChanged && eff === "running") {
       const peek = peeks.get(s.id);
       if (!peek || peekEngaged(peek.openedAt, promptAt)) {
-        if (peek) store.clearPeek(s.id);
-        const was = store.clearDisposition(s.id, now, "reply");
-        if (arch.has(s.id)) store.unarchive(s.id, now);
-        row.fromSnooze = was === "snoozed";
+        row.fromSnooze = store.replyObserved(s.id, now) === "snoozed";
       }
     }
     // An OBSERVED transition into ready/waiting goes to the event log to keep
