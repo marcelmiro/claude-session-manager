@@ -1567,16 +1567,16 @@ function List() {
     // Marks are inline prefixes of the name (like ⏳/☾ always were) — a reserved dot
     // column read as an empty gutter on rows with nothing to say. Pending/unread keep
     // the glowing dot, running keeps its mint, parked shows its state glyph.
-    // Unread wears the Mac's own mark: ⚡ is what the tmux window name shows for the
-    // same state, so the two surfaces speak one vocabulary (like ⏳ for script-waits).
+    // Row marks speak the tmux window-name vocabulary — ⚡ unread, 🔄 turn running,
+    // ⏳ script-waiting — so the phone and the Mac read the same. Unlike the window
+    // name's single prefix slot, marks stack here: ⚡ is the "have I seen it" axis,
+    // the state mark is "what's it doing". The only dot left is the pending alarm.
     const mark = parked
       ? html`<span class="markglyph ${blocked ? "blocked" : ""}">${blocked ? "✗" : "☾"}</span>`
       : s.pending
         ? html`<span class="markdot" style=${dotStyle(s)}></span>`
-        : ib.section === "running"
-          ? // section color, not raw status: a script-waiting row reads `ready` (peach)
-            // but files under RUNNING — the ⏳ already carries that nuance
-            html`<span class="markdot" style="background:var(--mint)"></span>`
+        : s.status === "running"
+          ? html`<span class="runmark" title="running">🔄</span>`
           : null;
     const zap = s.unread && html`<span class="zapmark" title="unread">⚡</span>`;
     return html`
