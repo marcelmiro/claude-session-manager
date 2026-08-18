@@ -1578,7 +1578,7 @@ function List() {
     // ("looks running, the AI is actually done"). Marks stack (⚡ is the "have I
     // seen it" axis); the only dot left is the pending alarm.
     const mark = parked
-      ? html`<span class="markglyph ${blocked ? "blocked" : ""}">${blocked ? "✗" : "☾"}</span>`
+      ? html`<span class="markglyph">${blocked ? "✗" : "☾"}</span>`
       : s.pending
         ? html`<span class="markdot" style=${dotStyle(s)}></span>`
         : null;
