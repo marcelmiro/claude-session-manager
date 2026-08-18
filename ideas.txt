@@ -78,3 +78,4 @@ Lifecycle model locked 2026-08-02 (see docs/adr/0013 + CONTEXT.md terms). Phase 
 - Notification sound / macOS notification center integration
 - Session pinning (pin important sessions to top regardless of status)
 - Preview pane search (/ within preview to find text)
+- Inbox `x` dismiss: archive without a RECENT entry (double-tap confirm, kills pane, no trace) — for throwaway sessions; deferred until killing the pane manually becomes a real pain

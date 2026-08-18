@@ -1550,13 +1550,9 @@ function List() {
   const inboxGroups = !inbox
     ? []
     : SECTIONS.map(([key, title]) => {
+        // rows arrive pre-ordered from the server: deriveSections owns the
+        // needs-you band sort (question/approval first), shared with the sidebar
         const rows = all.filter((s) => s.inbox && s.inbox.section === key);
-        // Blocked-on-you floats above the prompt-sitters: answering an open question/
-        // approval unblocks compute, a ready session just waits for instructions.
-        // Stable sort, so oldest-first survives as the tiebreak within each band.
-        if (key === "needs-you") {
-          rows.sort((a, b) => (a.pending || a.status === "waiting" ? 0 : 1) - (b.pending || b.status === "waiting" ? 0 : 1));
-        }
         return { key, title, rows };
       }).filter((g) => g.rows.length > 0);
   const renderInboxRow = (s) => {
