@@ -17,8 +17,9 @@
  *
  * What stays OUT: current activity (status, ages, PR cache) is derived state
  * owned by whoever computes it — it lives in the `snapshot` table as opaque
- * JSON per session, replaced wholesale each refresh. This store never
- * interprets it; schema churn there must not mean migrations here.
+ * JSON per session, replaced each refresh (fact-holding rows survive the
+ * replace — see saveSnapshot). This store never interprets it; schema churn
+ * there must not mean migrations here.
  */
 import { Database } from "bun:sqlite";
 import { PATHS } from "./config";
@@ -393,8 +394,9 @@ export class InboxStore {
    * (snooze/block/archive) on such an id writes a fact composeSessions has no
    * row to overlay onto, so the session would vanish from the inbox instead of
    * filing under Parked/Done. INSERT OR IGNORE keeps discovery the snapshot's
-   * owner: an existing row is never touched, and the preserve rule carries the
-   * seeded row (its disposition/archived fact) across wholesale replaces.
+   * owner: an existing row is never touched, and saveSnapshot's fact-keeping
+   * delete carries the seeded row (its disposition/archived fact) across
+   * replaces atomically — even one whose tick was already mid-flight.
    * updated_at is 0, not now: it feeds the inboxStale probe, which measures the
    * DAEMON's last tick — a bridge-side seed must not mask a dead daemon.
    */

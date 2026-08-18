@@ -1,9 +1,10 @@
 /**
  * Inbox activity discovery — the single snapshot producer (ADR 0013
  * addendum 2). One pass discovers real sessions, stamps observed
- * transitions, and replaces the store's activity snapshot wholesale;
- * authored facts (dispositions, archived) live in their own tables and are
- * never touched by the replace.
+ * transitions, and replaces the store's activity snapshot (saveSnapshot
+ * keeps fact-holding rows the new set doesn't cover, so a bridge verb
+ * landing mid-tick survives the replace); authored facts (dispositions,
+ * archived) live in their own tables and are never touched by it.
  *
  * Run via `csm daemon --discover-once` in a FRESH process per tick: an
  * in-process discovery loop leaks (~1.5 MB/s — JSC never returns
