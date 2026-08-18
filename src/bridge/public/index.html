@@ -793,26 +793,24 @@
       /* needs-you header is red only while something actually blocks (pending/waiting);
          plain prompt-sitters get peach — mirrors the classic attnchip's loud/soft split */
       .repo.needsyou.soft { color: var(--peach); }
-      /* parked rows swap the (near-invisible dim ring) dot for their state glyph:
-         ☾ snoozed / ✗ blocked — the state IS the indicator */
-      .row .dot.glyph {
-        width: 13px;
-        height: auto;
-        margin: 0 2px;
-        border-radius: 0;
-        background: none;
-        text-align: center;
-        font-size: 12px;
-        line-height: 1;
-        color: var(--peach);
-        opacity: 0.75;
+      /* running keeps its identity color — the one section whose rows are all "alive" */
+      .repo.runsec { color: var(--mint); }
+      /* inline marks replace the dot COLUMN: a reserved gutter read as empty space on
+         rows with nothing to say, so marks prefix the name instead (like ⏳/☾ do) */
+      .row .markdot {
+        display: inline-block;
+        width: 9px;
+        height: 9px;
+        border-radius: 50%;
+        margin: 0 8px 0 2px;
+        vertical-align: 1px;
       }
+      .row .markglyph { color: var(--peach); opacity: 0.75; margin-right: 7px; font-size: 12px; }
+      /* ⚡ = unread, the same mark the Mac puts on the tmux window name */
+      .row .zapmark { font-size: 11px; margin-right: 4px; vertical-align: 1px; }
       /* blocked is a QUIET state (parked on something external) — red would read as
          "act now", which is the pending badge's meaning, not this one's */
-      .row .dot.glyph.blocked { color: var(--muted); }
-      /* sections already say the status, so a status-colored dot per row is redundant —
-         the slot stays (alignment) but only renders when it adds signal (pending/unread) */
-      .row .dot.none { background: none; border: none; }
+      .row .markglyph.blocked { color: var(--muted); opacity: 1; }
       /* inbox sections breathe more than repo groups — they're different queues,
          not one list's subheadings */
       .group.inboxsec { margin-top: 26px; }
@@ -955,7 +953,7 @@
          words. Neutral text; red stays reserved for the destructive row. */
       .sheet .vrow { display: flex; align-items: center; gap: 12px; text-align: left; color: var(--fg); font-size: 16px; padding: 14px 18px; }
       .sheet .vrow.danger { color: var(--red); }
-      .sheet .vg { flex: none; width: 20px; text-align: center; color: var(--muted); font-size: 15px; }
+      .sheet .vg { flex: none; width: 20px; display: inline-flex; align-items: center; justify-content: center; color: var(--muted); }
       .sheet .vrow.danger .vg { color: var(--red); }
       /* one-tap snooze presets: a chip per wake, inline where the Snooze row would be */
       .snoozerow { display: flex; align-items: center; gap: 8px; padding: 11px 18px; border-top: 0.5px solid var(--sheet-line); }

@@ -1564,22 +1564,33 @@ function List() {
     const repo = s.repo === "~" ? "home" : s.repo;
     const detail = parked ? (blocked ? ib.note : ib.wakeAt ? `in ${wakeIn(ib.wakeAt)}` : "") : "";
     const sub = detail ? `${repo} · ${detail}` : repo;
+    // Marks are inline prefixes of the name (like ⏳/☾ always were) — a reserved dot
+    // column read as an empty gutter on rows with nothing to say. Pending/unread keep
+    // the glowing dot, running keeps its mint, parked shows its state glyph.
+    // Unread wears the Mac's own mark: ⚡ is what the tmux window name shows for the
+    // same state, so the two surfaces speak one vocabulary (like ⏳ for script-waits).
+    const mark = parked
+      ? html`<span class="markglyph ${blocked ? "blocked" : ""}">${blocked ? "✗" : "☾"}</span>`
+      : s.pending
+        ? html`<span class="markdot" style=${dotStyle(s)}></span>`
+        : ib.section === "running"
+          ? // section color, not raw status: a script-waiting row reads `ready` (peach)
+            // but files under RUNNING — the ⏳ already carries that nuance
+            html`<span class="markdot" style="background:var(--mint)"></span>`
+          : null;
+    const zap = s.unread && html`<span class="zapmark" title="unread">⚡</span>`;
     return html`
       <button
         type="button"
-        class="row ${ib.section === "done" ? "done" : ""}"
+        class="row inboxrow ${ib.section === "done" ? "done" : ""}"
         key=${s.id}
         ...${rowPress(s)}
         onContextMenu=${(e) => e.preventDefault()}
       >
-        ${parked
-          ? html`<span class="dot glyph ${blocked ? "blocked" : ""}">${blocked ? "✗" : "☾"}</span>`
-          : s.pending || s.unread
-            ? html`<span class="dot" style=${dotStyle(s)}></span>`
-            : html`<span class="dot none"></span>`}
         <span class="grow">
           <span class="name"
-            >${ib.woken && html`<span class="wokemark" title="snooze came due">☾</span>`}${s.pendingScripts > 0 &&
+            >${zap}${mark}${ib.woken && html`<span class="wokemark" title="snooze came due">☾</span>`}${s.pendingScripts >
+              0 &&
             html`<span class="scriptmark" title="waiting on a background script">⏳</span>`}${listTitle(s)}</span
           >
           ${sub && html`<span class="sub">${sub}</span>`}
@@ -1666,11 +1677,13 @@ function List() {
                     <span class="chev">${showDone.value ? "▾" : "▸"}</span> ${g.title} · ${g.rows.length}
                   </button>`
                 : html`<div
-                    class="repo ${g.key !== "needs-you"
-                      ? ""
-                      : g.rows.some((r) => r.pending || r.status === "waiting")
-                        ? "needsyou"
-                        : "needsyou soft"}"
+                    class="repo ${g.key === "running"
+                      ? "runsec"
+                      : g.key !== "needs-you"
+                        ? ""
+                        : g.rows.some((r) => r.pending || r.status === "waiting")
+                          ? "needsyou"
+                          : "needsyou soft"}"
                   >
                     ${g.title} · ${g.rows.length}
                   </div>`}
@@ -3390,6 +3403,29 @@ function ActionSheet() {
 // being acted on (status dot + name + repo · subline + age), then the actions. Archive is
 // destructive (kills the live Claude process), so it takes a second tap that swaps the
 // sheet to an explicit confirm — no accidental kills from a fat-fingered long-press.
+// Stroke icons for the session sheet's glyph column — same feather family as the
+// bell/history buttons, tinted via currentColor (the reason these aren't emoji).
+const vicon = (paths) =>
+  html`<svg
+    width="16"
+    height="16"
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    stroke-width="2"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+    dangerouslySetInnerHTML=${{ __html: paths }}
+  ></svg>`;
+const VICONS = {
+  open: '<path d="M9 18l6-6-6-6"/>',
+  moon: '<path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>',
+  block: '<path d="M18 6L6 18M6 6l12 12"/>',
+  undo: '<path d="M1 4v6h6"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/>',
+  fork: '<line x1="6" y1="3" x2="6" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/>',
+  done: '<path d="M20 6L9 17l-5-5"/>',
+};
+
 // Phone snooze presets — one-tap chips in the session sheet; the server validates the
 // same list and computes the wake (hours exact, day presets at 8AM local).
 const SNOOZE_PRESETS = [
@@ -3463,11 +3499,11 @@ function SessionSheet() {
                 : html`
                     ${selectedId.value !== s.id &&
                     html`<button class="vrow" onClick=${() => (close(), open(s.id))}>
-                      <span class="vg">›</span>Open
+                      <span class="vg">${vicon(VICONS.open)}</span>Open
                     </button>`}
                     ${canPark &&
                     html`<div class="snoozerow">
-                      <span class="vg" title="snooze until…">☾</span>
+                      <span class="vg" title="snooze until…">${vicon(VICONS.moon)}</span>
                       ${SNOOZE_PRESETS.map(
                         ([preset, label]) =>
                           html`<button key=${preset} onClick=${() => snoozeSession(preset)}>${label}</button>`,
@@ -3475,22 +3511,22 @@ function SessionSheet() {
                     </div>`}
                     ${canPark &&
                     html`<button class="vrow" onClick=${() => setConfirm("block")}>
-                      <span class="vg">✗</span>Block…
+                      <span class="vg">${vicon(VICONS.block)}</span>Block…
                     </button>`}
                     ${parked &&
                     html`<button class="vrow" onClick=${unparkSession}>
-                      <span class="vg">↺</span>${s.inbox.note != null ? "Unblock" : "Unsnooze"}
+                      <span class="vg">${vicon(VICONS.undo)}</span>${s.inbox.note != null ? "Unblock" : "Unsnooze"}
                     </button>`}
                     ${section === "done" &&
                     html`<button class="vrow" onClick=${unarchiveSession}>
-                      <span class="vg">↺</span>Un-archive
+                      <span class="vg">${vicon(VICONS.undo)}</span>Un-archive
                     </button>`}
                     <button class="vrow" onClick=${() => setConfirm("fork")}>
-                      <span class="vg">⑂</span>Fork session…
+                      <span class="vg">${vicon(VICONS.fork)}</span>Fork session…
                     </button>
                     ${section !== "done" &&
                     html`<button class="vrow danger" onClick=${() => setConfirm("archive")}>
-                      <span class="vg">✓</span>Archive session…
+                      <span class="vg">${vicon(VICONS.done)}</span>Archive session…
                     </button>`}
                     <button class="sheetcancel" onClick=${close}>Cancel</button>`}
         </div>
