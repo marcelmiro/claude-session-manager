@@ -130,13 +130,22 @@ export interface InboxSections {
   done: InboxSession[];
 }
 
+// Needs You is two bands: sessions holding an open question/approval float
+// above plain prompt-sitters — answering one unblocks compute, a ready
+// session just waits for more instructions. Oldest first within each band.
+function needsYouBand(s: InboxSession): number {
+  return s.reason === "question" || s.reason === "approval" ? 0 : 1;
+}
+
 export function deriveSections(sessions: InboxSession[], now: number): InboxSections {
   const by = (sec: Section) => sessions.filter((s) => sectionOf(s, now) === sec);
   // running sorts longest-first on the same anchor its age displays
   // (script-waiters age from the handover, turns from the prompt)
   const runningSince = (s: InboxSession) => (s.script ? (s.scriptSince ?? s.since) : s.since);
   return {
-    needsYou: by("needs-you").sort((a, b) => effectiveSince(a, now) - effectiveSince(b, now)), // oldest first
+    needsYou: by("needs-you").sort(
+      (a, b) => needsYouBand(a) - needsYouBand(b) || effectiveSince(a, now) - effectiveSince(b, now),
+    ),
     running: by("running").sort((a, b) => runningSince(a) - runningSince(b)),
     // snoozed before blocked; snoozed by wake (soonest first), blocked by
     // time spent blocked (least first — since is when the block was set)
@@ -149,6 +158,38 @@ export function deriveSections(sessions: InboxSession[], now: number): InboxSect
     }),
     done: by("done").sort((a, b) => (b.archivedAt ?? 0) - (a.archivedAt ?? 0)),
   };
+}
+
+// ── peek (provisional resume) math ────────────────────────────────────────
+
+/** How long an unengaged peek window survives after the user looks away. */
+export const PEEK_GRACE_MS = 60_000;
+
+/**
+ * A prompt typed after the peek opened is engagement — the parked/archived
+ * overlay no longer describes reality. A resume's boot activity is not: the
+ * transcript's newest prompt still predates the peek.
+ */
+export function peekEngaged(openedAt: number, promptAt: number | null): boolean {
+  return promptAt !== null && promptAt > openedAt;
+}
+
+/**
+ * Per-tick fate of a peek record. "drop" = the record is obsolete (session
+ * engaged or disposed elsewhere, or the window already died) — never kill;
+ * "reap-candidate" = unviewed past the grace, the caller re-checks the
+ * transcript for a late prompt before actually killing the window.
+ */
+export function peekVerdict(o: {
+  parkedOrDone: boolean;
+  windowAlive: boolean;
+  viewed: boolean;
+  lastActiveAt: number;
+  now: number;
+}): "keep" | "drop" | "reap-candidate" {
+  if (!o.parkedOrDone || !o.windowAlive) return "drop";
+  if (o.viewed || o.now - o.lastActiveAt < PEEK_GRACE_MS) return "keep";
+  return "reap-candidate";
 }
 
 // ── store composition ─────────────────────────────────────────────────────

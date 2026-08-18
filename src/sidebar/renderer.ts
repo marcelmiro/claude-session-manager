@@ -19,8 +19,9 @@
  */
 import { openSync, writeSync, closeSync } from "node:fs";
 import { InboxStore } from "../core/inbox-store";
-import { composeSessions, wakeAt, type InboxSession } from "../core/inbox-model";
+import { composeSessions, peekEngaged, peekVerdict, sectionOf, wakeAt, type InboxSession } from "../core/inbox-model";
 import { prototypeRefresherAlive } from "../core/inbox-discovery";
+import { readLastPromptAt, resolveTranscriptPath } from "../core/last-turn";
 import { resolveRestoreTarget } from "../core/resurrect";
 import { PATHS } from "../core/config";
 import { parseInput, type InputEvent } from "./input";
@@ -106,6 +107,12 @@ export function runSidebarRenderer(): void {
   let lastDataVersion = -1;
   const wins = new Map<string, WinState>();
   const paneToWin = new Map<string, string>(); // stub paneId → windowId
+  // sessionId → window spawned by an Enter-resume: discovery hasn't stamped
+  // the new pane onto the row yet (~3s), so a second Enter must commit into
+  // this window instead of double-spawning
+  const resumedWindows = new Map<string, string>();
+  // peeked sessionId → when its window was last the viewed one (grace anchor)
+  const peekLastActive = new Map<string, number>();
   let standing = false; // currently active (markers allow, prototype absent)
   let lastMinute = -1;
 
@@ -243,6 +250,35 @@ export function runSidebarRenderer(): void {
     return (await paneLocation(paneId))?.windowId ?? "";
   }
 
+  // Show another window but stay in the sidebar: switch the display, then
+  // land focus on the TARGET window's stub with the row selected. The
+  // select-window → select-pane order is load-bearing — the after-select-
+  // window bounce hook ejects a stub-active window, and the pane select
+  // after it is what defeats the bounce.
+  async function showWindowKeepSidebar(
+    from: WinState,
+    targetWin: string,
+    sessionId: string,
+    tmuxSession?: string,
+  ): Promise<void> {
+    await Bun.$`tmux select-window -t ${targetWin}`.quiet();
+    if (tmuxSession) await showToClients(tmuxSession);
+    const target = wins.get(targetWin);
+    if (!target?.stubPane) return; // no sidebar there (hidden?) — window shown, done
+    if (target !== from && from.focused) {
+      // don't leave the old sidebar wearing chrome until its focus-out lands
+      from.focused = false;
+      from.clickArmed = false;
+      paint(from);
+    }
+    cancelPendingFocus(target);
+    target.focused = true;
+    target.clickArmed = true;
+    target.selectedId = sessionId;
+    await Bun.$`tmux select-pane -t ${target.stubPane}`.quiet();
+    paint(target);
+  }
+
   // After a disposition the VIEW follows the selection: show the next
   // session's window, focused in its sidebar. All in-process — no handoff
   // files, no signals.
@@ -252,15 +288,8 @@ export function runSidebarRenderer(): void {
     if (!next?.real) return;
     const win = await windowOf(next.real.paneId);
     if (!win || win === from.windowId) return; // already looking at it
-    const target = wins.get(win);
     try {
-      await Bun.$`tmux select-window -t ${win}`.quiet();
-      if (!target?.stubPane) return; // no sidebar there (hidden?) — window shown, done
-      target.focused = true;
-      target.clickArmed = true;
-      target.selectedId = nextId;
-      await Bun.$`tmux select-pane -t ${target.stubPane}`.quiet();
-      paint(target);
+      await showWindowKeepSidebar(from, win, nextId);
     } catch {}
   }
 
@@ -345,28 +374,108 @@ export function runSidebarRenderer(): void {
     } catch {}
   }
 
-  // Enter and click share this. A row whose pane died resumes on demand;
-  // re-engaging an ARCHIVED session un-archives into Needs You. The window
-  // comes from the live pane's ACTUAL location, never the row's recorded
-  // session:index — indexes get reused, and a stale one lands anywhere.
+  // Enter and click share this, select-then-commit like the click grammar:
+  // a row in ANOTHER window shows that window with its sidebar focused (the
+  // next Enter there commits); a row in THIS window commits — focus drops
+  // into the session pane itself. A row whose pane died resumes on demand as
+  // a PEEK when it's parked/done: the disposition/archive stays, engagement
+  // (a new prompt) is what graduates it. The window comes from the live
+  // pane's ACTUAL location, never the row's recorded session:index — indexes
+  // get reused, and a stale one lands anywhere.
   async function switchTo(win: WinState, s: InboxSession): Promise<void> {
-    if (s.archivedAt) {
-      applyVerb(() => store.unarchive(s.id, Date.now()));
-      showFlash(win, "restored — reopening");
-    }
     const loc = s.real ? await paneLocation(s.real.paneId) : null;
     if (loc && s.real) {
-      try {
-        await Bun.$`tmux select-window -t ${loc.windowId}`.quiet();
-        await Bun.$`tmux select-pane -t ${s.real.paneId}`.quiet();
-        await showToClients(loc.session);
+      if (loc.windowId === win.windowId) {
+        try {
+          await Bun.$`tmux select-pane -t ${s.real.paneId}`.quiet();
+          await showToClients(loc.session);
+          return;
+        } catch {} // pane died under us — fall through to resume
+      } else {
+        // a mid-flight failure here must NOT fall through: the pane is alive,
+        // resuming would spawn a duplicate window for a live session
+        try {
+          await showWindowKeepSidebar(win, loc.windowId, s.id, loc.session);
+        } catch {}
         return;
-      } catch {}
+      }
     }
-    await resumeSession(win, s);
+    await resumeOrRevisit(win, s);
   }
 
-  async function resumeSession(win: WinState, s: InboxSession): Promise<void> {
+  /** The window's first non-stub pane, or null when the window is gone. */
+  async function workPaneOf(winId: string): Promise<string | null> {
+    try {
+      const lines = (
+        await Bun.$`tmux list-panes -t ${winId} -F ${`#{pane_id}${SEP}#{pane_start_command}`}`.quiet().text()
+      )
+        .trim()
+        .split("\n");
+      for (const l of lines) {
+        const [pane] = l.split(SEP);
+        if (pane && !l.includes(STUB_MARK)) return pane;
+      }
+    } catch {}
+    return null;
+  }
+
+  // First Enter on a pane-less row spawns its window and lands in THAT
+  // window's sidebar; a second Enter — before discovery has stamped the new
+  // pane onto the row — commits into the spawned window's work pane instead
+  // of double-spawning. Parked/done rows resume as a PEEK (recorded for the
+  // engagement gate + reaper); their overlay is untouched, so the row keeps
+  // filing under Parked/Recent until a prompt graduates it.
+  async function resumeOrRevisit(win: WinState, s: InboxSession): Promise<void> {
+    const prior = resumedWindows.get(s.id);
+    if (prior) {
+      const work = await workPaneOf(prior);
+      if (work) {
+        try {
+          await Bun.$`tmux select-window -t ${prior}`.quiet();
+          await Bun.$`tmux select-pane -t ${work}`.quiet();
+          return;
+        } catch {}
+      }
+      resumedWindows.delete(s.id);
+    }
+    const spawned = await resumeSession(win, s);
+    if (!spawned) return;
+    resumedWindows.set(s.id, spawned);
+    // the CURRENT overlay decides peek vs plain resume — the caller's row can
+    // predate a just-applied verb (b-unpark clears the disposition first)
+    const fresh = findSession(s.id) ?? s;
+    const section = sectionOf(fresh, Date.now());
+    const peeked = section === "parked" || section === "done";
+    if (peeked) {
+      applyVerb(() => {
+        store.setPeek(s.id, spawned, Date.now());
+        return true;
+      });
+    }
+    // land in the new window's sidebar NOW instead of waiting for a tick to
+    // split it (ctlToggle's sequence: ensure → sync → select stub → paint)
+    try {
+      await ensure(spawned);
+      syncTopology(await listAllPanes());
+      const target = wins.get(spawned);
+      if (target?.stubPane) {
+        if (target !== win && win.focused) {
+          win.focused = false;
+          win.clickArmed = false;
+          paint(win);
+        }
+        cancelPendingFocus(target);
+        target.focused = true;
+        target.clickArmed = true;
+        target.selectedId = s.id; // seedSelection can't find it — `real` lags discovery
+        if (peeked) showFlash(target, section === "parked" ? "peek — stays parked" : "peek — stays in recent");
+        await Bun.$`tmux select-pane -t ${target.stubPane}`.quiet();
+        paint(target);
+      }
+    } catch {}
+  }
+
+  async function resumeSession(win: WinState, s: InboxSession): Promise<string | null> {
     try {
       const home = process.env.HOME ?? "/";
       const dir = (await resolveRestoreTarget(s.id, s.repoPath ?? home)) ?? s.repoPath ?? home;
@@ -391,8 +500,10 @@ export function runSidebarRenderer(): void {
       ).trim();
       if (spawned) await Bun.$`tmux select-window -t ${spawned}`.quiet();
       showFlash(win, "pane gone — resuming in new window");
+      return spawned || null;
     } catch {
       showFlash(win, "resume failed");
+      return null;
     }
   }
 
@@ -809,18 +920,20 @@ export function runSidebarRenderer(): void {
     height: number;
     paneActive: boolean;
     windowActive: boolean;
+    /** The pane's tmux session has at least one attached client. */
+    attached: boolean;
     tty: string;
     startCmd: string;
     currentCmd: string;
   }
 
   async function listAllPanes(): Promise<PaneRow[]> {
-    const fmt = ["#{window_id}", "#{pane_id}", "#{pane_left}", "#{pane_width}", "#{pane_height}", "#{pane_active}", "#{window_active}", "#{pane_tty}", "#{pane_current_command}", "#{pane_start_command}"].join(SEP);
+    const fmt = ["#{window_id}", "#{pane_id}", "#{pane_left}", "#{pane_width}", "#{pane_height}", "#{pane_active}", "#{window_active}", "#{session_attached}", "#{pane_tty}", "#{pane_current_command}", "#{pane_start_command}"].join(SEP);
     const out = (await Bun.$`tmux list-panes -a -F ${fmt}`.quiet().text()).trim();
     if (!out) return [];
     return out.split("\n").map((l) => {
       const parts = l.split(SEP);
-      const [windowId, paneId, left, width, height, pa, wa, tty, currentCmd] = parts;
+      const [windowId, paneId, left, width, height, pa, wa, att, tty, currentCmd] = parts;
       return {
         windowId: windowId!,
         paneId: paneId!,
@@ -829,9 +942,10 @@ export function runSidebarRenderer(): void {
         height: Number(height),
         paneActive: pa === "1",
         windowActive: wa === "1",
+        attached: Number(att) > 0,
         tty: tty ?? "",
         // start_command is free text — it goes last and swallows any SEP hits
-        startCmd: parts.slice(9).join(SEP),
+        startCmd: parts.slice(10).join(SEP),
         currentCmd: currentCmd ?? "",
       };
     });
@@ -1002,6 +1116,74 @@ export function runSidebarRenderer(): void {
     }
   }
 
+  // ── peek reaping ─────────────────────────────────────────────────────────
+
+  // A peek window is provisional: if its row is still parked/done and nobody
+  // has looked at the window for the grace period, kill it. Engagement is
+  // normally cleared by discovery's gate; the transcript re-check here covers
+  // a prompt whose whole turn fit inside one discovery tick.
+  async function reapPeeks(panes: PaneRow[]): Promise<void> {
+    let peeks: Map<string, { windowId: string; openedAt: number }>;
+    try {
+      peeks = store.peeks();
+    } catch {
+      return;
+    }
+    if (!peeks.size) {
+      peekLastActive.clear();
+      return;
+    }
+    const now = Date.now();
+    const windows = new Set(panes.map((p) => p.windowId));
+    const viewed = new Set(panes.filter((p) => p.windowActive && p.attached).map((p) => p.windowId));
+    for (const [id, peek] of peeks) {
+      const s = findSession(id);
+      const verdict = peekVerdict({
+        parkedOrDone: !!(s && (s.disposition || s.archivedAt)),
+        windowAlive: windows.has(peek.windowId),
+        viewed: viewed.has(peek.windowId),
+        lastActiveAt: peekLastActive.get(id) ?? now, // first sight arms the grace
+        now,
+      });
+      if (!peekLastActive.has(id) || viewed.has(peek.windowId)) peekLastActive.set(id, now);
+      if (verdict === "keep") continue;
+      if (verdict === "drop") {
+        applyVerb(() => {
+          store.clearPeek(id);
+          return true;
+        });
+        peekLastActive.delete(id);
+        continue;
+      }
+      let engaged = false;
+      try {
+        const path = await resolveTranscriptPath(id);
+        engaged = peekEngaged(peek.openedAt, path ? await readLastPromptAt(path) : null);
+      } catch {}
+      if (engaged) {
+        applyVerb(() => {
+          store.clearPeek(id);
+          store.clearDisposition(id, now, "reply");
+          store.unarchive(id, now);
+          return true;
+        });
+      } else {
+        const win = wins.get(peek.windowId);
+        if (win?.stubPane) paneToWin.delete(win.stubPane);
+        wins.delete(peek.windowId);
+        try {
+          await Bun.$`tmux kill-window -t ${peek.windowId}`.quiet();
+        } catch {}
+        applyVerb(() => {
+          store.clearPeek(id);
+          return true;
+        });
+      }
+      peekLastActive.delete(id);
+      paintAll();
+    }
+  }
+
   // ── input socket ─────────────────────────────────────────────────────────
 
   try {
@@ -1109,7 +1291,10 @@ export function runSidebarRenderer(): void {
     phase = "ensure";
     await ensure();
     phase = "topology";
-    syncTopology(await listAllPanes());
+    const panes = await listAllPanes();
+    syncTopology(panes);
+    phase = "peeks";
+    await reapPeeks(panes);
 
     phase = "store";
     try {

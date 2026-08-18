@@ -77,6 +77,11 @@ CREATE TABLE IF NOT EXISTS snapshot(
   data       TEXT NOT NULL,
   updated_at INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS peeks(
+  session_id TEXT PRIMARY KEY,
+  window_id  TEXT NOT NULL,
+  opened_at  INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS kv(key TEXT PRIMARY KEY, value TEXT NOT NULL);
 `;
 
@@ -275,6 +280,36 @@ export class InboxStore {
     return rows.map((r) => ({ id: r.id, sessionId: r.session_id, at: r.at, type: r.type, meta: r.meta }));
   }
 
+  // ── peeks (provisional resumes of parked/done rows) ──────────────────────
+
+  /**
+   * Record a provisional resume: the row's disposition/archive stays intact,
+   * discovery treats the pane's boot as noise (not a reply), and the reaper
+   * kills the window if no prompt arrives. Re-peeking replaces the record.
+   */
+  setPeek(sessionId: string, windowId: string, now: number): void {
+    this.db
+      .query(
+        `INSERT INTO peeks(session_id, window_id, opened_at) VALUES (?, ?, ?)
+         ON CONFLICT(session_id) DO UPDATE SET window_id=excluded.window_id, opened_at=excluded.opened_at`,
+      )
+      .run(sessionId, windowId, now);
+    this.event(sessionId, now, "peek", { windowId });
+  }
+
+  peeks(): Map<string, { windowId: string; openedAt: number }> {
+    const rows = this.db.query("SELECT session_id, window_id, opened_at FROM peeks").all() as Array<{
+      session_id: string;
+      window_id: string;
+      opened_at: number;
+    }>;
+    return new Map(rows.map((r) => [r.session_id, { windowId: r.window_id, openedAt: r.opened_at }]));
+  }
+
+  clearPeek(sessionId: string): void {
+    this.db.query("DELETE FROM peeks WHERE session_id = ?").run(sessionId);
+  }
+
   // ── provenance (forward-compat, ADR 0013 follow-up) ──────────────────────
 
   link(childId: string, parentId: string, kind: "fork" | "handoff", now: number): void {
@@ -327,6 +362,6 @@ export class InboxStore {
 
   /** Wipe everything — seed/test helper, never called in normal operation. */
   reset(): void {
-    this.db.exec("DELETE FROM dispositions; DELETE FROM archived; DELETE FROM events; DELETE FROM snapshot; DELETE FROM kv;");
+    this.db.exec("DELETE FROM dispositions; DELETE FROM archived; DELETE FROM events; DELETE FROM snapshot; DELETE FROM kv; DELETE FROM peeks;");
   }
 }

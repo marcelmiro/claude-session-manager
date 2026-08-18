@@ -93,6 +93,28 @@ describe("snapshot + kv", () => {
   });
 });
 
+describe("peeks", () => {
+  test("set / read / clear; re-peeking replaces the record", () => {
+    const s = fresh();
+    expect(s.peeks().size).toBe(0);
+    s.setPeek("a", "@1", 10);
+    s.setPeek("b", "@2", 20);
+    s.setPeek("a", "@3", 30); // re-peek → new window + timestamp
+    expect(s.peeks().get("a")).toEqual({ windowId: "@3", openedAt: 30 });
+    expect(s.peeks().get("b")).toEqual({ windowId: "@2", openedAt: 20 });
+    s.clearPeek("a");
+    expect(s.peeks().has("a")).toBe(false);
+    expect(s.peeks().has("b")).toBe(true);
+  });
+
+  test("a peek leaves an event; clearing does not", () => {
+    const s = fresh();
+    s.setPeek("a", "@1", 10);
+    s.clearPeek("a");
+    expect(s.events("a").map((e) => e.type)).toEqual(["peek"]);
+  });
+});
+
 describe("links", () => {
   test("first link wins; parentOf resolves", () => {
     const s = fresh();

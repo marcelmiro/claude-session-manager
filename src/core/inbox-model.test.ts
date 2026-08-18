@@ -141,6 +141,54 @@ describe("deriveSections", () => {
     );
     expect(sections.done.map((s) => s.id)).toEqual(["d2", "d1"]);
   });
+
+  test("needs-you floats question/approval above plain prompt-sitters, oldest first per band", () => {
+    const sections = deriveSections(
+      [
+        sess({ id: "done-old", since: NOW - D }),
+        sess({ id: "q-young", since: NOW - M, reason: "question" }),
+        sess({ id: "appr-old", since: NOW - 2 * H, reason: "approval" }),
+        sess({ id: "done-young", since: NOW - 5 * M }),
+      ],
+      NOW,
+    );
+    expect(sections.needsYou.map((s) => s.id)).toEqual(["appr-old", "q-young", "done-old", "done-young"]);
+  });
+});
+
+// ── peek (provisional resume) math ─────────────────────────────────────────
+
+import { PEEK_GRACE_MS, peekEngaged, peekVerdict } from "./inbox-model";
+
+describe("peekEngaged", () => {
+  test("only a prompt strictly newer than the peek counts", () => {
+    expect(peekEngaged(NOW, NOW + 1)).toBe(true);
+    expect(peekEngaged(NOW, NOW)).toBe(false); // boot replays the old prompt
+    expect(peekEngaged(NOW, NOW - H)).toBe(false);
+    expect(peekEngaged(NOW, null)).toBe(false); // unresolvable → stay parked
+  });
+});
+
+describe("peekVerdict", () => {
+  const base = { parkedOrDone: true, windowAlive: true, viewed: false, lastActiveAt: NOW - 2 * PEEK_GRACE_MS, now: NOW };
+
+  test("graduated or disposed row drops the record, never kills", () => {
+    expect(peekVerdict({ ...base, parkedOrDone: false })).toBe("drop");
+  });
+
+  test("dead window drops the record", () => {
+    expect(peekVerdict({ ...base, windowAlive: false })).toBe("drop");
+  });
+
+  test("viewed, or within the grace, keeps", () => {
+    expect(peekVerdict({ ...base, viewed: true })).toBe("keep");
+    expect(peekVerdict({ ...base, lastActiveAt: NOW - PEEK_GRACE_MS + 1 })).toBe("keep");
+  });
+
+  test("unviewed past the grace is a reap candidate", () => {
+    expect(peekVerdict(base)).toBe("reap-candidate");
+    expect(peekVerdict({ ...base, lastActiveAt: NOW - PEEK_GRACE_MS })).toBe("reap-candidate");
+  });
 });
 
 describe("prompt-sitters file under needs-you", () => {

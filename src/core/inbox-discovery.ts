@@ -14,8 +14,9 @@ import { loadNameCache } from "./names";
 import { branchPullRequest } from "./pull-request";
 import { detectScriptWaits } from "./script-wait";
 import { readLastPromptAt, resolveTranscriptPath } from "./last-turn";
+import { pendingToolCall } from "./hook-events";
 import type { InboxStore } from "./inbox-store";
-import { stripOverlay, type InboxSession } from "./inbox-model";
+import { peekEngaged, stripOverlay, type InboxSession } from "./inbox-model";
 
 export async function discoveryTick(store: InboxStore): Promise<void> {
   const nameCache = await loadNameCache(); // AI names, same source as the TUI
@@ -29,6 +30,7 @@ export async function discoveryTick(store: InboxStore): Promise<void> {
   const now = Date.now();
   const disp = store.dispositions();
   const arch = store.archivedAt();
+  const peeks = store.peeks();
   const prevRows: InboxSession[] = [];
   for (const r of store.loadSnapshot()) {
     try {
@@ -56,13 +58,18 @@ export async function discoveryTick(store: InboxStore): Promise<void> {
     // ("how long has it been churning on my instruction"), which also spans
     // the turn-end → script-wait handover without a reset.
     let since = !p ? (s.lastTurnAt ? +s.lastTurnAt : now) : statusChanged ? now : p.since;
+    let promptAt: number | null = null;
     if (eff === "running" && (!p || (statusChanged && p.real?.status !== "running"))) {
       try {
         const path = await resolveTranscriptPath(s.id);
-        const promptAt = path ? await readLastPromptAt(path) : null;
+        promptAt = path ? await readLastPromptAt(path) : null;
         if (promptAt) since = promptAt;
       } catch {}
     }
+    // an open AskUserQuestion outranks the coarse status read — same hook-log
+    // source as the bridge's pendingKind, so the two inboxes agree on what
+    // floats to the top of Needs You
+    const pending = pendingToolCall(s.id);
     const row: InboxSession = {
       id: s.id,
       repo: s.repo,
@@ -72,7 +79,12 @@ export async function discoveryTick(store: InboxStore): Promise<void> {
       // AI name from the shared cache (discovery only maps names onto
       // unmatched sessions, so look active ones up directly), else branch
       name: nameCache.names[s.id] || s.name || s.branch || s.id.slice(0, 8),
-      reason: s.status === "waiting" ? "approval" : "turn-done",
+      reason:
+        pending?.name === "AskUserQuestion" && pending.question
+          ? "question"
+          : s.status === "waiting"
+            ? "approval"
+            : "turn-done",
       since,
       running: eff === "running" ? { finishAt: Number.MAX_SAFE_INTEGER } : undefined,
       script: eff === "running" && s.status === "ready" ? true : undefined,
@@ -96,11 +108,20 @@ export async function discoveryTick(store: InboxStore): Promise<void> {
           : firstSight;
     }
     // it started working again — you clearly went back to it, so the parked/
-    // archived overlay no longer describes reality (reply observed, per ADR)
+    // archived overlay no longer describes reality (reply observed, per ADR).
+    // Exception: a PEEKED row's pane is provisional — its `claude -r` boot
+    // reads as running (and a preserved row's real is undefined, so first
+    // sight always counts as a status change), which is exactly the false
+    // reply this gate exists to reject. Engagement is a prompt NEWER than the
+    // peek; only that graduates the row out of parked/recent.
     if (statusChanged && eff === "running") {
-      const was = store.clearDisposition(s.id, now, "reply");
-      if (arch.has(s.id)) store.unarchive(s.id, now);
-      row.fromSnooze = was === "snoozed";
+      const peek = peeks.get(s.id);
+      if (!peek || peekEngaged(peek.openedAt, promptAt)) {
+        if (peek) store.clearPeek(s.id);
+        const was = store.clearDisposition(s.id, now, "reply");
+        if (arch.has(s.id)) store.unarchive(s.id, now);
+        row.fromSnooze = was === "snoozed";
+      }
     }
     // An OBSERVED transition into ready/waiting goes to the event log to keep
     // a history of when sessions handed back.
