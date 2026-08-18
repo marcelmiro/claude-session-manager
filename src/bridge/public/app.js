@@ -123,6 +123,10 @@ function toggleView() {
 // The daemon's inbox snapshot is older than 10s (or absent) — sections render from the
 // last known state with a banner. Server-computed; classic view ignores it.
 const inboxStale = signal(false);
+// Recently-done stays collapsed by default (a day of archives is screen bloat, and the
+// section is an archive entry point, not a queue) — tap its header to expand. Not
+// persisted: every launch starts collapsed.
+const showDone = signal(false);
 // A wrapped `{sessions, inboxStale}` payload has been applied this page-life — gates the
 // "inbox zero" empty state, so a stale pre-inbox localStorage hydration never shows it.
 const inboxAware = signal(false);
@@ -1647,11 +1651,18 @@ function List() {
         ${inbox &&
         inboxGroups.map(
           (g) => html`
-            <div class="group" key=${g.key}>
-              <div class="repo ${g.key === "needs-you" ? "needsyou" : g.key === "done" ? "donesec" : ""}">
-                ${g.title} · ${g.rows.length}
-              </div>
-              ${g.rows.map(renderInboxRow)}
+            <div class="group inboxsec" key=${g.key}>
+              ${g.key === "done"
+                ? html`<button
+                    class="repo donesec donetoggle"
+                    onClick=${() => (showDone.value = !showDone.value)}
+                  >
+                    <span class="chev">${showDone.value ? "▾" : "▸"}</span> ${g.title} · ${g.rows.length}
+                  </button>`
+                : html`<div class="repo ${g.key === "needs-you" ? "needsyou" : ""}">
+                    ${g.title} · ${g.rows.length}
+                  </div>`}
+              ${(g.key !== "done" || showDone.value) && g.rows.map(renderInboxRow)}
             </div>
           `,
         )}

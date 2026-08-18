@@ -789,6 +789,23 @@
         font-size: 12px;
       }
       .repo.donesec { color: var(--dim); }
+      /* inbox sections breathe more than repo groups — they're different queues,
+         not one list's subheadings */
+      .group.inboxsec { margin-top: 26px; }
+      .group.inboxsec:first-child { margin-top: 4px; }
+      /* recently-done header doubles as its collapse toggle — reset the button chrome
+         so it renders exactly like the other section headers, plus a chevron */
+      .donetoggle {
+        display: block;
+        width: 100%;
+        text-align: left;
+        background: none;
+        border: none;
+        border-radius: 0;
+        padding: 0;
+      }
+      .donetoggle:active { background: none; color: var(--muted); }
+      .donetoggle .chev { display: inline-block; width: 1em; }
       .row.done { opacity: 0.55; }
       .row .wokemark { color: var(--peach); margin-right: 4px; font-size: 12px; }
 
