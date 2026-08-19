@@ -1088,7 +1088,7 @@ export function paneFromCommandLine(
  * (`pane-sessions.json`), reverse-looked-up against live panes. Fallback is the live
  * `claude --resume <id>` process command line — the SAME authoritative path
  * `discoverSessions` uses — for sessions the hook never recorded (e.g. resumed before
- * `c0 setup`, or whose hook event was consumed without persisting). Without the
+ * `claude0 setup`, or whose hook event was consumed without persisting). Without the
  * fallback, such a session shows in the list (discovery resolves it) but the bridge's
  * statusline scrape / mark-read / send can't find its pane. Hook map wins, and the
  * fallback is guarded against stale launch ids (see `paneFromCommandLine`).

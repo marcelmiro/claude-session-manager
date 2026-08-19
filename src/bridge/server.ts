@@ -1546,7 +1546,7 @@ function isAllowedHost(host: string): boolean {
   return false;
 }
 
-/** Returns the server so tests can bind port 0 and stop it; `c0 bridge` ignores it. */
+/** Returns the server so tests can bind port 0 and stop it; `claude0 bridge` ignores it. */
 export function startBridge(): ReturnType<typeof Bun.serve> {
   const host = process.env.CLAUDE0_BRIDGE_HOST ?? "127.0.0.1";
   const port = Number(process.env.CLAUDE0_BRIDGE_PORT ?? "8473");
@@ -1563,7 +1563,7 @@ export function startBridge(): ReturnType<typeof Bun.serve> {
   tokenDigest = createHash("sha256").update(rawToken).digest();
 
   if (!existsSync(EVENTS_DIR)) {
-    console.error("EVENTS_DIR not found: live push disabled; restart bridge after c0 setup");
+    console.error("EVENTS_DIR not found: live push disabled; restart bridge after claude0 setup");
   }
   watchEvents((id) => {
     broadcast({ type: "session-changed", id });
@@ -1633,7 +1633,7 @@ export function startBridge(): ReturnType<typeof Bun.serve> {
       }
     },
   });
-  console.error(`c0 bridge listening on http://${host}:${server.port}${FIXTURES ? " (fixtures mode — canned data)" : ""}`);
+  console.error(`claude0 bridge listening on http://${host}:${server.port}${FIXTURES ? " (fixtures mode — canned data)" : ""}`);
 
   // Pre-warm the /sessions projection so the phone's first request after a bridge
   // (re)start hits the served-from-cache path instead of paying the discovery sweep.

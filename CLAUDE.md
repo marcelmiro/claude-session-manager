@@ -17,11 +17,11 @@ bun run status            # Lightweight tmux status-right monitor
 bun test                  # Run tests (bun:test)
 ```
 
-Entry: `bin/c0.ts` (CLI router) → `src/index.ts` (TUI) or `src/cli.ts` (subcommands)
+Entry: `bin/claude0.ts` (CLI router) → `src/index.ts` (TUI) or `src/cli.ts` (subcommands)
 
 ## Bridge restarts (do it directly)
 
-The mobile bridge (`c0 bridge`) runs as a systemd user unit on the Linux VM host (`127.0.0.1:8473`, proxied to the phone via `tailscale serve`). **When a change needs a restart, restart it yourself — don't just tell the user.** This is a routine, durably-authorized action; treat it as approved.
+The mobile bridge (`claude0 bridge`) runs as a systemd user unit on the Linux VM host (`127.0.0.1:8473`, proxied to the phone via `tailscale serve`). **When a change needs a restart, restart it yourself — don't just tell the user.** This is a routine, durably-authorized action; treat it as approved.
 
 - **When a restart IS needed:** any change to `src/bridge/server.ts` or the `core/` functions it imports — the server code is loaded into the running Bun process.
 - **When it is NOT needed:** changes to `src/bridge/public/*` (`app.js`, `index.html`/CSS). Those are served fresh (`cache-control: no-cache`); the user just refreshes/reopens the page on the phone.
@@ -29,41 +29,41 @@ The mobile bridge (`c0 bridge`) runs as a systemd user unit on the Linux VM host
 
 > Darwin-hosted fallback (rollback window only): recover the token from the running process, kill it, and relaunch detached —
 > ```sh
-> PID=$(pgrep -f "c0 bridge" | head -1)
+> PID=$(pgrep -f "claude0 bridge" | head -1)
 > TOK=$(ps eww -p "$PID" | tr ' ' '\n' | grep '^CLAUDE0_BRIDGE_TOKEN=' | cut -d= -f2)
 > kill "$PID"; sleep 1
-> CLAUDE0_BRIDGE_TOKEN="$TOK" nohup c0 bridge > "$HOME/.config/c0/bridge.log" 2>&1 & disown
+> CLAUDE0_BRIDGE_TOKEN="$TOK" nohup claude0 bridge > "$HOME/.config/c0/bridge.log" 2>&1 & disown
 > ```
 > Host/port default to `127.0.0.1:8473` when unset. The benign `Failed to start server. Is port 8473 in use?` log line is a second `caffeinate`-wrapped instance losing the bind race — ignore it.
 
 ## CLI subcommands
 
-`bin/c0.ts` routes based on `process.argv[2]`. All subcommands except `status` live in `src/cli.ts`.
+`bin/claude0.ts` routes based on `process.argv[2]`. All subcommands except `status` live in `src/cli.ts`. `claude0` is the canonical command; `c0` is an installed alias (both symlinks to the same entry) — docs, units, and fragments use `claude0`, `c0` is for typing.
 
 | Command | Description | Output |
 |---------|-------------|--------|
-| `c0` | Open full TUI (`CLAUDE0_FOCUS_PANE` env var pre-selects a pane) | blessed screen |
-| `c0 next` | Switch to next attention session (oldest first) | tmux display-message |
-| `c0 reset` | Reset all window names to "claude", clear ⚡ and attention state | tmux display-message |
-| `c0 status` | Tmux status-right monitor (`⚡3 🔄2`) | stdout |
-| `c0 list` | Text-only session list with status/repo/context% | stdout |
-| `c0 switch <name>` | Fuzzy-match session by name and switch to it | tmux display-message |
-| `c0 setup` | Install Claude hooks plus Claude0-owned tmux/zsh/terminal integration | stdout |
-| `c0 save-sessions` | Snapshot pane→session map for tmux-resurrect | stdout (silent in hook) |
-| `c0 restore-sessions` | Restore Claude sessions after tmux-resurrect restore | stdout |
-| `c0 --help` | Show available commands and usage | stdout |
+| `claude0` | Open full TUI (`CLAUDE0_FOCUS_PANE` env var pre-selects a pane) | blessed screen |
+| `claude0 next` | Switch to next attention session (oldest first) | tmux display-message |
+| `claude0 reset` | Reset all window names to "claude", clear ⚡ and attention state | tmux display-message |
+| `claude0 status` | Tmux status-right monitor (`⚡3 🔄2`) | stdout |
+| `claude0 list` | Text-only session list with status/repo/context% | stdout |
+| `claude0 switch <name>` | Fuzzy-match session by name and switch to it | tmux display-message |
+| `claude0 setup` | Install Claude hooks plus Claude0-owned tmux/zsh/terminal integration | stdout |
+| `claude0 save-sessions` | Snapshot pane→session map for tmux-resurrect | stdout (silent in hook) |
+| `claude0 restore-sessions` | Restore Claude sessions after tmux-resurrect restore | stdout |
+| `claude0 --help` | Show available commands and usage | stdout |
 
-**Testing subcommands**: Use `bun run bin/c0.ts <cmd>` to test without installing globally. Example: `bun run bin/c0.ts list` prints active sessions to stdout — useful for verifying session discovery, status detection, and name resolution without launching the TUI.
+**Testing subcommands**: Use `bun run bin/claude0.ts <cmd>` to test without installing globally. Example: `bun run bin/claude0.ts list` prints active sessions to stdout — useful for verifying session discovery, status detection, and name resolution without launching the TUI.
 
-**`c0 next` details**: Reads `state.json` attention flags, picks the session with the oldest `lastTransition` timestamp, clears its attention flag, strips ⚡ prefix, and calls `switchToPane()`. Falls back to scanning tmux windows for ⚡ prefixes when state.json has no valid candidates (handles state↔window desync).
+**`claude0 next` details**: Reads `state.json` attention flags, picks the session with the oldest `lastTransition` timestamp, clears its attention flag, strips ⚡ prefix, and calls `switchToPane()`. Falls back to scanning tmux windows for ⚡ prefixes when state.json has no valid candidates (handles state↔window desync).
 
-**`c0 reset` details**: Lists all tmux windows, renames any with non-standard names (not in `zsh|bash|dev|fish|sh`) back to repo name from pane cwd. Strips ⚡ and 🔄 prefixes. Also clears all attention flags in `state.json`.
+**`claude0 reset` details**: Lists all tmux windows, renames any with non-standard names (not in `zsh|bash|dev|fish|sh`) back to repo name from pane cwd. Strips ⚡ and 🔄 prefixes. Also clears all attention flags in `state.json`.
 
-**`c0 switch` scoring**: exact=100, starts-with=80, contains=60, word-starts-with=40, subsequence=20. Matches against window names with ⚡/🔄 stripped.
+**`claude0 switch` scoring**: exact=100, starts-with=80, contains=60, word-starts-with=40, subsequence=20. Matches against window names with ⚡/🔄 stripped.
 
-**Focus pane pre-selection**: Set `CLAUDE0_FOCUS_PANE=%42` (tmux pane ID) to pre-select that session on launch. Requires `run-shell` to expand the format string: `bind a run-shell 'tmux set-environment CLAUDE0_FOCUS_PANE "#{pane_id}"' \; display-popup -E -w 90% -h 85% c0`. Falls back to first session if pane not found.
+**Focus pane pre-selection**: Set `CLAUDE0_FOCUS_PANE=%42` (tmux pane ID) to pre-select that session on launch. Requires `run-shell` to expand the format string: `bind a run-shell 'tmux set-environment CLAUDE0_FOCUS_PANE "#{pane_id}"' \; display-popup -E -w 90% -h 85% claude0`. Falls back to first session if pane not found.
 
-**`c0 setup` details**: Installs Claude0's Claude lifecycle hooks under `~/.config/c0/hooks`, preserving existing hooks and settings. It also updates narrowly scoped Claude0 tmux/zsh fragments under `~/.config/c0/`, installs the `~/.local/bin/c0` command plus a private terminal launcher under `~/.config/c0/`, and adds one import to the user's `.tmux.conf` and `.zshrc`. Safe to run multiple times (idempotent); personal dotfiles, prompts, tmux presentation, and TPM-managed plugins are never replaced or installed.
+**`claude0 setup` details**: Installs Claude0's Claude lifecycle hooks under `~/.config/c0/hooks`, preserving existing hooks and settings. It also updates narrowly scoped Claude0 tmux/zsh fragments under `~/.config/c0/`, installs the `~/.local/bin/c0` command plus a private terminal launcher under `~/.config/c0/`, and adds one import to the user's `.tmux.conf` and `.zshrc`. Safe to run multiple times (idempotent); personal dotfiles, prompts, tmux presentation, and TPM-managed plugins are never replaced or installed.
 
 ## Architecture
 
@@ -99,7 +99,7 @@ src/
 
 `discoverSessions()` → scan index files + `listPanes()` + `findClaudeProcesses()` in parallel → correlate by TTY → `capturePane()` for status detection → `getBaseRepoPath()` for worktree resolution → `groupSessions()` → `buildDisplayRows()` → `renderSessionList()`
 
-Two-phase discovery: Phase A = active tmux panes (fast), Phase B = archived from index files (last 24h, no active pane). Session UUIDs resolved via Claude Code's `SessionStart` hook (writes paneId→sessionId to `~/.config/c0/hook-events`). Run `c0 setup` to install the hook.
+Two-phase discovery: Phase A = active tmux panes (fast), Phase B = archived from index files (last 24h, no active pane). Session UUIDs resolved via Claude Code's `SessionStart` hook (writes paneId→sessionId to `~/.config/c0/hook-events`). Run `claude0 setup` to install the hook.
 
 ### Worktree-aware repo grouping
 
@@ -107,7 +107,7 @@ Sessions in git worktrees group under their base repo via `getBaseRepoPath()` (u
 
 ### Multi-pane window support
 
-Windows with multiple Claude panes are named `{repo}` (same repo) or `{repo1}+{repo2}` (mixed). Attention prefix (⚡) only cleared from a window when no other panes in that window still need attention. State synced with external changes from `c0 next` and the monitor on each refresh cycle.
+Windows with multiple Claude panes are named `{repo}` (same repo) or `{repo1}+{repo2}` (mixed). Attention prefix (⚡) only cleared from a window when no other panes in that window still need attention. State synced with external changes from `claude0 next` and the monitor on each refresh cycle.
 
 ### Session matching
 
@@ -226,9 +226,9 @@ Tmux windows use the format `[⚡|🔄|⏳]{repo}[/{ai-name}][+]`:
 - `+` = fork indicator (transitional, until fork gets its own AI name)
 - `⚡`/`🔄`/`⏳` = status prefixes (attention > running > script-wait > none)
 
-`⏳` = the turn is over (status `ready`) but the session still waits on a live `run_in_background` script (same detection as portkey's list badge: transcript pending-scripts + `lsof` runner-liveness probe). Visibility only — it never feeds notifications, attention, `c0 next`, sort order, or the status-right counts. Both the monitor (per tick) and the TUI (per refresh) compute it via the same entry point, `detectScriptWaits` in `core/script-wait.ts`. Neither process outlives the work — the monitor is fresh per tick, and the TUI is fresh per `display-popup` open — so nothing is cached in memory: the transcript parse persists to `~/.config/c0/script-wait.json` (keyed by size+mtime) and the liveness verdicts to `~/.config/c0/verdicts/` (see below).
+`⏳` = the turn is over (status `ready`) but the session still waits on a live `run_in_background` script (same detection as portkey's list badge: transcript pending-scripts + `lsof` runner-liveness probe). Visibility only — it never feeds notifications, attention, `claude0 next`, sort order, or the status-right counts. Both the monitor (per tick) and the TUI (per refresh) compute it via the same entry point, `detectScriptWaits` in `core/script-wait.ts`. Neither process outlives the work — the monitor is fresh per tick, and the TUI is fresh per `display-popup` open — so nothing is cached in memory: the transcript parse persists to `~/.config/c0/script-wait.json` (keyed by size+mtime) and the liveness verdicts to `~/.config/c0/verdicts/` (see below).
 
-Examples: `c0`, `claude0/fix-auth`, `⚡claude0/fix-auth`, `🔄api`, `claude0/fix-auth+`
+Examples: `claude0`, `claude0/fix-auth`, `⚡claude0/fix-auth`, `🔄api`, `claude0/fix-auth+`
 Multi-pane same repo: `{repo}`. Multi-pane mixed: `{repo1}+{repo2}`.
 Helpers in `notifications.ts`: `buildBaseName()`, `extractAIName()`, `extractRepoFromWindowName()`.
 
@@ -291,9 +291,9 @@ Home is the inbox (ADR 0013 addendum 6): the same lifecycle sections as the Mac 
 
 ## Inbox sidebar + daemon (ADR 0013)
 
-Sessions carry a lifecycle (Needs you → Running → Parked → Recently done); a per-window tmux sidebar is the surface, `c0 daemon` is the engine. Decision record: [ADR 13](docs/adr/0013-inbox-lifecycle-model.md) + its addenda (the second is the settled interaction grammar; the sixth is the portkey inbox).
+Sessions carry a lifecycle (Needs you → Running → Parked → Recently done); a per-window tmux sidebar is the surface, `claude0 daemon` is the engine. Decision record: [ADR 13](docs/adr/0013-inbox-lifecycle-model.md) + its addenda (the second is the settled interaction grammar; the sixth is the portkey inbox).
 
-- **`c0 daemon`** — launchd-kept-alive (`com.claude0.daemon`, installed idempotently by `c0 setup`; plist pins the PATH bun symlink, bootstrap verifies+retries around launchd's bootout race). On a Linux VM host it's the `claude0-daemon.service` user unit instead, installed by `deploy/provision.sh` (`c0 setup` skips launchd off-darwin); the wake alert there is a Web Push — targeted at the setter device when the snooze was set from portkey (the disposition records its `device_id`), broadcast to every device otherwise, since a headless host has no banner tier; a darwin-hosted daemon adds the same targeted push beside its banner. At cutover, `inbox.db` rides the state copy and the Mac agent is booted out — one host owns the inbox (`deploy/RUNBOOK.md`). Owns three duties: the **snooze wake pass** (`core/inbox-wake.ts`, every 15s: due snooze + no live pane → detached `claude -r` with an in-pane wake banner, attention stamped into state.json only after detected status `ready` — boot spinner reads as running and the monitor's carry-over would eat an early stamp — then the macOS banner tier; `markAutoResumed` is an atomic claim so overlapping wakers can't double-spawn); **discovery snapshot production** (`core/inbox-discovery.ts`, every 3s in a fresh child process — in-process discovery leaks — the snapshot table's owner; the bridge's `seedSnapshotRow` is the only other writer, insert-if-absent only); and the **sidebar renderer**.
+- **`claude0 daemon`** — launchd-kept-alive (`com.claude0.daemon`, installed idempotently by `claude0 setup`; plist pins the PATH bun symlink, bootstrap verifies+retries around launchd's bootout race). On a Linux VM host it's the `claude0-daemon.service` user unit instead, installed by `deploy/provision.sh` (`claude0 setup` skips launchd off-darwin); the wake alert there is a Web Push — targeted at the setter device when the snooze was set from portkey (the disposition records its `device_id`), broadcast to every device otherwise, since a headless host has no banner tier; a darwin-hosted daemon adds the same targeted push beside its banner. At cutover, `inbox.db` rides the state copy and the Mac agent is booted out — one host owns the inbox (`deploy/RUNBOOK.md`). Owns three duties: the **snooze wake pass** (`core/inbox-wake.ts`, every 15s: due snooze + no live pane → detached `claude -r` with an in-pane wake banner, attention stamped into state.json only after detected status `ready` — boot spinner reads as running and the monitor's carry-over would eat an early stamp — then the macOS banner tier; `markAutoResumed` is an atomic claim so overlapping wakers can't double-spawn); **discovery snapshot production** (`core/inbox-discovery.ts`, every 3s in a fresh child process — in-process discovery leaks — the snapshot table's owner; the bridge's `seedSnapshotRow` is the only other writer, insert-if-absent only); and the **sidebar renderer**.
 - **Single renderer** (`src/sidebar/renderer.ts`): ONE process paints every window's sidebar pane by writing ANSI to the pane tty (a pty-slave write IS pane output). Panes are dumb shell stubs (`: sidebar-pane; stty raw -echo; … | nc -U sidebar.sock`) that relay stdin bytes back; DECSET 1004/1006 written to the tty route focus + SGR mouse through the same relay. Per-line diff painting; a vanished tty (pane respawn allocates a new pty) re-resolves and repaints. The renderer self-installs tmux wiring (M-s focus, M-S visibility toggle, after-select-window bounce hook, after-copy-mode eject hook — copy mode on a stub is always accidental and gets cancelled instantly) on stand-up and every 30s — a tmux server restart is rewired within a tick, no tmux.conf hook.
 - **Model** (`core/inbox-model.ts`, pure): wake math (Mac digits-then-unit snoozes are exact relative offsets on both units, 1d = 24h; phone presets via `presetWakeAt` — hours exact, day presets at 8AM local on the target calendar day), section derivation (`sectionOf`/`effectiveSince`/`deriveSections`), snapshot+overlay composition. **Every live prompt-sitter files under Needs You** — the aim is to clear it by actioning (reply, snooze, block, done). A transition-gated admission with a neutral OPEN bucket shipped first and was retired after living with it (it hid rows that still wanted a decision); observed running→ready/waiting transitions are still written as `transition` events for the scoreboard. status-right carries the Claude0 scoreboard: `⚡N 🔄N ✓N` where ✓ = distinct sessions archived since local midnight. View building is pure too (`src/sidebar/rows.ts`) and input decoding (`src/sidebar/input.ts`) — both tested without tmux. A snapshot row preserved without a live pane (parked/done/restored) gets its stale `real`/`running`/`script` stripped by discovery, so Enter resumes instead of chasing the killed pane.
 - **Store** (`core/inbox-store.ts`, bun:sqlite WAL at `~/.config/c0/inbox.db`): authored facts (dispositions/archived/events/links) in their own tables; the activity snapshot is opaque JSON replaced by discovery each tick — `saveSnapshot` keeps fact-holding rows the new set doesn't cover, so a bridge verb that seeds a row mid-tick (`seedSnapshotRow`, the one non-discovery snapshot writer) can't be wiped before the preserve rule sees it; `PRAGMA data_version` is the cross-process change poll.
@@ -329,9 +329,9 @@ Claude0 can save and restore Claude Code sessions across tmux server crashes whe
 
 ### How it works
 
-1. **On save** (`c0 save-sessions`): Snapshots a mapping of stable tmux coordinates (`session:window.pane_index`) to Claude session UUIDs **and each session's cwd**, written to `~/.config/c0/resurrect-sessions.json`. This uses data already tracked by Claude0's SessionStart hook in `pane-sessions.json`. A pane reporting `$HOME` never overwrites a real repo path already recorded for that session (`pickSavedCwd` in `core/resurrect.ts`) — a restored pane that hasn't got its directory back yet would otherwise poison the entry permanently.
+1. **On save** (`claude0 save-sessions`): Snapshots a mapping of stable tmux coordinates (`session:window.pane_index`) to Claude session UUIDs **and each session's cwd**, written to `~/.config/c0/resurrect-sessions.json`. This uses data already tracked by Claude0's SessionStart hook in `pane-sessions.json`. A pane reporting `$HOME` never overwrites a real repo path already recorded for that session (`pickSavedCwd` in `core/resurrect.ts`) — a restored pane that hasn't got its directory back yet would otherwise poison the entry permanently.
 
-2. **On restore** (`c0 restore-sessions`): After tmux-resurrect restores panes (as empty shells), reads the saved mapping, matches coordinates to the newly created panes, and sends `cd <dir>; claude --resume=<sessionId>` in each via `tmux send-keys`. Skips panes that already have a foreground process, and skips a coordinate whose session id was already resumed this pass (one id can sit at two coordinates; resuming it twice leaves two processes fighting over one transcript).
+2. **On restore** (`claude0 restore-sessions`): After tmux-resurrect restores panes (as empty shells), reads the saved mapping, matches coordinates to the newly created panes, and sends `cd <dir>; claude --resume=<sessionId>` in each via `tmux send-keys`. Skips panes that already have a foreground process, and skips a coordinate whose session id was already resumed this pass (one id can sit at two coordinates; resuming it twice leaves two processes fighting over one transcript).
 
    `<dir>` comes from `resolveRestoreTarget` (`core/resurrect.ts`), which tests `$HOME` **first** — `$HOME` is always a live directory, so a generic exists-check would shadow the case this exists to repair. Order: saved cwd is `$HOME` → Claude's last-recorded cwd from the transcript; saved cwd still on disk → itself; saved cwd gone (deleted worktree) → its base repo, via `recoverWorktreeTranscript` so the resumed session isn't tailing a frozen transcript copy; otherwise no `cd` at all. The separator is `;`, not `&&`, so a failed `cd` still leaves the session resumed.
 
@@ -340,20 +340,20 @@ Claude0 can save and restore Claude Code sessions across tmux server crashes whe
 Add these hooks to your `tmux.conf` alongside the tmux-resurrect plugin config:
 
 ```
-set -g @resurrect-hook-post-save-all 'c0 save-sessions'
-set -g @resurrect-hook-post-restore-all 'c0 restore-sessions'
+set -g @resurrect-hook-post-save-all 'claude0 save-sessions'
+set -g @resurrect-hook-post-restore-all 'claude0 restore-sessions'
 ```
 
 If using tmux-continuum for auto-save, the save hook runs automatically on each periodic save. The restore hook runs when `@continuum-restore 'on'` triggers a restore on server start.
 
-`@resurrect-processes` must never include `claude`: resurrect's process restore spawns a *fresh* claude while `c0 restore-sessions` resumes the real one — two processes fighting over one transcript ([ADR 16](docs/adr/0016-systemd-units-replace-launchd.md)). On a VM host, tmux itself runs as a systemd user unit whose `ExecStop` triggers `c0 save-sessions` (`deploy/units/tmux.service`).
+`@resurrect-processes` must never include `claude`: resurrect's process restore spawns a *fresh* claude while `claude0 restore-sessions` resumes the real one — two processes fighting over one transcript ([ADR 16](docs/adr/0016-systemd-units-replace-launchd.md)). On a VM host, tmux itself runs as a systemd user unit whose `ExecStop` triggers `claude0 save-sessions` (`deploy/units/tmux.service`).
 
 ### Commands
 
 | Command | Description | When called |
 |---------|-------------|-------------|
-| `c0 save-sessions` | Snapshot pane→session map using stable tmux coordinates | tmux-resurrect post-save hook or manually |
-| `c0 restore-sessions` | Launch `claude --resume` in restored panes | tmux-resurrect post-restore hook or manually |
+| `claude0 save-sessions` | Snapshot pane→session map using stable tmux coordinates | tmux-resurrect post-save hook or manually |
+| `claude0 restore-sessions` | Launch `claude --resume` in restored panes | tmux-resurrect post-restore hook or manually |
 
 ### Data flow
 
@@ -363,7 +363,7 @@ Restore: `resurrect-sessions.json` (coordinate→{sessionId, cwd}) + `tmux list-
 
 ### Limitations
 
-- Requires Claude0's SessionStart hook to be installed (`c0 setup`) so pane→session mappings are tracked.
+- Requires Claude0's SessionStart hook to be installed (`claude0 setup`) so pane→session mappings are tracked.
 - The mapping is only as fresh as the last save. Sessions started after the last save won't be in the map.
 - Pane coordinates rely on tmux-resurrect restoring the same session/window/pane layout. Manual tmux reconfiguration after restore may shift coordinates.
 
@@ -376,7 +376,7 @@ Restore: `resurrect-sessions.json` (coordinate→{sessionId, cwd}) + `tmux list-
 - Session logs: `~/.claude/projects/*/{sessionId}.jsonl`
 - Config/state: `~/.config/c0/{config,state,names}.json`
 - Hook events: `~/.config/c0/hook-events` (SessionStart hook writes pane→session mappings)
-- Hook script: `~/.config/c0/hooks/session-start.sh` (installed by `c0 setup`)
+- Hook script: `~/.config/c0/hooks/session-start.sh` (installed by `claude0 setup`)
 - Resurrect map: `~/.config/c0/resurrect-sessions.json` (coordinate→sessionId, written by save-sessions)
 - Web Push state: `~/.config/c0/push-vapid.json` (VAPID keypair), `push-subscriptions.json` (deviceId→subscription), `consumers/<deviceId>` (per-device SSE liveness), `source/<sessionId>.json` (which device drove the turn), `pushed/<deviceId>.json` (recent-push ledger for notification-tap attribution, delete-on-read)
 - Script-wait cache: `~/.config/c0/script-wait.json` (per-session transcript parse for the ⏳ prefix, keyed by size+mtime), `verdicts/<taskId>` (per-task runner-liveness verdicts, shared by TUI + monitor + bridge)

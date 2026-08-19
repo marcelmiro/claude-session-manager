@@ -9,7 +9,7 @@ touching real sessions. Verified 2026-08-18 on the Linux VM host (Chrome at
 1. **Playground bridge** (fixtures, never real sessions):
    ```sh
    CLAUDE0_BRIDGE_FIXTURES=1 CLAUDE0_BRIDGE_TOKEN=design-token \
-   CLAUDE0_BRIDGE_HOST=127.0.0.2 CLAUDE0_BRIDGE_PORT=8481 bun run bin/c0.ts bridge
+   CLAUDE0_BRIDGE_HOST=127.0.0.2 CLAUDE0_BRIDGE_PORT=8481 bun run bin/claude0.ts bridge
    ```
    Fixtures cover every status/section including woken/blocked/done rows;
    mutating POSTs are stubbed.

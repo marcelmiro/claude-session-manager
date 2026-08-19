@@ -9,7 +9,7 @@ Environment=PATH=%h/.bun/bin:%h/.local/bin:/usr/local/bin:/usr/bin:/bin
 # that's the whole point of a daemon: a snooze survives reboots and fires on a
 # headless host. launchd (com.claude0.daemon) owns this on darwin; this unit is the
 # systemd twin. ExecStart must be absolute — systemd does not PATH-resolve.
-ExecStart=%h/.bun/bin/c0 daemon
+ExecStart=%h/.bun/bin/claude0 daemon
 Restart=always
 RestartSec=5s
 

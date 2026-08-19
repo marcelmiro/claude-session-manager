@@ -1,12 +1,12 @@
 /**
  * Claude0 CLI subcommands — lightweight commands that don't require the full TUI.
  *
- * c0 next              — switch to the next session needing attention
- * c0 reset             — reset all window names back to repo names
- * c0 list              — print a text-only session list
- * c0 switch <name>     — fuzzy-match a session by name and switch to it
- * c0 save-sessions     — snapshot pane→session mappings for tmux-resurrect
- * c0 restore-sessions  — restore Claude sessions after tmux-resurrect restore
+ * claude0 next              — switch to the next session needing attention
+ * claude0 reset             — reset all window names back to repo names
+ * claude0 list              — print a text-only session list
+ * claude0 switch <name>     — fuzzy-match a session by name and switch to it
+ * claude0 save-sessions     — snapshot pane→session mappings for tmux-resurrect
+ * claude0 restore-sessions  — restore Claude sessions after tmux-resurrect restore
  */
 
 import { homedir } from "os";
@@ -30,7 +30,7 @@ import { mkdirSync, writeFileSync, readFileSync, readlinkSync, rmSync, symlinkSy
 const home = homedir();
 
 // ---------------------------------------------------------------------------
-// c0 next
+// claude0 next
 // ---------------------------------------------------------------------------
 
 /**
@@ -42,7 +42,7 @@ export async function next(): Promise<void> {
   const state = await loadState();
 
   // Clear attention for the pane the user is currently viewing.
-  // Without this, c0-next ping-pongs: switches away from pane A (still flagged)
+  // Without this, claude0-next ping-pongs: switches away from pane A (still flagged)
   // to pane B, then next call picks A again because its flag was never cleared.
   let activePaneId: string | undefined;
   try {
@@ -188,7 +188,7 @@ export async function next(): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
-// c0 reset
+// claude0 reset
 // ---------------------------------------------------------------------------
 
 /** Standard shell/tool names that shouldn't be renamed. */
@@ -270,7 +270,7 @@ export async function reset(): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
-// c0 list
+// claude0 list
 // ---------------------------------------------------------------------------
 
 const STATUS_ICONS: Record<string, string> = {
@@ -375,7 +375,7 @@ export async function list(): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
-// c0 switch <name>
+// claude0 switch <name>
 // ---------------------------------------------------------------------------
 
 /** Score a candidate name against a search needle */
@@ -395,7 +395,7 @@ function fuzzyScore(candidate: string, needle: string): number {
  */
 export async function switchTo(name?: string): Promise<void> {
   if (!name) {
-    console.error("Usage: c0 switch <name>");
+    console.error("Usage: claude0 switch <name>");
     process.exit(1);
   }
 
@@ -464,7 +464,7 @@ function isSubsequence(sub: string, str: string): boolean {
 }
 
 // ---------------------------------------------------------------------------
-// c0 setup
+// claude0 setup
 // ---------------------------------------------------------------------------
 
 export const HOOK_VERSION = 19;
@@ -480,7 +480,7 @@ const CONSUMER_FRESH_S = 40;
 // no consume-once log for readers to fight over (v6 appended to a truncate-once hook-events
 // file that only the monitor persisted, leaving sessions listed-but-unsendable).
 const HOOK_SCRIPT = `#!/bin/bash
-# CLAUDE0_HOOK_VERSION=${HOOK_VERSION}
+# HOOK_VERSION=${HOOK_VERSION}
 INPUT=$(cat)
 SESSION_ID=$(echo "$INPUT" | grep -o '"session_id":"[^"]*"' | head -1 | cut -d'"' -f4)
 # Only use $TMUX_PANE — never fall back to tmux display-message which returns
@@ -518,7 +518,7 @@ fi`;
 
 // Non-blocking events (UserPromptSubmit/PostToolUse/Notification/Stop/SubagentStop).
 const EVENT_HOOK_SCRIPT = `#!/bin/bash
-# CLAUDE0_HOOK_VERSION=${HOOK_VERSION}
+# HOOK_VERSION=${HOOK_VERSION}
 # Claude0 event logger — see LOG_EVENT_SNIPPET.
 ${LOG_EVENT_SNIPPET}
 `;
@@ -531,7 +531,7 @@ ${LOG_EVENT_SNIPPET}
 // timeout — the desk prompt is always the floor). Pure shell, no jq/new deps; the
 // full tool_input is recovered by listPendingApprovals from the logged event.
 const PRETOOLUSE_HOOK_SCRIPT = `#!/bin/bash
-# CLAUDE0_HOOK_VERSION=${HOOK_VERSION}
+# HOOK_VERSION=${HOOK_VERSION}
 # Claude0 PreToolUse handler — log, then attach-aware blocking approval
 # (AskUserQuestion is delegated to question-pretooluse.sh).
 ${LOG_EVENT_SNIPPET}
@@ -652,7 +652,7 @@ exit 0
 // forward-compatible; if a future claude breaks it the phone-answer just won't take
 // (visibly degraded) rather than silently reverting the feature on every patch bump.
 const QUESTION_PRETOOLUSE_HOOK_SCRIPT = `#!/bin/bash
-# CLAUDE0_HOOK_VERSION=${HOOK_VERSION}
+# HOOK_VERSION=${HOOK_VERSION}
 # Claude0 AskUserQuestion handler — focus-aware intercept (event logging stays in pretooluse.sh).
 INPUT=$(cat)
 [ -z "\$TMUX_PANE" ] && exit 0
@@ -695,7 +695,7 @@ if [ "\$WA" = "1" ] && [ -n "\$CL" ]; then
   fi
 fi
 # All gates passed → hold and answer via the file channel (releases early on refocus).
-printf '%s' "\$INPUT" | c0 question-hook
+printf '%s' "\$INPUT" | claude0 question-hook
 exit \$?
 `;
 
@@ -741,8 +741,8 @@ const HOOK_REGISTRATIONS: { event: string; script: string; matcher?: string; tim
   },
 ];
 
-const CLAUDE0_TMUX_SOURCE = "if-shell 'test -f ~/.config/c0/tmux.conf' 'source-file ~/.config/c0/tmux.conf' ''";
-const CLAUDE0_ZSH_SOURCE = '[[ -r "$HOME/.config/c0/shell.zsh" ]] && source "$HOME/.config/c0/shell.zsh"';
+const TMUX_SOURCE_LINE = "if-shell 'test -f ~/.config/c0/tmux.conf' 'source-file ~/.config/c0/tmux.conf' ''";
+const ZSH_SOURCE_LINE = '[[ -r "$HOME/.config/c0/shell.zsh" ]] && source "$HOME/.config/c0/shell.zsh"';
 
 /**
  * Install the Claude0-owned terminal profile and add one import to the user's base
@@ -754,7 +754,7 @@ async function installTerminalIntegration(home: string): Promise<string[]> {
   const files = [
     { source: `${configDir}/tmux.conf`, target: `${home}/.config/c0/tmux.conf`, executable: false },
     { source: `${configDir}/shell.zsh`, target: `${home}/.config/c0/shell.zsh`, executable: false },
-    { source: `${configDir}/c0-terminal`, target: `${home}/.config/c0/terminal-launcher`, executable: true },
+    { source: `${configDir}/terminal-launcher`, target: `${home}/.config/c0/terminal-launcher`, executable: true },
   ];
   const changed: string[] = [];
 
@@ -771,27 +771,31 @@ async function installTerminalIntegration(home: string): Promise<string[]> {
     if (file.executable) await Bun.$`chmod +x ${file.target}`.quiet();
   }
 
-  const commandSource = `${import.meta.dir}/../bin/c0.ts`;
-  const commandTarget = `${home}/.local/bin/c0`;
-  let installedCommand = "";
-  try { installedCommand = readlinkSync(commandTarget); } catch {}
-  if (installedCommand !== commandSource) {
-    await Bun.$`mkdir -p ${home}/.local/bin`.quiet();
-    rmSync(commandTarget, { force: true });
-    symlinkSync(commandSource, commandTarget);
-    changed.push(commandTarget);
+  // `claude0` is the canonical command; `claude0` is the typing shorthand. Both are
+  // symlinks (not shell aliases) so tmux run-shell, units, and scripts resolve them.
+  const commandSource = `${import.meta.dir}/../bin/claude0.ts`;
+  for (const name of ["claude0", "c0"]) {
+    const commandTarget = `${home}/.local/bin/${name}`;
+    let installedCommand = "";
+    try { installedCommand = readlinkSync(commandTarget); } catch {}
+    if (installedCommand !== commandSource) {
+      await Bun.$`mkdir -p ${home}/.local/bin`.quiet();
+      rmSync(commandTarget, { force: true });
+      symlinkSync(commandSource, commandTarget);
+      changed.push(commandTarget);
+    }
   }
 
   const imports = [
-    { path: `${home}/.tmux.conf`, line: CLAUDE0_TMUX_SOURCE, label: "tmux import" },
-    { path: `${home}/.zshrc`, line: CLAUDE0_ZSH_SOURCE, label: "zsh import" },
+    { path: `${home}/.tmux.conf`, line: TMUX_SOURCE_LINE, label: "tmux import" },
+    { path: `${home}/.zshrc`, line: ZSH_SOURCE_LINE, label: "zsh import" },
   ];
   for (const entry of imports) {
     let existing = "";
     try { existing = await Bun.file(entry.path).text(); } catch {}
     if (!existing.split("\n").includes(entry.line)) {
       const prefix = existing.length === 0 ? "" : existing.endsWith("\n") ? "\n" : "\n\n";
-      await Bun.write(entry.path, `${existing}${prefix}# Claude0 integration (managed by c0 setup)\n${entry.line}\n`);
+      await Bun.write(entry.path, `${existing}${prefix}# Claude0 integration (managed by claude0 setup)\n${entry.line}\n`);
       changed.push(entry.label);
     }
   }
@@ -807,11 +811,11 @@ async function installTerminalIntegration(home: string): Promise<string[]> {
   return changed;
 }
 
-/** Read the CLAUDE0_HOOK_VERSION from an installed hook script. Returns 0 if missing or unreadable. */
+/** Read the HOOK_VERSION from an installed hook script. Returns 0 if missing or unreadable. */
 async function getInstalledHookVersion(hookPath: string): Promise<number> {
   try {
     const content = await Bun.file(hookPath).text();
-    const match = content.match(/^# CLAUDE0_HOOK_VERSION=(\d+)/m);
+    const match = content.match(/^# HOOK_VERSION=(\d+)/m);
     return match ? parseInt(match[1], 10) : 0;
   } catch {
     return 0;
@@ -879,7 +883,7 @@ export async function setup(): Promise<void> {
   const fileHookScripts = await Promise.all(FILE_HOOK_SCRIPTS.map(async (name) => ({
     name,
     content: (await Bun.file(`${import.meta.dir}/../config/hooks/${name}`).text())
-      .replace("__CLAUDE0_HOOK_VERSION__", String(HOOK_VERSION)),
+      .replace("__HOOK_VERSION__", String(HOOK_VERSION)),
   })));
   let scriptsWritten = 0;
   let scriptsUpdated = false;
@@ -974,10 +978,10 @@ export async function setup(): Promise<void> {
 }
 
 /**
- * Install/refresh the launchd agent that keeps `c0 daemon` alive. launchd
+ * Install/refresh the launchd agent that keeps `claude0 daemon` alive. launchd
  * (KeepAlive + RunAtLoad) is what makes a snooze survive reboots: the wake
  * pass must run with no tmux client attached and no terminal open. The plist
- * pins the bun binary and the c0 entry script that ran this setup, plus a
+ * pins the bun binary and the claude0 entry script that ran this setup, plus a
  * PATH that reaches tmux — launchd's default PATH doesn't include homebrew.
  */
 async function installDaemonAgent(home: string): Promise<"installed" | "updated" | "unchanged"> {
@@ -1054,7 +1058,7 @@ async function installDaemonAgent(home: string): Promise<"installed" | "updated"
 }
 
 // ---------------------------------------------------------------------------
-// c0 save-sessions  (tmux-resurrect post-save hook)
+// claude0 save-sessions  (tmux-resurrect post-save hook)
 // ---------------------------------------------------------------------------
 
 const RESURRECT_SESSIONS_PATH = `${PATHS.dir}/resurrect-sessions.json`;
@@ -1153,13 +1157,13 @@ export async function saveSessions(): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
-// c0 restore-sessions  (tmux-resurrect post-restore hook)
+// claude0 restore-sessions  (tmux-resurrect post-restore hook)
 // ---------------------------------------------------------------------------
 
 /**
  * Restore Claude Code sessions after tmux-resurrect restores panes.
  *
- * Reads the coordinate→sessionId mapping saved by `c0 save-sessions`,
+ * Reads the coordinate→sessionId mapping saved by `claude0 save-sessions`,
  * matches coordinates to newly created panes, and launches
  * `claude --resume=<id>` in each via tmux send-keys.
  *
@@ -1174,7 +1178,7 @@ export async function restoreSessions(): Promise<void> {
     const raw = await Bun.file(RESURRECT_SESSIONS_PATH).text();
     map = JSON.parse(raw);
   } catch {
-    console.log("No saved session map found. Run 'c0 save-sessions' first or configure the tmux-resurrect hook.");
+    console.log("No saved session map found. Run 'claude0 save-sessions' first or configure the tmux-resurrect hook.");
     return;
   }
 
@@ -1258,11 +1262,11 @@ export async function restoreSessions(): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
-// c0 question-hook (invoked by pretooluse.sh for an intercepted AskUserQuestion)
+// claude0 question-hook (invoked by pretooluse.sh for an intercepted AskUserQuestion)
 // ---------------------------------------------------------------------------
 
 /**
- * `c0 question-hook` — invoked by `pretooluse.sh` ONLY for an intercept-eligible
+ * `claude0 question-hook` — invoked by `pretooluse.sh` ONLY for an intercept-eligible
  * AskUserQuestion (tracked pane + live phone + not focused).
  * Reads the hook stdin, registers a `pending/<session_id>.json` (kind:"question")
  * marker so both surfaces know a question is held, then block-polls
@@ -1377,11 +1381,11 @@ export async function questionHook(): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
-// c0 daemon
+// claude0 daemon
 // ---------------------------------------------------------------------------
 
 /**
- * Long-lived inbox daemon (launchd-kept-alive, installed by `c0 setup`).
+ * Long-lived inbox daemon (launchd-kept-alive, installed by `claude0 setup`).
  * Owns the snooze wake pass — the status-right monitor can't: tmux only
  * evaluates the status line while a client is attached, so a midnight wake
  * with no terminal open would never fire from there. `--once` runs a single
@@ -1451,7 +1455,7 @@ export async function daemon(): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
-// c0 sidebar-pane / sidebar-ctl  (M2 single-renderer chassis)
+// claude0 sidebar-pane / sidebar-ctl  (M2 single-renderer chassis)
 // ---------------------------------------------------------------------------
 
 /** One-shot control message to the renderer (M-s focus / M-S toggle bindings). */
@@ -1485,7 +1489,7 @@ export async function sidebarCtl(cmd: string | undefined, paneId: string | undef
 }
 
 // ---------------------------------------------------------------------------
-// c0 notify <message> — broadcast a web push to every subscribed device
+// claude0 notify <message> — broadcast a web push to every subscribed device
 // ---------------------------------------------------------------------------
 
 /**
@@ -1496,18 +1500,18 @@ export async function sidebarCtl(cmd: string | undefined, paneId: string | undef
  */
 export async function notify(message: string): Promise<void> {
   if (!message.trim()) {
-    console.error("usage: c0 notify <message>");
+    console.error("usage: claude0 notify <message>");
     process.exit(2);
   }
   const { listDeviceIds, sendWebPush } = await import("./core/web-push");
   const ids = listDeviceIds();
   if (ids.length === 0) {
-    console.error("c0: no push subscriptions — nothing to notify");
+    console.error("claude0: no push subscriptions — nothing to notify");
     process.exit(1);
   }
   // Empty sessionId on purpose: it keeps the push out of the tap-attribution ledger
   // (a tap must NOT navigate to a session — there is none behind an ops alert; the
   // service worker falls back to a shared "c0" tag so repeats still collapse).
   await Promise.all(ids.map((id) => sendWebPush(id, { title: "Claude0", body: message, sessionId: "" })));
-  console.log(`c0: pushed to ${ids.length} device(s)`);
+  console.log(`claude0: pushed to ${ids.length} device(s)`);
 }

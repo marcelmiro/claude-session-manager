@@ -9,10 +9,10 @@ config_file="$HOME/.config/c0/config.json"
 
 usage() {
   cat <<'EOF'
-Usage: c0 terminal [local|remote|status]
+Usage: claude0 terminal [local|remote|status]
 
 With no argument, uses terminal.defaultTarget from ~/.config/c0/config.json.
-Edit the file shown by: c0 config
+Edit the file shown by: claude0 config
 EOF
 }
 
@@ -21,7 +21,7 @@ command -v jq >/dev/null 2>&1 || {
   exit 127
 }
 [ -r "$config_file" ] || {
-  printf 'Claude0 config is missing. Run: c0 setup\n' >&2
+  printf 'Claude0 config is missing. Run: claude0 setup\n' >&2
   exit 2
 }
 

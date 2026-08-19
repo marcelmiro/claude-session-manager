@@ -18,11 +18,11 @@ git clone https://github.com/marcelmiro/claude0 ~/dev/claude0
 cd ~/dev/claude0
 bun install
 mkdir -p ~/.local/bin
-ln -sf "$PWD/bin/c0.ts" ~/.local/bin/c0
-c0 setup
+ln -sf "$PWD/bin/claude0.ts" ~/.local/bin/c0
+claude0 setup
 ```
 
-`c0 setup` is idempotent. It installs Claude hooks plus narrowly scoped
+`claude0 setup` is idempotent. It installs Claude hooks plus narrowly scoped
 Claude0-owned extensions at:
 
 ```text
@@ -72,10 +72,10 @@ logout. Each apply phase keeps path-state backups under
 
 ```sh
 # Print the absolute path, creating the documented defaults on first use:
-c0 config
+claude0 config
 
 # Edit it with any editor:
-${EDITOR:-vim} "$(c0 config)"
+${EDITOR:-vim} "$(claude0 config)"
 ```
 
 Claude0 has one machine-local, schema-backed settings file. Repository discovery,
@@ -85,16 +85,16 @@ does not maintain hidden sidecar settings. The default repository layout is flat
 
 ## Local and remote terminal modes
 
-Set `terminal.defaultTarget` and `terminal.remoteHost` in `$(c0 config)`, then:
+Set `terminal.defaultTarget` and `terminal.remoteHost` in `$(claude0 config)`, then:
 
 ```sh
 # Explicit invocations do not mutate the default:
-c0 terminal local
-c0 terminal remote
-c0 terminal status
+claude0 terminal local
+claude0 terminal remote
+claude0 terminal status
 
 # No argument uses terminal.defaultTarget:
-c0 terminal
+claude0 terminal
 ```
 
 On macOS, Ghostty invokes the Claude0 command so a failed connection or detach falls
@@ -124,7 +124,7 @@ git clone git@github.com:marcelmiro/dotfiles.git ~/.dotfiles
 
 cd ~/dev/claude0
 ./deploy/provision.sh --tz Europe/Madrid --swap-gb 16
-c0 setup
+claude0 setup
 ~/.dotfiles/doctor
 ./deploy/doctor.sh
 ```

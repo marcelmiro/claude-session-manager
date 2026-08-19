@@ -6,7 +6,7 @@
  * landing mid-tick survives the replace); authored facts (dispositions,
  * archived) live in their own tables and are never touched by it.
  *
- * Run via `c0 daemon --discover-once` in a FRESH process per tick: an
+ * Run via `claude0 daemon --discover-once` in a FRESH process per tick: an
  * in-process discovery loop leaks (~1.5 MB/s — JSC never returns
  * discovery's heap), so the long-lived daemon only spawns and reaps.
  */

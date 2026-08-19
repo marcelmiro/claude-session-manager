@@ -24,7 +24,7 @@ const pendingDir = `${TEST_HOME}/.config/c0/pending`;
 
 beforeAll(async () => {
   // TEST_HOME persists between runs and `setup()` only rewrites a script when the
-  // installed CLAUDE0_HOOK_VERSION is older — so without this the suite can assert against a
+  // installed HOOK_VERSION is older — so without this the suite can assert against a
   // stale script from a previous run and miss an edit to the template.
   rmSync(hookPath, { force: true });
   await setup(); // writes the real pretooluse.sh under TEST_HOME/.config/c0/hooks

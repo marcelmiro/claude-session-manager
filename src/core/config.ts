@@ -1,25 +1,25 @@
 import { homedir } from "os";
 import { mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import defaultConfigJson from "../../config/default.json";
-import type { C0Config } from "../types";
+import type { Config } from "../types";
 
 // CLAUDE0_HOME overrides the home root (tests point it at a temp dir; bun's
 // os.homedir() ignores a runtime-set $HOME, so an env seam is the reliable hook).
-const C0_DIR = `${process.env.CLAUDE0_HOME ?? homedir()}/.config/c0`;
+const CONFIG_DIR = `${process.env.CLAUDE0_HOME ?? homedir()}/.config/c0`;
 
 export const PATHS = {
-  dir: C0_DIR,
-  config: `${C0_DIR}/config.json`,
-  configSchema: `${C0_DIR}/config.schema.json`,
-  state: `${C0_DIR}/state.json`,
-  uploads: `${C0_DIR}/uploads`, // images uploaded from the mobile bridge, pasted into a pane
+  dir: CONFIG_DIR,
+  config: `${CONFIG_DIR}/config.json`,
+  configSchema: `${CONFIG_DIR}/config.schema.json`,
+  state: `${CONFIG_DIR}/state.json`,
+  uploads: `${CONFIG_DIR}/uploads`, // images uploaded from the mobile bridge, pasted into a pane
 } as const;
 
-const DEFAULT_CONFIG = defaultConfigJson as C0Config;
+const DEFAULT_CONFIG = defaultConfigJson as Config;
 const LEGACY_DEFAULT_PRIORITY = ["throxy", "customeros", "~", "claude0"];
 const RETIRED_KEYS = new Set(["ntfyTopic", "bridgeUrl"]);
 const LEGACY_TERMINAL_FILES = ["terminal-mode", "remote-host", "local-session", "remote-session"];
-const CONFIG_MIGRATION_LOCK = `${C0_DIR}/config-migration.lock`;
+const CONFIG_MIGRATION_LOCK = `${CONFIG_DIR}/config-migration.lock`;
 
 /**
  * Write `text` to `path` atomically (tmp→rename) so a concurrent reader never
@@ -32,7 +32,7 @@ export function writeAtomic(path: string, text: string): void {
   renameSync(tmp, path);
 }
 
-function cloneDefault(): C0Config {
+function cloneDefault(): Config {
   return structuredClone(DEFAULT_CONFIG);
 }
 
@@ -63,7 +63,7 @@ function onlyKeys(value: Record<string, unknown>, allowed: string[], path: strin
 }
 
 /** Validate the complete v1 file. Config mistakes are surfaced, never silently defaulted. */
-export function validateConfig(value: unknown): C0Config {
+export function validateConfig(value: unknown): Config {
   if (!isObject(value)) throw new Error("config must be a JSON object");
   onlyKeys(value, ["$schema", "schemaVersion", "repositories", "terminal", "ui", "notifications"], "config");
   if (value.schemaVersion !== 1) throw new Error(`schemaVersion must be 1 (received ${String(value.schemaVersion)})`);
@@ -126,7 +126,7 @@ async function legacySetting(name: string, fallback: string | null): Promise<str
 }
 
 /** Convert the pre-v1 flat shape and terminal sidecar files into the single v1 file. */
-async function migrateLegacyConfig(raw: Record<string, unknown>): Promise<C0Config> {
+async function migrateLegacyConfig(raw: Record<string, unknown>): Promise<Config> {
   const known = new Set(["statusMonitor", "windowPrefix", "nativeNotification", "repoPaths", "priorityRepos"]);
   const unknown = Object.keys(raw).filter((key) => !known.has(key) && !RETIRED_KEYS.has(key));
   if (unknown.length) throw new Error(`legacy config contains unknown ${unknown.length === 1 ? "key" : "keys"}: ${unknown.join(", ")}`);
@@ -159,7 +159,7 @@ async function migrateLegacyConfig(raw: Record<string, unknown>): Promise<C0Conf
 }
 
 /** Serialize the one-time migration across TUI/monitor/bridge startup. */
-async function migrateLegacyConfigOnce(): Promise<C0Config> {
+async function migrateLegacyConfigOnce(): Promise<Config> {
   let ownsLock = false;
   for (let attempt = 0; attempt < 100; attempt++) {
     try {
@@ -194,7 +194,7 @@ async function migrateLegacyConfigOnce(): Promise<C0Config> {
   }
 }
 
-export async function loadConfig(): Promise<C0Config> {
+export async function loadConfig(): Promise<Config> {
   let text: string;
   try {
     text = await Bun.file(PATHS.config).text();
@@ -240,14 +240,14 @@ export async function ensureUserConfig(): Promise<boolean> {
 
 /**
  * Retire terminal sidecars only after setup has installed the config.json-aware
- * launcher. `c0 config` may migrate JSON while an older launcher is still live;
+ * launcher. `claude0 config` may migrate JSON while an older launcher is still live;
  * deleting its inputs there would silently reset terminal attachment behavior.
  */
 export function removeLegacyConfigSidecars(): void {
   for (const name of LEGACY_TERMINAL_FILES) rmSync(`${PATHS.dir}/${name}`, { force: true });
 }
 
-export async function saveConfig(config: C0Config): Promise<void> {
+export async function saveConfig(config: Config): Promise<void> {
   mkdirSync(PATHS.dir, { recursive: true });
   const validated = validateConfig(config);
   writeAtomic(PATHS.config, `${JSON.stringify(validated, null, 2)}\n`);

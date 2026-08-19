@@ -39,9 +39,9 @@ mkdir -p ~/dev
 git clone https://github.com/marcelmiro/claude0 ~/dev/claude0
 ~/dev/claude0/deploy/provision.sh --tz Europe/Madrid --swap-gb 16
 curl -fsSL https://bun.sh/install | bash                       # bun → ~/.bun/bin
-cd ~/dev/claude0 && bun install && ln -sf ~/dev/claude0/bin/c0.ts ~/.bun/bin/c0
+cd ~/dev/claude0 && bun install && ln -sf ~/dev/claude0/bin/claude0.ts ~/.bun/bin/claude0
 curl -fsSL https://claude.ai/install.sh | bash -s stable       # claude (self-updating channel)
-c0 setup                                                     # hooks + tmux/zsh fragments
+claude0 setup                                                     # hooks + tmux/zsh fragments
 sudo tailscale up --ssh --hostname=<name> --authkey=<PRE-TAGGED key>   # tag at join or expiry stays on
 sudo tailscale serve --bg 8473
 ```
@@ -85,7 +85,7 @@ Do NOT copy: `push-subscriptions.json` (origin-bound — dead at the new origin)
 host-local or transient), `~/.claude/.credentials.json` (fresh login, phase C),
 `~/.claude/settings.json` (next line regenerates hooks at the current version).
 
-Then on the VM: `c0 setup`.
+Then on the VM: `claude0 setup`.
 
 ## E. Bring up + verify
 
@@ -95,7 +95,7 @@ systemctl --user daemon-reload && systemctl --user start tmux claude0-bridge cla
 
 Run verification scenarios **4** (reboot with no SSH → everything back), **5/6**
 (presence: typing suppresses pushes; idle attach routes approvals/questions to the
-phone), **8** (reboot with live sessions → `c0 restore-sessions` resumes each,
+phone), **8** (reboot with live sessions → `claude0 restore-sessions` resumes each,
 no duplicate claude per pane), **9** (Space→c over Mosh lands in the Mac
 clipboard), **7** (phone lists sessions, resume works, push round-trips).
 
@@ -104,9 +104,9 @@ clipboard), **7** (phone lists sessions, resume works, push round-trips).
 - iPhone: Tailscale app → VPN On Demand → cellular **Always**. Delete the old
   portkey icon; open `https://<vm>.<tailnet>.ts.net`, Add to Home Screen, re-grant
   push (the bell — permission needs the tap), confirm a test push.
-- Mac: `brew install mosh`; run `c0 setup`, then set `terminal.remoteHost` and
-  `terminal.defaultTarget` in `$(c0 config)`. Ghostty runs
-  `c0 terminal` at startup; `c0 terminal local` remains available
+- Mac: `brew install mosh`; run `claude0 setup`, then set `terminal.remoteHost` and
+  `terminal.defaultTarget` in `$(claude0 config)`. Ghostty runs
+  `claude0 terminal` at startup; `claude0 terminal local` remains available
   for a completely separate Mac-local Claude0/tmux environment.
   `shell-integration-features = ssh-env,ssh-terminfo`, `clipboard-write = allow`.
 - Mac teardown: stop the launchd bridge / `caffeinate` wrapper, remove the plist,
@@ -143,9 +143,9 @@ state dir to `~/.config/c0` (renaming the `CSM_BRIDGE_*` keys in `bridge.env`) �
 renames `~/dev/csm` to `~/dev/claude0` (with `git worktree repair` and the
 remote re-pointed at `claude0`) → rewrites recorded absolute paths
 (resurrect map, pane files, `inbox.db` snapshot rows, `~/.claude/projects` dirs)
-→ `bun install` + `c0 setup` → installs and starts the `claude0-*` units
-(re-pointing `~/.bun/bin/c0`, which their `ExecStart` uses absolutely) →
-verifies (units active, `POST /auth` 200, `c0 list`).
+→ `bun install` + `claude0 setup` → installs and starts the `claude0-*` units
+(re-pointing `~/.bun/bin/claude0`, which their `ExecStart` uses absolutely) →
+verifies (units active, `POST /auth` 200, `claude0 list`).
 
 The codebase carries no migration/compat code — this script is the only place
 the old names are known. It also deregisters the pre-rebrand Claude hooks from
@@ -156,7 +156,7 @@ per-device push state (`push-subscriptions.json`, `consumers/`, `source/`,
 identifiers too (auth cookie, device-id storage key), so each phone re-enters
 the token once and silently resubscribes to push on its next PWA launch.
 
-**darwin machine** (no systemd, no script): run these by hand, then `c0 setup` —
+**darwin machine** (no systemd, no script): run these by hand, then `claude0 setup` —
 
 ```sh
 launchctl bootout "gui/$(id -u)/com.csm.daemon" 2>/dev/null || true
@@ -180,7 +180,7 @@ jq 'if (.hooks? // null | type) == "object"
 ```
 
 Then delete the two old import lines (and their `# CSM integration` comment)
-from `~/.tmux.conf` and `~/.zshrc` by hand — `c0 setup` appends the new ones
+from `~/.tmux.conf` and `~/.zshrc` by hand — `claude0 setup` appends the new ones
 but never edits personal dotfile content.
 
 Personal dotfiles are never rewritten: the pre-flight prints every `csm`

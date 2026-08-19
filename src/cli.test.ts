@@ -1,7 +1,7 @@
 /**
  * `setup()` idempotency (Inc setup). Two runs under a temp $HOME must leave exactly
  * one Claude0 registration per event, preserve pre-existing user hooks + other settings
- * keys, and write the hook scripts stamped with the current CLAUDE0_HOOK_VERSION.
+ * keys, and write the hook scripts stamped with the current HOOK_VERSION.
  *
  * `home` helper first — cli → hook-events → config freezes paths from $HOME; setup
  * itself re-reads homedir() at call time, so it targets the same temp HOME.
@@ -16,8 +16,8 @@ import { HOLD_WINDOW_MS } from "./core/approval";
 
 const claudeDir = `${TEST_HOME}/.claude`;
 const settingsPath = `${claudeDir}/settings.json`;
-const c0Dir = `${TEST_HOME}/.config/c0`;
-const hooksDir = `${c0Dir}/hooks`;
+const configDir = `${TEST_HOME}/.config/c0`;
+const hooksDir = `${configDir}/hooks`;
 const EVENTS = [
   "SessionStart",
   "UserPromptSubmit",
@@ -30,7 +30,8 @@ const EVENTS = [
 
 beforeEach(() => {
   rmSync(claudeDir, { recursive: true, force: true });
-  rmSync(c0Dir, { recursive: true, force: true });
+  rmSync(configDir, { recursive: true, force: true });
+  rmSync(`${TEST_HOME}/.local/bin/claude0`, { force: true });
   rmSync(`${TEST_HOME}/.local/bin/c0`, { force: true });
   rmSync(`${TEST_HOME}/.zshrc`, { force: true });
   rmSync(`${TEST_HOME}/.tmux.conf`, { force: true });
@@ -55,15 +56,16 @@ test("setup installs Claude0-owned terminal fragments and imports them idempoten
   await setup();
   await setup();
 
-  const shellFragment = readFileSync(`${c0Dir}/shell.zsh`, "utf8");
-  const tmuxFragment = readFileSync(`${c0Dir}/tmux.conf`, "utf8");
+  const shellFragment = readFileSync(`${configDir}/shell.zsh`, "utf8");
+  const tmuxFragment = readFileSync(`${configDir}/tmux.conf`, "utf8");
   expect(shellFragment).not.toContain("PROMPT=");
   expect(tmuxFragment).toContain("display-popup -E");
   expect(tmuxFragment).toContain("@claude0_status");
   expect(tmuxFragment).not.toContain("@plugin");
   expect(tmuxFragment).not.toContain("catppuccin");
-  expect(readlinkSync(`${TEST_HOME}/.local/bin/c0`)).toBe(`${import.meta.dir}/../bin/c0.ts`);
-  expect(readFileSync(`${c0Dir}/terminal-launcher`, "utf8")).toContain(
+  expect(readlinkSync(`${TEST_HOME}/.local/bin/claude0`)).toBe(`${import.meta.dir}/../bin/claude0.ts`);
+  expect(readlinkSync(`${TEST_HOME}/.local/bin/c0`)).toBe(`${import.meta.dir}/../bin/claude0.ts`);
+  expect(readFileSync(`${configDir}/terminal-launcher`, "utf8")).toContain(
     "MOSH_SERVER_NETWORK_TMOUT=2592000",
   );
   const zshrc = readFileSync(`${TEST_HOME}/.zshrc`, "utf8");
@@ -75,22 +77,22 @@ test("setup installs Claude0-owned terminal fragments and imports them idempoten
 });
 
 test("setup migrates terminal sidecars before retiring them", async () => {
-  mkdirSync(c0Dir, { recursive: true });
-  writeFileSync(`${c0Dir}/config.json`, "{}");
-  writeFileSync(`${c0Dir}/terminal-mode`, "remote\n");
-  writeFileSync(`${c0Dir}/remote-host`, "vm.example.ts.net\n");
+  mkdirSync(configDir, { recursive: true });
+  writeFileSync(`${configDir}/config.json`, "{}");
+  writeFileSync(`${configDir}/terminal-mode`, "remote\n");
+  writeFileSync(`${configDir}/remote-host`, "vm.example.ts.net\n");
 
   await setup();
 
-  const config = JSON.parse(readFileSync(`${c0Dir}/config.json`, "utf8"));
+  const config = JSON.parse(readFileSync(`${configDir}/config.json`, "utf8"));
   expect(config.terminal).toMatchObject({ defaultTarget: "remote", remoteHost: "vm.example.ts.net" });
-  expect(existsSync(`${c0Dir}/terminal-mode`)).toBe(false);
-  expect(existsSync(`${c0Dir}/remote-host`)).toBe(false);
-  expect(readFileSync(`${c0Dir}/terminal-launcher`, "utf8")).toContain('config_file="$HOME/.config/c0/config.json"');
+  expect(existsSync(`${configDir}/terminal-mode`)).toBe(false);
+  expect(existsSync(`${configDir}/remote-host`)).toBe(false);
+  expect(readFileSync(`${configDir}/terminal-launcher`, "utf8")).toContain('config_file="$HOME/.config/c0/config.json"');
 });
 
 /** Count Claude0 registrations (command points into the Claude0 hooks dir) for an event. */
-function c0Entries(settings: any, event: string): any[] {
+function hookEntries(settings: any, event: string): any[] {
   const entries = settings.hooks?.[event] ?? [];
   return entries.filter(
     (e: any) =>
@@ -100,8 +102,8 @@ function c0Entries(settings: any, event: string): any[] {
 }
 
 /** The Claude0 registration for an event whose command runs the given script. */
-function c0Entry(settings: any, event: string, script: string): any {
-  return c0Entries(settings, event).find((e: any) =>
+function hookEntry(settings: any, event: string, script: string): any {
+  return hookEntries(settings, event).find((e: any) =>
     e.hooks.some((h: any) => typeof h.command === "string" && h.command.includes(script)),
   );
 }
@@ -119,7 +121,7 @@ test("running setup() twice leaves exactly one Claude0 entry per event and prese
   // registrations (approval + question).
   for (const event of EVENTS) {
     const wanted = event === "PreToolUse" ? 2 : 1;
-    expect(c0Entries(settings, event)).toHaveLength(wanted);
+    expect(hookEntries(settings, event)).toHaveLength(wanted);
   }
 
   // The pre-existing user hook on SessionStart survives alongside the Claude0 one.
@@ -131,10 +133,10 @@ test("running setup() twice leaves exactly one Claude0 entry per event and prese
 
   // The approval hook keeps the short kill deadline (600s window + grace) — a hung
   // ordinary tool call must stay killable; only the question entry may hold for hours.
-  const pre = c0Entry(settings, "PreToolUse", "/pretooluse.sh");
+  const pre = hookEntry(settings, "PreToolUse", "/pretooluse.sh");
   expect(pre.hooks[0].timeout).toBe(615);
   expect(pre.matcher).toBeUndefined(); // all tools
-  const q = c0Entry(settings, "PreToolUse", "/question-pretooluse.sh");
+  const q = hookEntry(settings, "PreToolUse", "/question-pretooluse.sh");
   expect(q.matcher).toBe("AskUserQuestion");
   expect(q.hooks[0].timeout).toBe(14415); // 4h question window + kill grace
 });
@@ -145,7 +147,7 @@ test("the registered kill timeout outlasts the window the hook poll loops run to
   // cleanup that un-registers its marker — the orphan the pid gate then has to catch.
   await setup();
   const settings = JSON.parse(readFileSync(settingsPath, "utf8"));
-  const registered = c0Entries(settings, "PreToolUse")[0].hooks[0].timeout * 1000;
+  const registered = hookEntries(settings, "PreToolUse")[0].hooks[0].timeout * 1000;
   expect(registered).toBeGreaterThan(HOLD_WINDOW_MS);
 });
 
@@ -154,16 +156,16 @@ test("setup() repairs a stale timeout on an already-registered hook", async () =
   // install from an older version would keep its old kill deadline forever.
   await setup();
   const settings = JSON.parse(readFileSync(settingsPath, "utf8"));
-  c0Entries(settings, "PreToolUse")[0].hooks[0].timeout = 600; // as an older version left it
+  hookEntries(settings, "PreToolUse")[0].hooks[0].timeout = 600; // as an older version left it
   writeFileSync(settingsPath, JSON.stringify(settings, null, 2));
 
   await setup();
   const after = JSON.parse(readFileSync(settingsPath, "utf8"));
-  expect(c0Entry(after, "PreToolUse", "/pretooluse.sh").hooks[0].timeout).toBe(615);
-  expect(c0Entries(after, "PreToolUse")).toHaveLength(2); // repaired, not duplicated
+  expect(hookEntry(after, "PreToolUse", "/pretooluse.sh").hooks[0].timeout).toBe(615);
+  expect(hookEntries(after, "PreToolUse")).toHaveLength(2); // repaired, not duplicated
 });
 
-test("setup() writes every hook script stamped with the current CLAUDE0_HOOK_VERSION", async () => {
+test("setup() writes every hook script stamped with the current HOOK_VERSION", async () => {
   await setup();
   for (const name of [
     "session-start",
@@ -173,7 +175,7 @@ test("setup() writes every hook script stamped with the current CLAUDE0_HOOK_VER
   ]) {
     const path = `${hooksDir}/${name}.sh`;
     expect(existsSync(path)).toBe(true);
-    expect(readFileSync(path, "utf8")).toContain(`# CLAUDE0_HOOK_VERSION=${HOOK_VERSION}`);
+    expect(readFileSync(path, "utf8")).toContain(`# HOOK_VERSION=${HOOK_VERSION}`);
   }
 });
 
@@ -199,7 +201,7 @@ test("setup removes retired Claude0 worktree hooks and scripts but preserves use
     { type: "command", command: "/usr/local/bin/user-worktree-hook" },
   ]);
   expect(settings.hooks.WorktreeRemove).toEqual([]);
-  expect(c0Entries(settings, "SubagentStop")).toHaveLength(1); // event logger only
+  expect(hookEntries(settings, "SubagentStop")).toHaveLength(1); // event logger only
   for (const script of ["worktree-create.sh", "worktree-remove.sh", "subagent-worktree-cleanup.sh"]) {
     expect(existsSync(`${hooksDir}/${script}`)).toBe(false);
   }
@@ -228,7 +230,7 @@ test("setup() registers hook commands as explicit quoted bash invocations", asyn
   await setup();
   const settings = JSON.parse(readFileSync(settingsPath, "utf8"));
   for (const event of EVENTS) {
-    for (const entry of c0Entries(settings, event)) {
+    for (const entry of hookEntries(settings, event)) {
       for (const h of entry.hooks) {
         expect(h.command).toMatch(/^bash "[^"]+\.sh"$/);
       }
@@ -239,15 +241,15 @@ test("setup() registers hook commands as explicit quoted bash invocations", asyn
 test("setup() upgrades a bare-path command from an older install to the bash form", async () => {
   await setup();
   const settings = JSON.parse(readFileSync(settingsPath, "utf8"));
-  const entry = c0Entry(settings, "SessionStart", "/session-start.sh");
+  const entry = hookEntry(settings, "SessionStart", "/session-start.sh");
   entry.hooks[0].command = `${hooksDir}/session-start.sh`; // as an older version registered it
   writeFileSync(settingsPath, JSON.stringify(settings, null, 2));
 
   await setup();
   const after = JSON.parse(readFileSync(settingsPath, "utf8"));
-  const upgraded = c0Entry(after, "SessionStart", "/session-start.sh");
+  const upgraded = hookEntry(after, "SessionStart", "/session-start.sh");
   expect(upgraded.hooks[0].command).toBe(`bash "${hooksDir}/session-start.sh"`);
-  expect(c0Entries(after, "SessionStart")).toHaveLength(1); // upgraded, not duplicated
+  expect(hookEntries(after, "SessionStart")).toHaveLength(1); // upgraded, not duplicated
 });
 
 test("question hook reads marker mtime via the GNU→BSD stat fallback chain", async () => {
@@ -264,10 +266,10 @@ test("AskUserQuestion is delegated: pretooluse.sh exits for it, question-pretool
   // The approval script logs the event, then bails — its short kill timeout must never
   // apply to a question hold, and the matched entry would otherwise double-intercept.
   expect(pre).toContain('[ "$TOOL" = "AskUserQuestion" ] && exit 0');
-  expect(pre).not.toContain("c0 question-hook");
+  expect(pre).not.toContain("claude0 question-hook");
   const q = readFileSync(`${hooksDir}/question-pretooluse.sh`, "utf8");
-  // The intercept gates: tracked pane + live marker + focus, then c0 question-hook.
-  expect(q).toContain("c0 question-hook");
+  // The intercept gates: tracked pane + live marker + focus, then claude0 question-hook.
+  expect(q).toContain("claude0 question-hook");
   expect(q).toContain("bridge-consumer");
   expect(q).toContain("panes/$TMUX_PANE");
   expect(q).toContain("lsappinfo");

@@ -240,9 +240,9 @@ elif [[ "$PHASE" == "finish" ]]; then
   step "Apply the latest home-only manifest; repositories stay in ~/dev while absolute paths are repaired:"
   note "cd /Users/marcel/dev/claude0 && bun run scripts/migrate-dev-layout.ts apply"
   step "Reinstall generated Claude0 integration:"
-  note "bun install && bun run bin/c0.ts setup"
-  step "Run bun run /Users/marcel/dev/claude0/bin/c0.ts config, open the printed file, and confirm repositories.roots is [\"~/dev\"]."
-  step "Verify: git -C ~/dev/claude0 worktree list; c0 terminal status; c0"
+  note "bun install && bun run bin/claude0.ts setup"
+  step "Run bun run /Users/marcel/dev/claude0/bin/claude0.ts config, open the printed file, and confirm repositories.roots is [\"~/dev\"]."
+  step "Verify: git -C ~/dev/claude0 worktree list; claude0 terminal status; c0"
   pause "The Mac account, paths, Git worktrees, and Claude0 checks pass?"
 
   stage "Close the recovery window" 5

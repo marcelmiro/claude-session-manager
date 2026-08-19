@@ -1,7 +1,7 @@
 /**
  * Single sidebar renderer (M2 chassis — ADR 0013 addendum 2). ONE process
- * (inside `c0 daemon`) paints every window's sidebar pane by writing ANSI
- * to the pane's tty; the panes themselves are dumb `c0 sidebar-pane` stubs
+ * (inside `claude0 daemon`) paints every window's sidebar pane by writing ANSI
+ * to the pane's tty; the panes themselves are dumb `claude0 sidebar-pane` stubs
  * that raw-mode their tty and relay stdin bytes back over a unix socket.
  *
  * What the per-pane blessed chassis needed cross-process choreography for —
@@ -850,7 +850,7 @@ export function runSidebarRenderer(): void {
     await handleKey(win, ev);
   }
 
-  // ── control (M-s / M-S via `c0 sidebar-ctl`) ───────────────────────────
+  // ── control (M-s / M-S via `claude0 sidebar-ctl`) ───────────────────────────
 
   async function ctlFocus(invokerPane: string): Promise<void> {
     const winId = await windowOf(invokerPane);
@@ -1224,7 +1224,7 @@ export function runSidebarRenderer(): void {
   } catch {}
   // Protocol: one greeting line, then raw bytes. A stub sends `hello <pane>`
   // and every subsequent byte is that pane's stdin verbatim (nc can't frame);
-  // `c0 sidebar-ctl` connections send a single `focus <pane>` / `toggle
+  // `claude0 sidebar-ctl` connections send a single `focus <pane>` / `toggle
   // <pane>` line and close.
   function feedInput(paneId: string, bytes: string): void {
     const winId = paneToWin.get(paneId);

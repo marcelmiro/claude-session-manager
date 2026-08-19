@@ -15,7 +15,7 @@ StartLimitBurst=5
 # c0's shebang resolves bun via env — the unit must carry the PATH itself (see
 # tmux.service for why environment.d can't be trusted here).
 Environment=PATH=%h/.bun/bin:%h/.local/bin:/usr/local/bin:/usr/bin:/bin
-ExecStart=%h/.bun/bin/c0 bridge
+ExecStart=%h/.bun/bin/claude0 bridge
 EnvironmentFile=%h/.config/c0/bridge.env
 Restart=always
 RestartSec=5s

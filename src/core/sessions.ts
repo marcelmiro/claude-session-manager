@@ -92,7 +92,7 @@ export async function discoverSessions(opts?: { skipArchivedSummaries?: boolean;
   const {
     changed: hookChanged,
     changedPaneIds: hookChangedPanes,
-    // The persisted map (the same source `c0 list` trusts) is a fallback for panes the
+    // The persisted map (the same source `claude0 list` trusts) is a fallback for panes the
     // in-memory cache has pruned: a freshly-launched session's hook event can be read on
     // a cycle before its pane has a running claude process, and without this fallback
     // that session would never resolve an id. processHookEvents just loaded it — reuse

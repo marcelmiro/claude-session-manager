@@ -3,7 +3,7 @@
 #
 # Idempotent: every step checks the current state before acting, so a partial
 # failure is resumed by re-running the script. Targets the Linux/systemd host;
-# a darwin machine only needs `c0 setup` (it retires the old launchd agent).
+# a darwin machine only needs `claude0 setup` (it retires the old launchd agent).
 set -euo pipefail
 
 OLD_CFG="$HOME/.config/csm"
@@ -28,13 +28,15 @@ if [[ -d "$OLD_REPO/.git" ]]; then
   git -C "$OLD_REPO" diff --quiet && git -C "$OLD_REPO" diff --cached --quiet \
     || die "uncommitted changes in $OLD_REPO — commit or stash first"
 fi
-# Both paths are ours: setup installs ~/.local/bin/c0, step 6 installs
-# ~/.bun/bin/c0 (the units' ExecStart) — a re-run resuming past step 6 must
-# not die on its own link.
-existing_c0=$(command -v c0 || true)
-if [[ -n "$existing_c0" && "$existing_c0" != "$HOME/.local/bin/c0" && "$existing_c0" != "$HOME/.bun/bin/c0" ]]; then
-  die "a different 'c0' is already on PATH: $existing_c0"
-fi
+# Both commands are ours: setup installs ~/.local/bin/{claude0,c0}, step 6
+# installs ~/.bun/bin/claude0 (the units' ExecStart) — a re-run resuming past
+# step 6 must not die on its own links.
+for cmd in claude0 c0; do
+  existing=$(command -v "$cmd" || true)
+  if [[ -n "$existing" && "$existing" != "$HOME/.local/bin/$cmd" && "$existing" != "$HOME/.bun/bin/claude0" ]]; then
+    die "a different '$cmd' is already on PATH: $existing"
+  fi
+done
 # Personal dotfile lines invoking the old command or the @csm_status tmux
 # option keep failing SILENTLY after cutover (setup only rewrites the
 # Claude0-owned fragments, never personal content). `csm_` catches option
@@ -136,7 +138,7 @@ for link in "$HOME/.local/bin/csm" "$HOME/.bun/bin/csm"; do
 done
 rm -f "$HOME/.local/bin/csm-terminal"
 # Drop the pre-rebrand dotfile import lines (exact known strings that only the
-# old setup ever wrote — `c0 setup` will append the new ones).
+# old setup ever wrote — `claude0 setup` will append the new ones).
 for f in "$HOME/.tmux.conf" "$HOME/.zshrc"; do
   [[ -f "$f" ]] || continue
   sed -i \
@@ -145,7 +147,7 @@ for f in "$HOME/.tmux.conf" "$HOME/.zshrc"; do
     -e '/^# CSM integration (managed by csm setup)$/d' "$f"
 done
 # Deregister the pre-rebrand Claude hooks — their scripts rode the state-dir
-# move, and `c0 setup` registers the ~/.config/c0 set fresh.
+# move, and `claude0 setup` registers the ~/.config/c0 set fresh.
 SETTINGS="$HOME/.claude/settings.json"
 if [[ -f "$SETTINGS" ]]; then
   # Keep the FIRST run's backup — a resume must not overwrite the true
@@ -180,16 +182,16 @@ done
 shopt -u nullglob
 
 # ── 6. Reinstall integration + units ───────────────────────────────────────────
-step "bun install + c0 setup + claude0-* units"
+step "bun install + claude0 setup + claude0-* units"
 (cd "$NEW_REPO" && bun install)
-(cd "$NEW_REPO" && bun run bin/c0.ts setup)
+(cd "$NEW_REPO" && bun run bin/claude0.ts setup)
 for u in "${NEW_UNITS[@]}" tmux.service snapshot-check.service snapshot-check.timer; do
   [[ -f "$NEW_REPO/deploy/units/$u" ]] && cp "$NEW_REPO/deploy/units/$u" "$UNIT_DIR/$u"
 done
-# claude0-bridge/daemon ExecStart %h/.bun/bin/c0 absolutely (systemd does not
+# claude0-bridge/daemon ExecStart %h/.bun/bin/claude0 absolutely (systemd does not
 # PATH-resolve); provision created the old csm link there — swap it.
 mkdir -p "$HOME/.bun/bin"
-ln -sf "$NEW_REPO/bin/c0.ts" "$HOME/.bun/bin/c0"
+ln -sf "$NEW_REPO/bin/claude0.ts" "$HOME/.bun/bin/claude0"
 [[ -L "$HOME/.bun/bin/csm" ]] && rm -f "$HOME/.bun/bin/csm"
 systemctl --user daemon-reload
 for u in "${NEW_UNITS[@]}"; do
@@ -212,6 +214,6 @@ tok=$(grep '^CLAUDE0_BRIDGE_TOKEN=' "$NEW_CFG/bridge.env" 2>/dev/null | cut -d= 
 code=$(curl -s -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:8473/auth \
   -H 'content-type: application/json' -d "{\"token\":\"$tok\"}" || true)
 if [[ "$code" == 200 ]]; then note "✓ bridge /auth → 200"; else note "✗ bridge /auth → $code"; fail=1; fi
-if "$HOME/.local/bin/c0" list >/dev/null 2>&1; then note "✓ c0 list"; else note "✗ c0 list failed"; fail=1; fi
+if "$HOME/.local/bin/claude0" list >/dev/null 2>&1; then note "✓ claude0 list"; else note "✗ claude0 list failed"; fail=1; fi
 [[ $fail == 0 ]] || die "verification failed — fix the ✗ items and re-run (idempotent), or restore from $BACKUP"
 step "cutover complete — if not done yet, rename the GitHub repo to 'claude0' (Settings → General)"

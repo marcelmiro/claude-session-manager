@@ -91,7 +91,7 @@ export function getSubscription(deviceId: string): StoredSubscription | null {
   return readSubscriptions()[deviceId] ?? null;
 }
 
-/** Every subscribed device id — for broadcast pushes (`c0 notify`). */
+/** Every subscribed device id — for broadcast pushes (`claude0 notify`). */
 export function listDeviceIds(): string[] {
   return Object.keys(readSubscriptions());
 }

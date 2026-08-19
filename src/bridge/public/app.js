@@ -1,5 +1,5 @@
 // Claude0 (portkey) mobile bridge UI — Preact + signals + htm, no build step. Auth is the
-// HttpOnly `c0` cookie (set by POST /auth); this file never touches the token
+// HttpOnly `claude0` cookie (set by POST /auth); this file never touches the token
 // after the one login POST, and never puts it in a URL.
 import { h, render } from "preact";
 import { useRef, useEffect, useLayoutEffect, useState } from "preact/hooks";
@@ -1438,7 +1438,7 @@ function formatAge(iso) {
   return formatTimeAgo(iso, { now: tick.value, verbose: true });
 }
 
-// Row title mirrors `c0 list`: the tmux-style AI name (repo is the group header, so
+// Row title mirrors `claude0 list`: the tmux-style AI name (repo is the group header, so
 // just the name). Falls back to the summary/branch label only when unnamed.
 function listTitle(s) {
   return s.name || s.label || s.branch || s.id.slice(0, 8);

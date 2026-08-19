@@ -17,7 +17,7 @@ import { existsSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-const ROOT = join(import.meta.dir, ".."); // repo root, for spawning `bin/c0.ts`
+const ROOT = join(import.meta.dir, ".."); // repo root, for spawning `bin/claude0.ts`
 const args = process.argv.slice(2);
 const flag = (name: string, def: string) => {
   const i = args.indexOf(name);
@@ -121,7 +121,7 @@ async function main() {
   const CHROME = resolveChrome();
 
   // 1. Boot the bridge in fixtures mode.
-  bridge = Bun.spawn(["bun", "run", "bin/c0.ts", "bridge"], {
+  bridge = Bun.spawn(["bun", "run", "bin/claude0.ts", "bridge"], {
     cwd: ROOT,
     env: {
       ...process.env,

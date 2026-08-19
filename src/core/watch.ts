@@ -7,7 +7,7 @@
  *
  * If `EVENTS_DIR` does not exist yet, this is a NO-OP — it returns a noop
  * unsubscribe and does NOT create the dir or throw. The dir appears once
- * `c0 setup`'s hooks run; the bridge re-wires on its next start. Headless: no
+ * `claude0 setup`'s hooks run; the bridge re-wires on its next start. Headless: no
  * blessed/ui imports (boundary.test.ts).
  */
 

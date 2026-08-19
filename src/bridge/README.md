@@ -2,7 +2,7 @@
 
 A thin `Bun.serve` HTTP/SSE server (`server.ts`) that exposes the headless
 `core/` API + a no-build web page (`public/`) so you can drive Claude sessions
-from an iPhone over Tailscale. Launched with `c0 bridge`.
+from an iPhone over Tailscale. Launched with `claude0 bridge`.
 
 ## Connect from your phone
 
@@ -11,8 +11,8 @@ from an iPhone over Tailscale. Launched with `c0 bridge`.
 Bind to **loopback** (the default) and keep the Mac awake:
 
 ```sh
-caffeinate -s env CLAUDE0_BRIDGE_TOKEN=<your-token> c0 bridge
-# prints: c0 bridge listening on http://127.0.0.1:8473
+caffeinate -s env CLAUDE0_BRIDGE_TOKEN=<your-token> claude0 bridge
+# prints: claude0 bridge listening on http://127.0.0.1:8473
 ```
 
 Generate a token once with `openssl rand -hex 32`. The bridge **refuses to start**
@@ -121,7 +121,7 @@ Run the bridge on the Mac without a phone — bind loopback with a throwaway tok
 
 ```sh
 CLAUDE0_BRIDGE_TOKEN=test CLAUDE0_BRIDGE_HOST=127.0.0.1 CLAUDE0_BRIDGE_PORT=8479 \
-  bun run bin/c0.ts bridge
+  bun run bin/claude0.ts bridge
 ```
 
 **Hit the API.** The static shell (`/`, `/app.js`, vendor) is public; everything else
@@ -141,7 +141,7 @@ instead of querying `core/`. Lets the UI render with no live sessions — ideal 
 layout/CSS work. Auth + static serving stay real; only the data is faked:
 
 ```sh
-CLAUDE0_BRIDGE_TOKEN=test CLAUDE0_BRIDGE_FIXTURES=1 bun run bin/c0.ts bridge
+CLAUDE0_BRIDGE_TOKEN=test CLAUDE0_BRIDGE_FIXTURES=1 bun run bin/claude0.ts bridge
 ```
 
 **Screenshots** — `bun run shoot` boots the bridge in fixtures mode, drives headless

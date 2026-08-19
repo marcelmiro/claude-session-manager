@@ -3,7 +3,8 @@
   "version": "0.1.0",
   "type": "module",
   "bin": {
-    "c0": "./bin/c0.ts"
+    "claude0": "./bin/claude0.ts",
+    "c0": "./bin/claude0.ts"
   },
   "scripts": {
     "start": "bun run src/index.ts",

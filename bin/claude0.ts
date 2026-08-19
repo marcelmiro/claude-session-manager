@@ -3,9 +3,9 @@ export {};
 
 function help() {
   console.log(`
-  \x1b[1mc0\x1b[0m — Claude0
+  \x1b[1mclaude0\x1b[0m — Claude0
 
-  \x1b[1mUsage:\x1b[0m  c0 [command]
+  \x1b[1mUsage:\x1b[0m  claude0 [command]
 
   \x1b[1mCommands:\x1b[0m
     \x1b[36m(none)\x1b[0m              Open the full TUI
@@ -26,7 +26,7 @@ function help() {
   \x1b[1mOptions:\x1b[0m
     \x1b[36m-h, --help\x1b[0m          Show this help message
 
-  Run \x1b[36mc0 terminal --help\x1b[0m for terminal commands.
+  Run \x1b[36mclaude0 terminal --help\x1b[0m for terminal commands.
 `.trimEnd());
 }
 
@@ -50,7 +50,7 @@ const cmd = process.argv[2];
 async function runTerminal(args: string[]): Promise<never> {
   const home = process.env.HOME;
   const installed = home ? `${home}/.config/c0/terminal-launcher` : "";
-  const bundled = `${import.meta.dir}/../config/c0-terminal`;
+  const bundled = `${import.meta.dir}/../config/terminal-launcher`;
   const command = installed && (await Bun.file(installed).exists())
     ? [installed, ...args]
     : ["/bin/sh", bundled, ...args];

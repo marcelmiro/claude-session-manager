@@ -4,10 +4,10 @@
 set -uo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CLAUDE0_TMUX_SOURCE="if-shell 'test -f ~/.config/c0/tmux.conf' 'source-file ~/.config/c0/tmux.conf' ''"
+CLAUDE0_TMUX_SOURCE="if-shell 'test -f ~/.config/claude0/tmux.conf' 'source-file ~/.config/claude0/tmux.conf' ''"
 # Literal line expected in the user's zsh configuration.
 # shellcheck disable=SC2016
-CLAUDE0_ZSH_SOURCE='[[ -r "$HOME/.config/c0/shell.zsh" ]] && source "$HOME/.config/c0/shell.zsh"'
+CLAUDE0_ZSH_SOURCE='[[ -r "$HOME/.config/claude0/shell.zsh" ]] && source "$HOME/.config/claude0/shell.zsh"'
 
 failures=0
 warnings=0
@@ -36,7 +36,7 @@ case "$HOME" in
   *) fail "HOME is $HOME; copied Claude sessions expect /Users/<name>" ;;
 esac
 
-for cmd in tmux mosh-server zsh git gh jq curl bun c0 claude bwrap socat lsof; do
+for cmd in tmux mosh-server zsh git gh jq curl bun claude0 claude bwrap socat lsof; do
   if command -v "$cmd" >/dev/null 2>&1; then
     pass "$cmd: $(command -v "$cmd")"
   else
@@ -66,35 +66,35 @@ if tmux has-session -t main 2>/dev/null; then
   else
     fail "tmux server PATH is missing $HOME/.bun/bin or $HOME/.local/bin: $tmux_path"
   fi
-  if PATH="$tmux_path" command -v c0 >/dev/null 2>&1; then
-    pass "tmux run-shell can resolve c0"
+  if PATH="$tmux_path" command -v claude0 >/dev/null 2>&1; then
+    pass "tmux run-shell can resolve claude0"
   else
-    fail "c0 is not resolvable through the tmux server PATH"
+    fail "claude0 is not resolvable through the tmux server PATH"
   fi
 
   claude0_status=$(tmux show-options -gqv @claude0_status 2>/dev/null || true)
-  if [[ "$claude0_status" == *"c0 status"* ]]; then pass "Claude0 status segment is active"; else fail "@claude0_status is missing or inactive"; fi
+  if [[ "$claude0_status" == *"claude0 status"* ]]; then pass "Claude0 status segment is active"; else fail "@claude0_status is missing or inactive"; fi
   claude0_popup=$(tmux list-keys -T prefix a 2>/dev/null || true)
-  if [[ "$claude0_popup" == *"display-popup"* && "$claude0_popup" == *"c0"* ]]; then pass "Claude0 popup binding is active"; else fail "prefix+a is not bound to the Claude0 popup"; fi
+  if [[ "$claude0_popup" == *"display-popup"* && "$claude0_popup" == *"claude0"* ]]; then pass "Claude0 popup binding is active"; else fail "prefix+a is not bound to the Claude0 popup"; fi
 
 else
   fail "tmux session main is not alive"
 fi
 
-if cmp -s "$here/../config/tmux.conf" "$HOME/.config/c0/tmux.conf" 2>/dev/null; then
+if cmp -s "$here/../config/tmux.conf" "$HOME/.config/claude0/tmux.conf" 2>/dev/null; then
   pass "current Claude0-owned tmux fragment is installed"
 else
-  fail "Claude0-owned tmux fragment is missing or stale: $HOME/.config/c0/tmux.conf"
+  fail "Claude0-owned tmux fragment is missing or stale: $HOME/.config/claude0/tmux.conf"
 fi
 if grep -Fxq "$CLAUDE0_TMUX_SOURCE" "$HOME/.tmux.conf" 2>/dev/null; then
   pass "$HOME/.tmux.conf imports the Claude0 fragment"
 else
   fail "$HOME/.tmux.conf does not import the Claude0 fragment"
 fi
-if cmp -s "$here/../config/shell.zsh" "$HOME/.config/c0/shell.zsh" 2>/dev/null; then
+if cmp -s "$here/../config/shell.zsh" "$HOME/.config/claude0/shell.zsh" 2>/dev/null; then
   pass "current Claude0-owned zsh fragment is installed"
 else
-  fail "Claude0-owned zsh fragment is missing or stale: $HOME/.config/c0/shell.zsh"
+  fail "Claude0-owned zsh fragment is missing or stale: $HOME/.config/claude0/shell.zsh"
 fi
 if grep -Fxq "$CLAUDE0_ZSH_SOURCE" "$HOME/.zshrc" 2>/dev/null; then
   pass "$HOME/.zshrc imports the Claude0 fragment"
@@ -102,7 +102,7 @@ else
   fail "$HOME/.zshrc does not import the Claude0 fragment"
 fi
 
-claude0_config="$HOME/.config/c0/config.json"
+claude0_config="$HOME/.config/claude0/config.json"
 if jq -e '.schemaVersion == 1 and (.repositories.roots | type == "array") and (.repositories.roots | length > 0)' "$claude0_config" >/dev/null 2>&1; then
   pass "single-file Claude0 config is valid: $claude0_config"
 else
@@ -120,7 +120,7 @@ else
   fail "Claude Code is not authenticated"
 fi
 
-bridge_env="$HOME/.config/c0/bridge.env"
+bridge_env="$HOME/.config/claude0/bridge.env"
 if [ -r "$bridge_env" ]; then
   # Generated EnvironmentFile at a fixed local path.
   set -a

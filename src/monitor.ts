@@ -256,7 +256,7 @@ async function main(): Promise<void> {
   // Fork override — MUST run after processHookEvents (which just re-imposed the hook's
   // parent id from disk onto fork panes). Force the fork's real, native-resolved id and
   // remember we changed the map so phase2 persists it (overwriting the wrong on-disk pane
-  // file), self-healing `c0 list`, the TUI and the bridge on the next read.
+  // file), self-healing `claude0 list`, the TUI and the bridge on the next read.
   let forkCorrected = false;
   for (const paneId of forkPaneIds) {
     const realId = resumeIds[paneId];
@@ -447,7 +447,7 @@ async function main(): Promise<void> {
     }
   }
 
-  // Save state — but first check if another process (c0 next) modified state
+  // Save state — but first check if another process (claude0 next) modified state
   // since we loaded it. If so, don't overwrite their changes.
   const freshState = await loadState();
   if (freshState.lastUpdatedAt !== state.lastUpdatedAt) {

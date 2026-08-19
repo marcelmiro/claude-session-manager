@@ -1,5 +1,5 @@
 /**
- * Directory decisions behind `c0 save-sessions` / `c0 restore-sessions`.
+ * Directory decisions behind `claude0 save-sessions` / `claude0 restore-sessions`.
  *
  * tmux-resurrect brings panes back in whatever directory the shell starts in, which for a
  * restored pane is often `$HOME`. Resuming a session there roots Claude at `$HOME`, and since

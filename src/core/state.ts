@@ -1,6 +1,6 @@
 import { readdir, unlink, rename, writeFile, mkdir } from "node:fs/promises";
 import { PATHS } from "./config";
-import type { AggregateStatus, C0State, Session, SessionNotificationState } from "../types";
+import type { AggregateStatus, State, Session, SessionNotificationState } from "../types";
 
 // The pane→session map is hook-owned: the SessionStart hook writes one file per pane
 // (`panes/<paneId>` → sessionId) atomically (temp+rename), so there's a single durable
@@ -12,7 +12,7 @@ const PANE_SESSIONS_PATH = `${PATHS.dir}/pane-sessions.json`; // legacy (pre-v7)
 const HOOK_EVENTS_PATH = `${PATHS.dir}/hook-events`; // legacy (pre-v7); drained by migratePaneMap
 
 /** Read the hook-owned per-pane map. Falls back to the legacy single-file map only when the
- *  `panes/` dir doesn't exist yet (a pre-v7 machine before `c0 setup` runs the migration). */
+ *  `panes/` dir doesn't exist yet (a pre-v7 machine before `claude0 setup` runs the migration). */
 export async function loadPaneSessions(): Promise<Record<string, string>> {
   let files: string[];
   try {
@@ -70,7 +70,7 @@ export async function reconcilePaneFiles(livePaneIds: Set<string>): Promise<void
   } catch {}
 }
 
-/** One-time pre-v7 migration (idempotent; run on every `c0 setup`): fold the legacy single-file
+/** One-time pre-v7 migration (idempotent; run on every `claude0 setup`): fold the legacy single-file
  *  map plus any residual hook-events append log into per-pane files, so sessions already running
  *  at upgrade time stay resolvable without waiting for their next SessionStart. */
 export async function migratePaneMap(): Promise<void> {
@@ -85,13 +85,13 @@ export async function migratePaneMap(): Promise<void> {
   if (Object.keys(map).length) await savePaneSessions(map);
 }
 
-const EMPTY_STATE: C0State = {
+const EMPTY_STATE: State = {
   lastUpdatedBy: "tui",
   lastUpdatedAt: 0,
   sessions: {},
 };
 
-export async function loadState(): Promise<C0State> {
+export async function loadState(): Promise<State> {
   try {
     const raw = await Bun.file(PATHS.state).text();
     const parsed = JSON.parse(raw);
@@ -102,7 +102,7 @@ export async function loadState(): Promise<C0State> {
   return { ...EMPTY_STATE, sessions: {} };
 }
 
-export async function saveState(state: C0State): Promise<void> {
+export async function saveState(state: State): Promise<void> {
   try {
     await Bun.$`mkdir -p ${PATHS.dir}`.quiet();
     await Bun.write(PATHS.state, JSON.stringify(state));
@@ -111,7 +111,7 @@ export async function saveState(state: C0State): Promise<void> {
   }
 }
 
-export function computeAggregate(state: C0State): AggregateStatus {
+export function computeAggregate(state: State): AggregateStatus {
   let needsAttention = 0;
   let running = 0;
   let waiting = 0;
