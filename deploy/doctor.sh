@@ -97,13 +97,16 @@ normalize_tmux_fragment() {
     "$1" 2>/dev/null
 }
 if [ -f "$HOME/.config/claude0/tmux.conf" ] \
-  && ! grep -q '{{BIND_' "$HOME/.config/claude0/tmux.conf" \
+  && ! grep -qE '^\{\{BIND_(POPUP|NEXT)\}\}' "$HOME/.config/claude0/tmux.conf" \
   && cmp -s <(normalize_tmux_fragment "$here/../config/tmux.conf") <(normalize_tmux_fragment "$HOME/.config/claude0/tmux.conf"); then
   pass "current Claude0-owned tmux fragment is installed"
 else
   fail "Claude0-owned tmux fragment is missing or stale: $HOME/.config/claude0/tmux.conf"
 fi
-if grep -Fxq "$CLAUDE0_TMUX_SOURCE" "$HOME/.tmux.conf" 2>/dev/null; then
+# setup accepts the import living in a dotfiles layer the entry point includes
+# (e.g. ~/.config/tmux/*.conf) — accept the same here, dereferencing stow symlinks.
+if grep -Fxq "$CLAUDE0_TMUX_SOURCE" "$HOME/.tmux.conf" 2>/dev/null \
+  || grep -RFq ".config/claude0/tmux.conf" "$HOME/.config/tmux/" 2>/dev/null; then
   pass "$HOME/.tmux.conf imports the Claude0 fragment"
 else
   fail "$HOME/.tmux.conf does not import the Claude0 fragment"
@@ -113,7 +116,8 @@ if cmp -s "$here/../config/shell.zsh" "$HOME/.config/claude0/shell.zsh" 2>/dev/n
 else
   fail "Claude0-owned zsh fragment is missing or stale: $HOME/.config/claude0/shell.zsh"
 fi
-if grep -Fxq "$CLAUDE0_ZSH_SOURCE" "$HOME/.zshrc" 2>/dev/null; then
+if grep -Fxq "$CLAUDE0_ZSH_SOURCE" "$HOME/.zshrc" 2>/dev/null \
+  || grep -RFq ".config/claude0/shell.zsh" "$HOME/.config/zsh/" 2>/dev/null; then
   pass "$HOME/.zshrc imports the Claude0 fragment"
 else
   fail "$HOME/.zshrc does not import the Claude0 fragment"
@@ -170,8 +174,9 @@ else
   fail "Tailscale is not connected"
 fi
 
-watchers=$(sysctl -n fs.inotify.max_user_watches 2>/dev/null || true)
-instances=$(sysctl -n fs.inotify.max_user_instances 2>/dev/null || true)
+# Some minimal images ship without the sysctl binary — /proc carries the same values.
+watchers=$(sysctl -n fs.inotify.max_user_watches 2>/dev/null || cat /proc/sys/fs/inotify/max_user_watches 2>/dev/null || true)
+instances=$(sysctl -n fs.inotify.max_user_instances 2>/dev/null || cat /proc/sys/fs/inotify/max_user_instances 2>/dev/null || true)
 if [ "${watchers:-0}" -ge 1048576 ] 2>/dev/null; then pass "inotify watches = $watchers"; else fail "inotify watches = ${watchers:-unknown}"; fi
 if [ "${instances:-0}" -ge 16384 ] 2>/dev/null; then pass "inotify instances = $instances"; else fail "inotify instances = ${instances:-unknown}"; fi
 if swapon --show 2>/dev/null | grep -q '^/swapfile'; then pass "swapfile is active"; else fail "swapfile is not active"; fi
