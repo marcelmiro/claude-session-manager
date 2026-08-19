@@ -164,7 +164,7 @@ async function main() {
   await shoot(cdp, "login.png");
 
   // 3b. Set the auth cookie (CDP bypasses HttpOnly), reload → session list.
-  await cdp.send("Network.setCookie", { name: "csm", value: TOKEN, domain: "127.0.0.1", path: "/" });
+  await cdp.send("Network.setCookie", { name: "c0", value: TOKEN, domain: "127.0.0.1", path: "/" });
   await navigate(cdp, `${BASE}/`);
   await shoot(cdp, "list.png");
 

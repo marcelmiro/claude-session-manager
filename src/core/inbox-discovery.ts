@@ -192,20 +192,3 @@ export async function discoveryTick(store: InboxStore): Promise<void> {
   );
 }
 
-/**
- * The prototype sidebar's refresher owns the snapshot while it runs — there
- * must be exactly ONE producer at any moment, so the daemon defers to it
- * until the chassis swap retires it.
- */
-export async function prototypeRefresherAlive(): Promise<boolean> {
-  // CLAUDE0_HOME = test seam: a scratch home never defers to the real prototype.
-  if (process.env.CLAUDE0_HOME) return false;
-  try {
-    const pid = Number(await Bun.file("/tmp/csm-sidebar-refresher-default.pid").text());
-    if (pid > 0) {
-      process.kill(pid, 0); // throws if dead
-      return true;
-    }
-  } catch {}
-  return false;
-}

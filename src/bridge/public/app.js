@@ -1,5 +1,5 @@
 // Claude0 (portkey) mobile bridge UI — Preact + signals + htm, no build step. Auth is the
-// HttpOnly `csm` cookie (set by POST /auth); this file never touches the token
+// HttpOnly `c0` cookie (set by POST /auth); this file never touches the token
 // after the one login POST, and never puts it in a URL.
 import { h, render } from "preact";
 import { useRef, useEffect, useLayoutEffect, useState } from "preact/hooks";
@@ -22,10 +22,10 @@ const html = htm.bind(h);
 // pushes only to that device (and only while it isn't watching live via SSE).
 const DEVICE_ID = (() => {
   try {
-    let id = localStorage.getItem("csm-device");
+    let id = localStorage.getItem("c0-device");
     if (!id) {
       id = crypto.randomUUID();
-      localStorage.setItem("csm-device", id);
+      localStorage.setItem("c0-device", id);
     }
     return id;
   } catch {
@@ -39,7 +39,7 @@ const DEVICE_ID = (() => {
 const rawFetch = window.fetch.bind(window);
 window.fetch = (input, init = {}) => {
   const headers = new Headers(init.headers || {});
-  headers.set("x-csm-device", DEVICE_ID);
+  headers.set("x-c0-device", DEVICE_ID);
   return rawFetch(input, { ...init, headers });
 };
 
@@ -108,7 +108,7 @@ const tick = signal(Date.now());
 const viewMode = signal(
   (() => {
     try {
-      return localStorage.getItem("csm-view") || "inbox";
+      return localStorage.getItem("c0-view") || "inbox";
     } catch {
       return "inbox";
     }
@@ -117,7 +117,7 @@ const viewMode = signal(
 function toggleView() {
   viewMode.value = viewMode.value === "inbox" ? "classic" : "inbox";
   try {
-    localStorage.setItem("csm-view", viewMode.value);
+    localStorage.setItem("c0-view", viewMode.value);
   } catch {
     /* private mode — the toggle still works for this page's life */
   }
@@ -327,7 +327,7 @@ async function refreshSessions() {
     // Persist for the next cold open (iOS evicts the page constantly): boot hydrates
     // from this so reopening paints the list instantly instead of a spinner.
     try {
-      localStorage.setItem("csm-sessions", JSON.stringify(sessions.value));
+      localStorage.setItem("c0-sessions", JSON.stringify(sessions.value));
     } catch {
       /* private mode / quota — persistence is best-effort */
     }
@@ -1438,7 +1438,7 @@ function formatAge(iso) {
   return formatTimeAgo(iso, { now: tick.value, verbose: true });
 }
 
-// Row title mirrors `csm list`: the tmux-style AI name (repo is the group header, so
+// Row title mirrors `c0 list`: the tmux-style AI name (repo is the group header, so
 // just the name). Falls back to the summary/branch label only when unnamed.
 function listTitle(s) {
   return s.name || s.label || s.branch || s.id.slice(0, 8);
@@ -2348,7 +2348,7 @@ function RunningTool({ tool }) {
 // unsent text. Written from syncHasText — the one choke point every el.value
 // mutation already calls — so sending (value → "") clears the entry for free.
 // Best-effort: storage failures are swallowed. Bounded to the newest 20 sessions.
-const DRAFTS_KEY = "csm-drafts";
+const DRAFTS_KEY = "c0-drafts";
 function readDrafts() {
   try {
     return JSON.parse(localStorage.getItem(DRAFTS_KEY)) || {};
@@ -4301,7 +4301,7 @@ function applyDeepLink() {
 async function takeStashedTap() {
   if (!("caches" in self)) return null;
   try {
-    const cache = await caches.open("csm-nav");
+    const cache = await caches.open("c0-nav");
     const res = await cache.match("pending");
     if (!res) return null;
     await cache.delete("pending");
@@ -4366,7 +4366,7 @@ async function followNotificationTap() {
 // the last-persisted list immediately and let the auth probe below reconcile: a fresh
 // snapshot replaces it in place, and a 401 flips authed → the login screen as before.
 try {
-  const saved = JSON.parse(localStorage.getItem("csm-sessions") || "null");
+  const saved = JSON.parse(localStorage.getItem("c0-sessions") || "null");
   if (Array.isArray(saved) && saved.length) {
     sessions.value = saved;
     authed.value = true;

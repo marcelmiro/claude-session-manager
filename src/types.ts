@@ -118,7 +118,7 @@ export interface SessionNotificationState {
   lastTransition?: number;
 }
 
-export interface CsmState {
+export interface C0State {
   lastUpdatedBy: "tui" | "monitor" | "bridge";
   lastUpdatedAt: number;
   sessions: Record<string, SessionNotificationState>;
@@ -236,7 +236,7 @@ export interface GlobalSearchState {
 // Forward ref — actual type lives in core/search.ts to avoid circular deps
 export type SearchEntryRef = import("./core/search").SearchEntry;
 
-export interface CsmConfig {
+export interface C0Config {
   $schema?: string;
   schemaVersion: 1;
   repositories: {

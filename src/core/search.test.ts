@@ -196,12 +196,12 @@ test("content-only match snippets from the original-case corpus", () => {
 // --- repo: scope + total ----------------------------------------------------
 
 test("repo: token scopes to that repo; a bare word does not exclude other repos", () => {
-  const inCsm = mkEntry({ repo: "claude0", summary: "fix resurrect" });
+  const inClaude0 = mkEntry({ repo: "claude0", summary: "fix resurrect" });
   const elsewhere = mkEntry({ repo: "throxy", summary: "resurrect the claude0 bridge" });
-  const scoped = searchEntries([inCsm, elsewhere], "repo:claude0 resurrect");
-  expect(scoped.results.map((e) => e.sessionId)).toEqual([inCsm.sessionId]);
+  const scoped = searchEntries([inClaude0, elsewhere], "repo:claude0 resurrect");
+  expect(scoped.results.map((e) => e.sessionId)).toEqual([inClaude0.sessionId]);
   // Same words without the token: both repos stay in play.
-  const unscoped = searchEntries([inCsm, elsewhere], "claude0 resurrect");
+  const unscoped = searchEntries([inClaude0, elsewhere], "claude0 resurrect");
   expect(unscoped.results).toHaveLength(2);
 });
 

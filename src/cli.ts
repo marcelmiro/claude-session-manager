@@ -771,26 +771,6 @@ async function installTerminalIntegration(home: string): Promise<string[]> {
     if (file.executable) await Bun.$`chmod +x ${file.target}`.quiet();
   }
 
-  // Migrate the old public implementation-detail command out of PATH. Only
-  // remove it when it is recognizably Claude0-owned; never clobber an unrelated file.
-  const legacyLauncher = `${home}/.local/bin/csm-terminal`;
-  let legacyContents = "";
-  try { legacyContents = await Bun.file(legacyLauncher).text(); } catch {}
-  if (legacyContents.includes("Start the local or remote tmux environment used by CSM")) {
-    rmSync(legacyLauncher, { force: true });
-    changed.push(legacyLauncher);
-  }
-
-  // The pre-rebrand `csm` command: remove only when the symlink points at this
-  // project's entry script — never clobber an unrelated `csm` binary.
-  const legacyCommand = `${home}/.local/bin/csm`;
-  let legacyCommandTarget = "";
-  try { legacyCommandTarget = readlinkSync(legacyCommand); } catch {}
-  if (/\/bin\/(csm|c0)\.ts$/.test(legacyCommandTarget)) {
-    rmSync(legacyCommand, { force: true });
-    changed.push(legacyCommand);
-  }
-
   const commandSource = `${import.meta.dir}/../bin/c0.ts`;
   const commandTarget = `${home}/.local/bin/c0`;
   let installedCommand = "";
@@ -809,22 +789,6 @@ async function installTerminalIntegration(home: string): Promise<string[]> {
   for (const entry of imports) {
     let existing = "";
     try { existing = await Bun.file(entry.path).text(); } catch {}
-    // Drop the pre-rebrand import lines and the comment that introduced them, so
-    // dotfiles don't accumulate dead sources. Exact-line match only — these files
-    // are personal; anything setup didn't write verbatim is not ours to delete.
-    const legacyImports = [
-      "if-shell 'test -f ~/.config/csm/tmux.conf' 'source-file ~/.config/csm/tmux.conf' ''",
-      '[[ -r "$HOME/.config/csm/shell.zsh" ]] && source "$HOME/.config/csm/shell.zsh"',
-    ];
-    const lines = existing.split("\n");
-    const kept = lines.filter(
-      (l) => !legacyImports.includes(l) && l.trim() !== "# CSM integration (managed by csm setup)",
-    );
-    if (kept.length !== lines.length) {
-      existing = kept.join("\n");
-      await Bun.write(entry.path, existing);
-      changed.push(`${entry.label} (legacy line removed)`);
-    }
     if (!existing.split("\n").includes(entry.line)) {
       const prefix = existing.length === 0 ? "" : existing.endsWith("\n") ? "\n" : "\n\n";
       await Bun.write(entry.path, `${existing}${prefix}# Claude0 integration (managed by c0 setup)\n${entry.line}\n`);
@@ -868,49 +832,6 @@ export async function setup(): Promise<void> {
   const hookDir = `${home}/.config/c0/hooks`;
   const scriptPath = (name: string) => `${hookDir}/${name}`;
 
-  // darwin has no cutover script (deploy/rebrand-cutover.sh targets the Linux
-  // host), so carry the pre-rebrand state dir across the rename here — before
-  // ensureUserConfig can mint a fresh default in the new location. Never on
-  // Linux: there the move belongs to the cutover script, which stops the
-  // csm-* units first so nothing writes to the dir mid-move.
-  if (process.platform === "darwin") {
-    const oldStateDir = `${home}/.config/csm`;
-    const { existsSync, renameSync, readdirSync, rmdirSync, mkdirSync } = await import("node:fs");
-    if (existsSync(oldStateDir)) {
-      // Stop the pre-rebrand daemon first — it is KeepAlive and writes to the
-      // old dir by absolute path every 3s. Other old-name writers (a tmux
-      // status-right still invoking `csm status`, pre-rebrand hooks until they
-      // are deregistered below) may still drop ephemeral files into the old
-      // dir; the per-entry skip-don't-overwrite move below tolerates that.
-      if (!process.env.CLAUDE0_HOME) {
-        const uid = process.getuid?.() ?? 501;
-        await Bun.$`launchctl bootout gui/${uid}/com.csm.daemon`.quiet().nothrow();
-      }
-      // Per-entry, never overwriting: any c0 command run before this setup may
-      // already have minted files in the new dir (saveState's mkdir -p, the
-      // names cache, `c0 config`'s default) — those must not clobber, and must
-      // not block, the real pre-rebrand state.
-      mkdirSync(PATHS.dir, { recursive: true });
-      const skipped: string[] = [];
-      let moved = 0;
-      for (const name of readdirSync(oldStateDir)) {
-        const to = `${PATHS.dir}/${name}`;
-        if (existsSync(to)) { skipped.push(name); continue; }
-        renameSync(`${oldStateDir}/${name}`, to);
-        moved++;
-      }
-      // A surviving old-name writer can land a file between readdir and here —
-      // then the dir simply stays for the next run; never abort setup over it.
-      if (skipped.length === 0) {
-        try { rmdirSync(oldStateDir); } catch {}
-      }
-      if (moved > 0) console.log(`Migrated state: ${oldStateDir} → ${PATHS.dir} (${moved} entries)`);
-      if (skipped.length > 0) {
-        console.log(`NOTE: kept newer ${PATHS.dir} copies of: ${skipped.join(", ")} — the pre-rebrand versions remain in ${oldStateDir}; merge or delete it manually.`);
-      }
-    }
-  }
-
   const configCreated = await ensureUserConfig();
 
   const integrationChanged = await installTerminalIntegration(home);
@@ -940,9 +861,6 @@ export async function setup(): Promise<void> {
       }
       const hooks = entry.hooks.filter((hook: any) => {
         if (typeof hook?.command !== "string") return true;
-        // Pre-rebrand registrations point at ~/.config/csm/hooks — this project's
-        // own scripts under the old name, replaced by the ~/.config/c0 registrations.
-        if (hook.command.includes("/.config/csm/hooks/")) return false;
         return !RETIRED_WORKTREE_HOOK_SCRIPTS.some((script) => hook.command.includes(`${hookDir}/${script}`));
       });
       if (hooks.length !== entry.hooks.length) settingsChanged = true;
@@ -1019,7 +937,7 @@ export async function setup(): Promise<void> {
   const daemonResult = await installDaemonAgent(home);
 
   // Sidebar default-on: the renderer stands up only while this marker exists,
-  // and nothing else creates it (the retired prototype's ctl once did) — a
+  // and nothing else creates it — a
   // fresh machine would run an invisible inbox engine, with no M-S binding
   // installed to turn it on. M-S visibility rides its own hidden marker.
   try {
@@ -1114,9 +1032,6 @@ async function installDaemonAgent(home: string): Promise<"installed" | "updated"
   if (!process.env.CLAUDE0_HOME) {
     const uid = process.getuid?.() ?? 501;
     const target = `gui/${uid}/com.claude0.daemon`;
-    // Retire the pre-rebrand agent so two daemons never race over one inbox.
-    await Bun.$`launchctl bootout gui/${uid}/com.csm.daemon`.quiet().nothrow();
-    rmSync(`${agentDir}/com.csm.daemon.plist`, { force: true });
     if (changed) {
       await Bun.$`launchctl bootout ${target}`.quiet().nothrow();
       // bootstrap right after bootout races the old service's teardown and
@@ -1489,7 +1404,6 @@ export async function daemon(): Promise<void> {
   }
 
   const { wakePass } = await import("./core/inbox-wake");
-  const { prototypeRefresherAlive } = await import("./core/inbox-discovery");
 
   // `--once`: a single wake pass (debugging / manual catch-up).
   if (process.argv.includes("--once")) {
@@ -1503,23 +1417,21 @@ export async function daemon(): Promise<void> {
   }
 
   // The sidebar renderer runs inside this process (own 1s loop + unix
-  // socket); it stands down by itself while the prototype chassis is live.
+  // socket).
   const { runSidebarRenderer } = await import("./sidebar/renderer");
   runSidebarRenderer();
 
   let tick = 0;
   while (true) {
     try {
-      if (!(await prototypeRefresherAlive())) {
-        const child = Bun.spawn(
-          [process.execPath, process.argv[1]!, "daemon", "--discover-once"],
-          { stdin: "ignore", stdout: "ignore", stderr: "ignore" },
-        );
-        // a wedged tmux/ps call must not pile up children behind it
-        const killer = setTimeout(() => child.kill(), 15_000);
-        await child.exited;
-        clearTimeout(killer);
-      }
+      const child = Bun.spawn(
+        [process.execPath, process.argv[1]!, "daemon", "--discover-once"],
+        { stdin: "ignore", stdout: "ignore", stderr: "ignore" },
+      );
+      // a wedged tmux/ps call must not pile up children behind it
+      const killer = setTimeout(() => child.kill(), 15_000);
+      await child.exited;
+      clearTimeout(killer);
     } catch {}
     if (tick % 5 === 0) {
       try {
@@ -1595,7 +1507,7 @@ export async function notify(message: string): Promise<void> {
   }
   // Empty sessionId on purpose: it keeps the push out of the tap-attribution ledger
   // (a tap must NOT navigate to a session — there is none behind an ops alert; the
-  // service worker falls back to a shared "csm" tag so repeats still collapse).
+  // service worker falls back to a shared "c0" tag so repeats still collapse).
   await Promise.all(ids.map((id) => sendWebPush(id, { title: "Claude0", body: message, sessionId: "" })));
   console.log(`c0: pushed to ${ids.length} device(s)`);
 }

@@ -53,7 +53,7 @@ test("loadConfig migrates flat config and terminal sidecars without losing effec
 test("loadConfig preserves the old implicit priority during a legacy empty-object migration", async () => {
   writeFileSync(PATHS.config, "{}");
   const config = await loadConfig();
-  expect(config.repositories.priority).toEqual(["throxy", "customeros", "~", "csm"]);
+  expect(config.repositories.priority).toEqual(["throxy", "customeros", "~", "claude0"]);
 });
 
 test("loadConfig leaves a valid v1 file byte-identical", async () => {

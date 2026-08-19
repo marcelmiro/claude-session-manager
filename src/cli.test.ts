@@ -32,7 +32,6 @@ beforeEach(() => {
   rmSync(claudeDir, { recursive: true, force: true });
   rmSync(c0Dir, { recursive: true, force: true });
   rmSync(`${TEST_HOME}/.local/bin/c0`, { force: true });
-  rmSync(`${TEST_HOME}/.local/bin/csm-terminal`, { force: true });
   rmSync(`${TEST_HOME}/.zshrc`, { force: true });
   rmSync(`${TEST_HOME}/.tmux.conf`, { force: true });
   mkdirSync(claudeDir, { recursive: true });
@@ -52,10 +51,6 @@ test("setup installs Claude0-owned terminal fragments and imports them idempoten
   writeFileSync(`${TEST_HOME}/.zshrc`, "# user zsh config\n");
   writeFileSync(`${TEST_HOME}/.tmux.conf`, "# user tmux config\n");
   mkdirSync(`${TEST_HOME}/.local/bin`, { recursive: true });
-  writeFileSync(
-    `${TEST_HOME}/.local/bin/csm-terminal`,
-    "#!/bin/sh\n# Start the local or remote tmux environment used by CSM.\n",
-  );
 
   await setup();
   await setup();
@@ -71,8 +66,6 @@ test("setup installs Claude0-owned terminal fragments and imports them idempoten
   expect(readFileSync(`${c0Dir}/terminal-launcher`, "utf8")).toContain(
     "MOSH_SERVER_NETWORK_TMOUT=2592000",
   );
-  expect(existsSync(`${TEST_HOME}/.local/bin/csm-terminal`)).toBe(false);
-
   const zshrc = readFileSync(`${TEST_HOME}/.zshrc`, "utf8");
   const tmux = readFileSync(`${TEST_HOME}/.tmux.conf`, "utf8");
   expect(zshrc).toContain("# user zsh config");

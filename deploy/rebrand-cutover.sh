@@ -129,6 +129,41 @@ if [[ -f "$NEW_CFG/inbox.db" ]]; then
     db.close();
   ')
 fi
+# Retire the pre-rebrand command surface: the csm symlink (only when it points
+# at this project's entry script) and the long-retired csm-terminal launcher.
+for link in "$HOME/.local/bin/csm" "$HOME/.bun/bin/csm"; do
+  if [[ -L "$link" ]] && [[ "$(readlink "$link")" == */bin/csm.ts ]]; then rm -f "$link"; fi
+done
+rm -f "$HOME/.local/bin/csm-terminal"
+# Drop the pre-rebrand dotfile import lines (exact known strings that only the
+# old setup ever wrote — `c0 setup` will append the new ones).
+for f in "$HOME/.tmux.conf" "$HOME/.zshrc"; do
+  [[ -f "$f" ]] || continue
+  sed -i \
+    -e "\%^if-shell 'test -f ~/.config/csm/tmux.conf' 'source-file ~/.config/csm/tmux.conf' ''$%d" \
+    -e '\%^\[\[ -r "$HOME/.config/csm/shell.zsh" \]\] && source "$HOME/.config/csm/shell.zsh"$%d' \
+    -e '/^# CSM integration (managed by csm setup)$/d' "$f"
+done
+# Deregister the pre-rebrand Claude hooks — their scripts rode the state-dir
+# move, and `c0 setup` registers the ~/.config/c0 set fresh.
+SETTINGS="$HOME/.claude/settings.json"
+if [[ -f "$SETTINGS" ]]; then
+  cp "$SETTINGS" "$SETTINGS.pre-rebrand.bak"
+  jq 'if (.hooks? // null | type) == "object"
+      then .hooks |= with_entries(
+        .value |= map(select((.hooks // [] | map(.command // "") | any(contains("/.config/csm/hooks/"))) | not))
+        | select(.value | length > 0))
+      else . end' \
+    "$SETTINGS" > "$SETTINGS.tmp"
+  [[ -s "$SETTINGS.tmp" ]] || die "settings.json hook rewrite produced empty output"
+  mv "$SETTINGS.tmp" "$SETTINGS"
+fi
+# Reset per-device push state: the rebrand renames the client's device-id
+# storage key, so every phone mints a fresh id and resubscribes on next PWA
+# launch — old-id subscriptions would double-notify on broadcasts. The VAPID
+# keypair stays (resubscription happens against it).
+rm -f "$NEW_CFG/push-subscriptions.json"
+rm -rf "$NEW_CFG/consumers" "$NEW_CFG/source" "$NEW_CFG/pushed"
 # Best-effort: keep Claude Code transcripts + memory attached to the renamed
 # repo (project dirs are keyed by the cwd path, dashes for slashes).
 shopt -s nullglob

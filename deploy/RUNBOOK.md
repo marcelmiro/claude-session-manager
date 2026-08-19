@@ -147,6 +147,23 @@ remote re-pointed at `claude0`) → rewrites recorded absolute paths
 (re-pointing `~/.bun/bin/c0`, which their `ExecStart` uses absolutely) →
 verifies (units active, `POST /auth` 200, `c0 list`).
 
+The codebase carries no migration/compat code — this script is the only place
+the old names are known. It also deregisters the pre-rebrand Claude hooks from
+`~/.claude/settings.json` (backup at `settings.json.pre-rebrand.bak`), removes
+the old `csm`/`csm-terminal` commands and dotfile import lines, and resets
+per-device push state (`push-subscriptions.json`, `consumers/`, `source/`,
+`pushed/` — the VAPID keypair stays). The rebrand renames the phone's wire
+identifiers too (auth cookie, device-id storage key), so each phone re-enters
+the token once and silently resubscribes to push on its next PWA launch.
+
+**darwin machine** (no systemd, no script): run these by hand, then `c0 setup` —
+
+```sh
+launchctl bootout "gui/$(id -u)/com.csm.daemon" 2>/dev/null || true
+rm -f ~/Library/LaunchAgents/com.csm.daemon.plist
+mv ~/.config/csm ~/.config/c0
+```
+
 Personal dotfiles are never rewritten: the pre-flight prints every `csm`
 reference it finds in `~/.tmux.conf`, `~/.zshrc`, and `~/.config/tmux/*.conf`
 — update those by hand (notably a `status-right` interpolating `@csm_status`

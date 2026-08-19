@@ -1,6 +1,6 @@
 import { readdir, unlink, rename, writeFile, mkdir } from "node:fs/promises";
 import { PATHS } from "./config";
-import type { AggregateStatus, CsmState, Session, SessionNotificationState } from "../types";
+import type { AggregateStatus, C0State, Session, SessionNotificationState } from "../types";
 
 // The pane→session map is hook-owned: the SessionStart hook writes one file per pane
 // (`panes/<paneId>` → sessionId) atomically (temp+rename), so there's a single durable
@@ -85,13 +85,13 @@ export async function migratePaneMap(): Promise<void> {
   if (Object.keys(map).length) await savePaneSessions(map);
 }
 
-const EMPTY_STATE: CsmState = {
+const EMPTY_STATE: C0State = {
   lastUpdatedBy: "tui",
   lastUpdatedAt: 0,
   sessions: {},
 };
 
-export async function loadState(): Promise<CsmState> {
+export async function loadState(): Promise<C0State> {
   try {
     const raw = await Bun.file(PATHS.state).text();
     const parsed = JSON.parse(raw);
@@ -102,7 +102,7 @@ export async function loadState(): Promise<CsmState> {
   return { ...EMPTY_STATE, sessions: {} };
 }
 
-export async function saveState(state: CsmState): Promise<void> {
+export async function saveState(state: C0State): Promise<void> {
   try {
     await Bun.$`mkdir -p ${PATHS.dir}`.quiet();
     await Bun.write(PATHS.state, JSON.stringify(state));
@@ -111,7 +111,7 @@ export async function saveState(state: CsmState): Promise<void> {
   }
 }
 
-export function computeAggregate(state: CsmState): AggregateStatus {
+export function computeAggregate(state: C0State): AggregateStatus {
   let needsAttention = 0;
   let running = 0;
   let waiting = 0;

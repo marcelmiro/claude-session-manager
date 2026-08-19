@@ -134,7 +134,7 @@ function cookieToken(req: Request): string | null {
   for (const part of header.split(";")) {
     const eq = part.indexOf("=");
     if (eq === -1) continue;
-    if (part.slice(0, eq).trim() === "csm") return part.slice(eq + 1).trim();
+    if (part.slice(0, eq).trim() === "c0") return part.slice(eq + 1).trim();
   }
   return null;
 }
@@ -905,7 +905,7 @@ function clearDeviceConsumer(deviceId: string): void {
 
 /** The validated device identity a portkey client sends on every request. */
 function deviceOf(req: Request): string | undefined {
-  const d = req.headers.get("x-csm-device");
+  const d = req.headers.get("x-c0-device");
   return isValidDeviceId(d) ? d : undefined;
 }
 
@@ -983,11 +983,11 @@ async function route(req: Request): Promise<Response> {
     const body = (await req.json().catch(() => ({}))) as { token?: unknown };
     if (typeof body.token !== "string" || !tokenMatches(body.token)) return json({ ok: false }, 401);
     return json({ ok: true }, 200, {
-      "set-cookie": `csm=${rawToken}; HttpOnly; SameSite=Strict; Path=/; Max-Age=31536000`,
+      "set-cookie": `c0=${rawToken}; HttpOnly; SameSite=Strict; Path=/; Max-Age=31536000`,
     });
   }
 
-  // --- Everything below is protected: valid csm cookie required ---
+  // --- Everything below is protected: valid c0 cookie required ---
   if (!tokenMatches(cookieToken(req))) return json({ ok: false }, 401);
 
   // --- Demo/test mode: canned data for the GET/action routes (`/stream` falls through) ---

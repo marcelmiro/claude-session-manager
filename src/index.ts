@@ -24,7 +24,7 @@ import { renderSearchResults } from "./ui/search-list";
 import { createSpaceMenuState, renderSpaceMenu, handleSpaceMenuKey, getMenuDimensions, type SpaceMenuState } from "./ui/space-menu";
 import { createQuestionPicker, renderQuestionPicker, handleQuestionPickerKey, getPickerDimensions, type QuestionPickerState } from "./ui/question-picker";
 import { C } from "./ui/colors";
-import type { DisplayRow, Session, CsmConfig, WizardState, WizardRepo, GlobalSearchState, WorktreeMode } from "./types";
+import type { DisplayRow, Session, C0Config, WizardState, WizardRepo, GlobalSearchState, WorktreeMode } from "./types";
 import { existsSync, readFileSync } from "fs";
 import { homedir } from "os";
 
@@ -51,7 +51,7 @@ let isRefreshing = false;
 let previewGeneration = 0;
 let showArchived = false;
 let nameCache: NameCache = { version: 5, names: {}, sources: {}, pinned: {} };
-let notifConfig: CsmConfig = {
+let notifConfig: C0Config = {
   schemaVersion: 1,
   repositories: { roots: [], priority: [] },
   terminal: { defaultTarget: "local", remoteHost: null, localSession: "main", remoteSession: "main" },
