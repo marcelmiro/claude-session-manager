@@ -1301,6 +1301,14 @@ export function runSidebarRenderer(): void {
 
   async function tick(): Promise<void> {
     tickCount++;
+    // Wiring installs BEFORE the stand-down gate: M-S is the only way back
+    // from hidden, so a hidden sidebar must still get its bindings on a fresh
+    // tmux server (or after this entry script's path changes) — behind the
+    // gate, the un-hide key itself would be the thing that's missing.
+    // Periodic, not just first tick: a tmux SERVER restart wipes bindings
+    // while the daemon lives on.
+    phase = "wiring";
+    if (tickCount === 1 || tickCount % 30 === 0) await installTmuxWiring();
     // stand down while M-S hides the sidebar or autostart is off
     phase = "gate";
     const active =
@@ -1314,10 +1322,6 @@ export function runSidebarRenderer(): void {
     const firstTick = !standing;
     standing = true;
     if (firstTick) console.error("[sidebar] standing up");
-    // periodic re-install, not just first tick: a tmux SERVER restart wipes
-    // bindings while the daemon (and its `standing` flag) live on
-    phase = "wiring";
-    if (firstTick || tickCount % 30 === 0) await installTmuxWiring();
     phase = "relays";
     if (firstTick) await respawnRelays();
     // tmux reissues window ids from zero after a server restart, and the
