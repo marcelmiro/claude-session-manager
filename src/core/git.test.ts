@@ -58,7 +58,7 @@ async function git(...args: string[]): Promise<string> {
 
 beforeEach(async () => {
   // realpath so paths match what `git worktree list` reports (macOS /var → /private/var).
-  dir = await realpath(await mkdtemp(`${tmpdir()}/csm-git-`));
+  dir = await realpath(await mkdtemp(`${tmpdir()}/c0-git-`));
 });
 
 afterEach(async () => {
@@ -93,7 +93,7 @@ describe("getDefaultBranch", () => {
 
   test("reads origin/HEAD when set", async () => {
     // Bare remote on `trunk`, cloned, with origin/HEAD recorded.
-    const remote = await mkdtemp(`${tmpdir()}/csm-git-remote-`);
+    const remote = await mkdtemp(`${tmpdir()}/c0-git-remote-`);
     try {
       await Bun.$`git init --bare -b trunk ${remote}`.quiet();
       await initRepo();

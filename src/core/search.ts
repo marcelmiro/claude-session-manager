@@ -243,8 +243,8 @@ function wordFieldTier(field: string, word: string): number {
  * fields (summary, name, etc.) score higher than raw searchText (which includes
  * conversation content) so metadata matches rank above conversation-only matches —
  * EXCEPT repo, capped at 40: repo is a filter dimension (chips on the phone, visible
- * grouping in the TUI), so "csm resurrect" should rank by "resurrect", not by every
- * session that merely lives in csm.
+ * grouping in the TUI), so "claude0 resurrect" should rank by "resurrect", not by every
+ * session that merely lives in claude0.
  */
 function scoreEntryDetailed(
   entry: SearchEntry,

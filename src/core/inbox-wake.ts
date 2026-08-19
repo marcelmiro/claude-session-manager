@@ -3,7 +3,7 @@
  * detached ⚡-named window — snooze means "it literally comes back", and since
  * the snooze verb killed the pane, the wake is what restores trust in killing.
  *
- * Run by `csm daemon` (launchd-kept-alive), NOT the status-right monitor: tmux
+ * Run by `claude0 daemon` (launchd-kept-alive), NOT the status-right monitor: tmux
  * only evaluates the status line while a client is attached, so a midnight
  * wake with no terminal open would silently not fire from there.
  */
@@ -64,7 +64,7 @@ export interface WakeWindow {
  * A wake must LOOK like an attention event, not just exist: write a real
  * attention entry into state.json keyed by the new pane. The monitor carries
  * attention flags over each tick (until focus or a new turn), so ⚡ on the
- * window name, the status-right count and `csm next` all follow natively —
+ * window name, the status-right count and `claude0 next` all follow natively —
  * naming the window ⚡ ourselves loses to the monitor's rename within seconds.
  *
  * The stamp waits for detected status `ready`, not merely for claude to own

@@ -10,7 +10,7 @@ const blessedInternals = blessed as unknown as {
 };
 
 describe("terminal color capabilities", () => {
-  test("the CSM layout gives Blessed its full 256-color table", () => {
+  test("the Claude0 layout gives Blessed its full 256-color table", () => {
     expect(blessedInternals.tput({ terminal: BLESSED_TERMINAL }).colors).toBe(256);
   });
 

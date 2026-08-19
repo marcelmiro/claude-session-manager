@@ -1,7 +1,7 @@
 /**
  * Single sidebar renderer (M2 chassis — ADR 0013 addendum 2). ONE process
- * (inside `csm daemon`) paints every window's sidebar pane by writing ANSI
- * to the pane's tty; the panes themselves are dumb `csm sidebar-pane` stubs
+ * (inside `claude0 daemon`) paints every window's sidebar pane by writing ANSI
+ * to the pane's tty; the panes themselves are dumb `claude0 sidebar-pane` stubs
  * that raw-mode their tty and relay stdin bytes back over a unix socket.
  *
  * What the per-pane blessed chassis needed cross-process choreography for —
@@ -14,23 +14,21 @@
  * focus + SGR mouse through the same relay; a respawned pane gets a NEW tty
  * (EPERM/ENOENT on the old one ⇒ re-resolve and repaint).
  *
- * Stands down entirely while the prototype refresher runs (blessed sidebars
- * own the panes until the chassis swap) or while `M-S` hides sidebars.
+ * Self-installs its tmux wiring and repaints per-line on its own 1s loop.
+ * Stands down while `M-S` hides sidebars or autostart is off.
  */
 import { openSync, writeSync, closeSync } from "node:fs";
 import { InboxStore } from "../core/inbox-store";
 import { composeSessions, peekEngaged, peekVerdict, sectionOf, wakeAt, type InboxSession } from "../core/inbox-model";
-import { prototypeRefresherAlive } from "../core/inbox-discovery";
 import { readLastPromptAt, resolveTranscriptPath } from "../core/last-turn";
 import { resolveRestoreTarget } from "../core/resurrect";
 import { PATHS } from "../core/config";
 import { parseInput, type InputEvent } from "./input";
 import { renderView, type ViewState, type VisibleRow } from "./rows";
 
-const COLS = Number(process.env.CSM_SIDEBAR_COLS ?? 30);
+const COLS = Number(process.env.CLAUDE0_SIDEBAR_COLS ?? 30);
 export const SIDEBAR_SOCK = `${PATHS.dir}/sidebar.sock`;
-// Same markers the prototype's ctl.ts owns — `on`/`off`/`M-S` keep working
-// across the chassis swap with zero migration.
+// User-owned visibility toggles: autostart = sidebar on; hidden = M-S hid it.
 const AUTOSTART = `${PATHS.dir}/inbox-sidebar-autostart-default`;
 const HIDDEN = `${PATHS.dir}/inbox-sidebar-hidden-default`;
 /** start_command marker for stub panes (what discovery greps for). */
@@ -116,7 +114,7 @@ export function runSidebarRenderer(): void {
   let tmuxEpoch: string | null = null;
   // peeked sessionId → when its window was last the viewed one (grace anchor)
   const peekLastActive = new Map<string, number>();
-  let standing = false; // currently active (markers allow, prototype absent)
+  let standing = false; // currently active (markers allow)
   let lastMinute = -1;
 
   function reloadSessions(): void {
@@ -852,7 +850,7 @@ export function runSidebarRenderer(): void {
     await handleKey(win, ev);
   }
 
-  // ── control (M-s / M-S via `csm sidebar-ctl`) ───────────────────────────
+  // ── control (M-s / M-S via `claude0 sidebar-ctl`) ───────────────────────────
 
   async function ctlFocus(invokerPane: string): Promise<void> {
     const winId = await windowOf(invokerPane);
@@ -1226,7 +1224,7 @@ export function runSidebarRenderer(): void {
   } catch {}
   // Protocol: one greeting line, then raw bytes. A stub sends `hello <pane>`
   // and every subsequent byte is that pane's stdin verbatim (nc can't frame);
-  // `csm sidebar-ctl` connections send a single `focus <pane>` / `toggle
+  // `claude0 sidebar-ctl` connections send a single `focus <pane>` / `toggle
   // <pane>` line and close.
   function feedInput(paneId: string, bytes: string): void {
     const winId = paneToWin.get(paneId);
@@ -1303,14 +1301,13 @@ export function runSidebarRenderer(): void {
 
   async function tick(): Promise<void> {
     tickCount++;
-    // stand down while the prototype chassis owns the panes or M-S hides them
+    // stand down while M-S hides the sidebar or autostart is off
     phase = "gate";
     const active =
       (await Bun.file(AUTOSTART).exists()) &&
-      !(await Bun.file(HIDDEN).exists()) &&
-      !(await prototypeRefresherAlive());
+      !(await Bun.file(HIDDEN).exists());
     if (!active) {
-      if (standing) console.error("[sidebar] standing down (markers/prototype)");
+      if (standing) console.error("[sidebar] standing down (markers)");
       standing = false;
       return;
     }

@@ -1,13 +1,13 @@
 import "../../test/helpers/home";
-import { CSM_DIR } from "../../test/helpers/home";
+import { CONFIG_DIR } from "../../test/helpers/home";
 import { test, expect } from "bun:test";
 import { mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { getSessionName, loadNameCache, normalizeName, sanitizePinnedName, slugify, deslugify, looksLikeRefusal, type NameCache } from "./names";
 
-const CACHE_FILE = join(CSM_DIR, "names.json");
+const CACHE_FILE = join(CONFIG_DIR, "names.json");
 function writeCache(obj: unknown) {
-  mkdirSync(CSM_DIR, { recursive: true });
+  mkdirSync(CONFIG_DIR, { recursive: true });
   writeFileSync(CACHE_FILE, JSON.stringify(obj));
 }
 

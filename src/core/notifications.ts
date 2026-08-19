@@ -175,11 +175,11 @@ export function sendNativeNotification(
       const switchCmd = `tmux select-window -t '${pane.sessionName}:${pane.windowIndex}' && tmux select-pane -t '${pane.paneId}'`;
       Bun.spawn(["bash", "-c", [
         frontCheck,
-        `terminal-notifier -title "$CSM_TITLE" -message "$CSM_BODY" -sound Ping -activate com.mitchellh.ghostty -execute "$CSM_SWITCH"`,
+        `terminal-notifier -title "$CLAUDE0_TITLE" -message "$CLAUDE0_BODY" -sound Ping -activate com.mitchellh.ghostty -execute "$CLAUDE0_SWITCH"`,
       ].join("; ")], {
         stdout: "ignore",
         stderr: "ignore",
-        env: { ...process.env, CSM_TITLE: title, CSM_BODY: body, CSM_SWITCH: switchCmd },
+        env: { ...process.env, CLAUDE0_TITLE: title, CLAUDE0_BODY: body, CLAUDE0_SWITCH: switchCmd },
       });
     } else {
       const escaped = (s: string) => s.replace(/\\/g, "\\\\").replace(/"/g, '\\"');

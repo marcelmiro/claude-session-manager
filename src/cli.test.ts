@@ -1,7 +1,7 @@
 /**
  * `setup()` idempotency (Inc setup). Two runs under a temp $HOME must leave exactly
- * one CSM registration per event, preserve pre-existing user hooks + other settings
- * keys, and write the hook scripts stamped with the current CSM_HOOK_VERSION.
+ * one Claude0 registration per event, preserve pre-existing user hooks + other settings
+ * keys, and write the hook scripts stamped with the current HOOK_VERSION.
  *
  * `home` helper first — cli → hook-events → config freezes paths from $HOME; setup
  * itself re-reads homedir() at call time, so it targets the same temp HOME.
@@ -16,8 +16,8 @@ import { HOLD_WINDOW_MS } from "./core/approval";
 
 const claudeDir = `${TEST_HOME}/.claude`;
 const settingsPath = `${claudeDir}/settings.json`;
-const csmDir = `${TEST_HOME}/.config/csm`;
-const hooksDir = `${csmDir}/hooks`;
+const configDir = `${TEST_HOME}/.config/claude0`;
+const hooksDir = `${configDir}/hooks`;
 const EVENTS = [
   "SessionStart",
   "UserPromptSubmit",
@@ -30,9 +30,9 @@ const EVENTS = [
 
 beforeEach(() => {
   rmSync(claudeDir, { recursive: true, force: true });
-  rmSync(csmDir, { recursive: true, force: true });
-  rmSync(`${TEST_HOME}/.local/bin/csm`, { force: true });
-  rmSync(`${TEST_HOME}/.local/bin/csm-terminal`, { force: true });
+  rmSync(configDir, { recursive: true, force: true });
+  rmSync(`${TEST_HOME}/.local/bin/claude0`, { force: true });
+  rmSync(`${TEST_HOME}/.local/bin/c0`, { force: true });
   rmSync(`${TEST_HOME}/.zshrc`, { force: true });
   rmSync(`${TEST_HOME}/.tmux.conf`, { force: true });
   mkdirSync(claudeDir, { recursive: true });
@@ -48,56 +48,51 @@ beforeEach(() => {
   );
 });
 
-test("setup installs CSM-owned terminal fragments and imports them idempotently", async () => {
+test("setup installs Claude0-owned terminal fragments and imports them idempotently", async () => {
   writeFileSync(`${TEST_HOME}/.zshrc`, "# user zsh config\n");
   writeFileSync(`${TEST_HOME}/.tmux.conf`, "# user tmux config\n");
   mkdirSync(`${TEST_HOME}/.local/bin`, { recursive: true });
-  writeFileSync(
-    `${TEST_HOME}/.local/bin/csm-terminal`,
-    "#!/bin/sh\n# Start the local or remote tmux environment used by CSM.\n",
-  );
 
   await setup();
   await setup();
 
-  const shellFragment = readFileSync(`${csmDir}/shell.zsh`, "utf8");
-  const tmuxFragment = readFileSync(`${csmDir}/tmux.conf`, "utf8");
+  const shellFragment = readFileSync(`${configDir}/shell.zsh`, "utf8");
+  const tmuxFragment = readFileSync(`${configDir}/tmux.conf`, "utf8");
   expect(shellFragment).not.toContain("PROMPT=");
   expect(tmuxFragment).toContain("display-popup -E");
-  expect(tmuxFragment).toContain("@csm_status");
+  expect(tmuxFragment).toContain("@claude0_status");
   expect(tmuxFragment).not.toContain("@plugin");
   expect(tmuxFragment).not.toContain("catppuccin");
-  expect(readlinkSync(`${TEST_HOME}/.local/bin/csm`)).toBe(`${import.meta.dir}/../bin/csm.ts`);
-  expect(readFileSync(`${csmDir}/terminal-launcher`, "utf8")).toContain(
+  expect(readlinkSync(`${TEST_HOME}/.local/bin/claude0`)).toBe(`${import.meta.dir}/../bin/claude0.ts`);
+  expect(readlinkSync(`${TEST_HOME}/.local/bin/c0`)).toBe(`${import.meta.dir}/../bin/claude0.ts`);
+  expect(readFileSync(`${configDir}/terminal-launcher`, "utf8")).toContain(
     "MOSH_SERVER_NETWORK_TMOUT=2592000",
   );
-  expect(existsSync(`${TEST_HOME}/.local/bin/csm-terminal`)).toBe(false);
-
   const zshrc = readFileSync(`${TEST_HOME}/.zshrc`, "utf8");
   const tmux = readFileSync(`${TEST_HOME}/.tmux.conf`, "utf8");
   expect(zshrc).toContain("# user zsh config");
   expect(tmux).toContain("# user tmux config");
-  expect(zshrc.match(/\.config\/csm\/shell\.zsh/g)).toHaveLength(2); // test + source in one import line
-  expect(tmux.match(/\.config\/csm\/tmux\.conf/g)).toHaveLength(2); // test + source in one import line
+  expect(zshrc.match(/\.config\/claude0\/shell\.zsh/g)).toHaveLength(2); // test + source in one import line
+  expect(tmux.match(/\.config\/claude0\/tmux\.conf/g)).toHaveLength(2); // test + source in one import line
 });
 
 test("setup migrates terminal sidecars before retiring them", async () => {
-  mkdirSync(csmDir, { recursive: true });
-  writeFileSync(`${csmDir}/config.json`, "{}");
-  writeFileSync(`${csmDir}/terminal-mode`, "remote\n");
-  writeFileSync(`${csmDir}/remote-host`, "vm.example.ts.net\n");
+  mkdirSync(configDir, { recursive: true });
+  writeFileSync(`${configDir}/config.json`, "{}");
+  writeFileSync(`${configDir}/terminal-mode`, "remote\n");
+  writeFileSync(`${configDir}/remote-host`, "vm.example.ts.net\n");
 
   await setup();
 
-  const config = JSON.parse(readFileSync(`${csmDir}/config.json`, "utf8"));
+  const config = JSON.parse(readFileSync(`${configDir}/config.json`, "utf8"));
   expect(config.terminal).toMatchObject({ defaultTarget: "remote", remoteHost: "vm.example.ts.net" });
-  expect(existsSync(`${csmDir}/terminal-mode`)).toBe(false);
-  expect(existsSync(`${csmDir}/remote-host`)).toBe(false);
-  expect(readFileSync(`${csmDir}/terminal-launcher`, "utf8")).toContain('config_file="$HOME/.config/csm/config.json"');
+  expect(existsSync(`${configDir}/terminal-mode`)).toBe(false);
+  expect(existsSync(`${configDir}/remote-host`)).toBe(false);
+  expect(readFileSync(`${configDir}/terminal-launcher`, "utf8")).toContain('config_file="$HOME/.config/claude0/config.json"');
 });
 
-/** Count CSM registrations (command points into the CSM hooks dir) for an event. */
-function csmEntries(settings: any, event: string): any[] {
+/** Count Claude0 registrations (command points into the Claude0 hooks dir) for an event. */
+function hookEntries(settings: any, event: string): any[] {
   const entries = settings.hooks?.[event] ?? [];
   return entries.filter(
     (e: any) =>
@@ -106,14 +101,14 @@ function csmEntries(settings: any, event: string): any[] {
   );
 }
 
-/** The CSM registration for an event whose command runs the given script. */
-function csmEntry(settings: any, event: string, script: string): any {
-  return csmEntries(settings, event).find((e: any) =>
+/** The Claude0 registration for an event whose command runs the given script. */
+function hookEntry(settings: any, event: string, script: string): any {
+  return hookEntries(settings, event).find((e: any) =>
     e.hooks.some((h: any) => typeof h.command === "string" && h.command.includes(script)),
   );
 }
 
-test("running setup() twice leaves exactly one CSM entry per event and preserves user content", async () => {
+test("running setup() twice leaves exactly one Claude0 entry per event and preserves user content", async () => {
   await setup();
   await setup();
 
@@ -126,22 +121,22 @@ test("running setup() twice leaves exactly one CSM entry per event and preserves
   // registrations (approval + question).
   for (const event of EVENTS) {
     const wanted = event === "PreToolUse" ? 2 : 1;
-    expect(csmEntries(settings, event)).toHaveLength(wanted);
+    expect(hookEntries(settings, event)).toHaveLength(wanted);
   }
 
-  // The pre-existing user hook on SessionStart survives alongside the CSM one.
+  // The pre-existing user hook on SessionStart survives alongside the Claude0 one.
   const userHook = settings.hooks.SessionStart.some(
     (e: any) => e.hooks.some((h: any) => h.command === "/usr/local/bin/my-own-hook"),
   );
   expect(userHook).toBe(true);
-  expect(settings.hooks.SessionStart.length).toBe(2); // user + CSM
+  expect(settings.hooks.SessionStart.length).toBe(2); // user + Claude0
 
   // The approval hook keeps the short kill deadline (600s window + grace) — a hung
   // ordinary tool call must stay killable; only the question entry may hold for hours.
-  const pre = csmEntry(settings, "PreToolUse", "/pretooluse.sh");
+  const pre = hookEntry(settings, "PreToolUse", "/pretooluse.sh");
   expect(pre.hooks[0].timeout).toBe(615);
   expect(pre.matcher).toBeUndefined(); // all tools
-  const q = csmEntry(settings, "PreToolUse", "/question-pretooluse.sh");
+  const q = hookEntry(settings, "PreToolUse", "/question-pretooluse.sh");
   expect(q.matcher).toBe("AskUserQuestion");
   expect(q.hooks[0].timeout).toBe(14415); // 4h question window + kill grace
 });
@@ -152,7 +147,7 @@ test("the registered kill timeout outlasts the window the hook poll loops run to
   // cleanup that un-registers its marker — the orphan the pid gate then has to catch.
   await setup();
   const settings = JSON.parse(readFileSync(settingsPath, "utf8"));
-  const registered = csmEntries(settings, "PreToolUse")[0].hooks[0].timeout * 1000;
+  const registered = hookEntries(settings, "PreToolUse")[0].hooks[0].timeout * 1000;
   expect(registered).toBeGreaterThan(HOLD_WINDOW_MS);
 });
 
@@ -161,16 +156,16 @@ test("setup() repairs a stale timeout on an already-registered hook", async () =
   // install from an older version would keep its old kill deadline forever.
   await setup();
   const settings = JSON.parse(readFileSync(settingsPath, "utf8"));
-  csmEntries(settings, "PreToolUse")[0].hooks[0].timeout = 600; // as an older version left it
+  hookEntries(settings, "PreToolUse")[0].hooks[0].timeout = 600; // as an older version left it
   writeFileSync(settingsPath, JSON.stringify(settings, null, 2));
 
   await setup();
   const after = JSON.parse(readFileSync(settingsPath, "utf8"));
-  expect(csmEntry(after, "PreToolUse", "/pretooluse.sh").hooks[0].timeout).toBe(615);
-  expect(csmEntries(after, "PreToolUse")).toHaveLength(2); // repaired, not duplicated
+  expect(hookEntry(after, "PreToolUse", "/pretooluse.sh").hooks[0].timeout).toBe(615);
+  expect(hookEntries(after, "PreToolUse")).toHaveLength(2); // repaired, not duplicated
 });
 
-test("setup() writes every hook script stamped with the current CSM_HOOK_VERSION", async () => {
+test("setup() writes every hook script stamped with the current HOOK_VERSION", async () => {
   await setup();
   for (const name of [
     "session-start",
@@ -180,14 +175,14 @@ test("setup() writes every hook script stamped with the current CSM_HOOK_VERSION
   ]) {
     const path = `${hooksDir}/${name}.sh`;
     expect(existsSync(path)).toBe(true);
-    expect(readFileSync(path, "utf8")).toContain(`# CSM_HOOK_VERSION=${HOOK_VERSION}`);
+    expect(readFileSync(path, "utf8")).toContain(`# HOOK_VERSION=${HOOK_VERSION}`);
   }
 });
 
-test("setup removes retired CSM worktree hooks and scripts but preserves user hooks", async () => {
+test("setup removes retired Claude0 worktree hooks and scripts but preserves user hooks", async () => {
   mkdirSync(hooksDir, { recursive: true });
   for (const script of ["worktree-create.sh", "worktree-remove.sh", "subagent-worktree-cleanup.sh"]) {
-    writeFileSync(`${hooksDir}/${script}`, "#!/bin/bash\n# old CSM hook\n");
+    writeFileSync(`${hooksDir}/${script}`, "#!/bin/bash\n# old Claude0 hook\n");
   }
   writeFileSync(settingsPath, JSON.stringify({
     hooks: {
@@ -206,7 +201,7 @@ test("setup removes retired CSM worktree hooks and scripts but preserves user ho
     { type: "command", command: "/usr/local/bin/user-worktree-hook" },
   ]);
   expect(settings.hooks.WorktreeRemove).toEqual([]);
-  expect(csmEntries(settings, "SubagentStop")).toHaveLength(1); // event logger only
+  expect(hookEntries(settings, "SubagentStop")).toHaveLength(1); // event logger only
   for (const script of ["worktree-create.sh", "worktree-remove.sh", "subagent-worktree-cleanup.sh"]) {
     expect(existsSync(`${hooksDir}/${script}`)).toBe(false);
   }
@@ -235,7 +230,7 @@ test("setup() registers hook commands as explicit quoted bash invocations", asyn
   await setup();
   const settings = JSON.parse(readFileSync(settingsPath, "utf8"));
   for (const event of EVENTS) {
-    for (const entry of csmEntries(settings, event)) {
+    for (const entry of hookEntries(settings, event)) {
       for (const h of entry.hooks) {
         expect(h.command).toMatch(/^bash "[^"]+\.sh"$/);
       }
@@ -246,15 +241,15 @@ test("setup() registers hook commands as explicit quoted bash invocations", asyn
 test("setup() upgrades a bare-path command from an older install to the bash form", async () => {
   await setup();
   const settings = JSON.parse(readFileSync(settingsPath, "utf8"));
-  const entry = csmEntry(settings, "SessionStart", "/session-start.sh");
+  const entry = hookEntry(settings, "SessionStart", "/session-start.sh");
   entry.hooks[0].command = `${hooksDir}/session-start.sh`; // as an older version registered it
   writeFileSync(settingsPath, JSON.stringify(settings, null, 2));
 
   await setup();
   const after = JSON.parse(readFileSync(settingsPath, "utf8"));
-  const upgraded = csmEntry(after, "SessionStart", "/session-start.sh");
+  const upgraded = hookEntry(after, "SessionStart", "/session-start.sh");
   expect(upgraded.hooks[0].command).toBe(`bash "${hooksDir}/session-start.sh"`);
-  expect(csmEntries(after, "SessionStart")).toHaveLength(1); // upgraded, not duplicated
+  expect(hookEntries(after, "SessionStart")).toHaveLength(1); // upgraded, not duplicated
 });
 
 test("question hook reads marker mtime via the GNU→BSD stat fallback chain", async () => {
@@ -271,10 +266,10 @@ test("AskUserQuestion is delegated: pretooluse.sh exits for it, question-pretool
   // The approval script logs the event, then bails — its short kill timeout must never
   // apply to a question hold, and the matched entry would otherwise double-intercept.
   expect(pre).toContain('[ "$TOOL" = "AskUserQuestion" ] && exit 0');
-  expect(pre).not.toContain("csm question-hook");
+  expect(pre).not.toContain("claude0 question-hook");
   const q = readFileSync(`${hooksDir}/question-pretooluse.sh`, "utf8");
-  // The intercept gates: tracked pane + live marker + focus, then csm question-hook.
-  expect(q).toContain("csm question-hook");
+  // The intercept gates: tracked pane + live marker + focus, then claude0 question-hook.
+  expect(q).toContain("claude0 question-hook");
   expect(q).toContain("bridge-consumer");
   expect(q).toContain("panes/$TMUX_PANE");
   expect(q).toContain("lsappinfo");
@@ -283,7 +278,7 @@ test("AskUserQuestion is delegated: pretooluse.sh exits for it, question-pretool
 });
 
 test("setup() manages the daemon with launchd only on macOS", async () => {
-  const plistPath = `${TEST_HOME}/Library/LaunchAgents/com.csm.daemon.plist`;
+  const plistPath = `${TEST_HOME}/Library/LaunchAgents/com.claude0.daemon.plist`;
   rmSync(plistPath, { force: true });
 
   await setup();
@@ -293,7 +288,7 @@ test("setup() manages the daemon with launchd only on macOS", async () => {
   }
 
   const plist = readFileSync(plistPath, "utf8");
-  expect(plist).toContain("<string>com.csm.daemon</string>");
+  expect(plist).toContain("<string>com.claude0.daemon</string>");
   expect(plist).toContain("<string>daemon</string>");
   expect(plist).toContain(`<string>${Bun.which("bun") ?? process.execPath}</string>`);
   expect(plist).toContain("<key>KeepAlive</key><true/>");

@@ -13,34 +13,34 @@ function runGit(cwd: string, ...args: string[]): string {
 
 describe("dev-layout migration path handling", () => {
   test("parses main, branches, and detached worktrees", () => {
-    expect(parseWorktreePorcelain(`worktree /Users/throxy/Documents/csm\nHEAD abc\nbranch refs/heads/main\n\nworktree /Users/throxy/Documents/csm-feature\nHEAD def\nbranch refs/heads/feature/x\n\nworktree /tmp/detached\nHEAD 123\ndetached\n`)).toEqual([
-      { path: "/Users/throxy/Documents/csm", branch: "main" },
-      { path: "/Users/throxy/Documents/csm-feature", branch: "feature/x" },
+    expect(parseWorktreePorcelain(`worktree /Users/throxy/Documents/claude0\nHEAD abc\nbranch refs/heads/main\n\nworktree /Users/throxy/Documents/claude0-feature\nHEAD def\nbranch refs/heads/feature/x\n\nworktree /tmp/detached\nHEAD 123\ndetached\n`)).toEqual([
+      { path: "/Users/throxy/Documents/claude0", branch: "main" },
+      { path: "/Users/throxy/Documents/claude0-feature", branch: "feature/x" },
       { path: "/tmp/detached", branch: null },
     ]);
   });
 
   test("only replaces a true path prefix", () => {
-    expect(replacePathPrefix("/Users/throxy/dev/csm", "/Users/throxy", "/Users/marcel")).toBe("/Users/marcel/dev/csm");
+    expect(replacePathPrefix("/Users/throxy/dev/claude0", "/Users/throxy", "/Users/marcel")).toBe("/Users/marcel/dev/claude0");
     expect(replacePathPrefix("/Users/throxy-old/dev", "/Users/throxy", "/Users/marcel")).toBe("/Users/throxy-old/dev");
   });
 
   test("rewrites specific worktrees before their home prefix", () => {
     const mappings: Array<[string, string]> = [
-      ["/Users/throxy/Documents/csm-feature", "/Users/marcel/dev/csm/.claude/worktrees/feature"],
+      ["/Users/throxy/Documents/claude0-feature", "/Users/marcel/dev/claude0/.claude/worktrees/feature"],
       ["/Users/throxy", "/Users/marcel"],
     ];
-    expect(rewritePaths("cwd=/Users/throxy/Documents/csm-feature", mappings)).toBe(
-      "cwd=/Users/marcel/dev/csm/.claude/worktrees/feature",
+    expect(rewritePaths("cwd=/Users/throxy/Documents/claude0-feature", mappings)).toBe(
+      "cwd=/Users/marcel/dev/claude0/.claude/worktrees/feature",
     );
   });
 
   test("uses Claude's slash-to-dash project encoding", () => {
-    expect(encodeClaudeProjectPath("/Users/marcel/dev/csm")).toBe("-Users-marcel-dev-csm");
+    expect(encodeClaudeProjectPath("/Users/marcel/dev/claude0")).toBe("-Users-marcel-dev-claude0");
   });
 
   test("applies a manifest after a simulated home rename and repairs the linked worktree", async () => {
-    const root = mkdtempSync(`${realpathSync(tmpdir())}/csm-layout-`);
+    const root = mkdtempSync(`${realpathSync(tmpdir())}/c0-layout-`);
     const sourceHome = join(root, "old-user");
     const targetHome = join(root, "new-user");
     const sourceRoot = join(sourceHome, "Documents");
@@ -61,14 +61,14 @@ describe("dev-layout migration path handling", () => {
     const oldProjectDir = join(sourceHome, ".claude", "projects", oldProjectName);
     mkdirSync(oldProjectDir, { recursive: true });
     writeFileSync(join(oldProjectDir, "session.jsonl"), `${JSON.stringify({ cwd: worktree })}\n`);
-    mkdirSync(join(sourceHome, ".config", "csm", "migrations"), { recursive: true });
-    writeFileSync(join(sourceHome, ".config", "csm", "config.json"), '{"repositories":{"roots":["~/Documents"]}}\n');
+    mkdirSync(join(sourceHome, ".config", "claude0", "migrations"), { recursive: true });
+    writeFileSync(join(sourceHome, ".config", "claude0", "config.json"), '{"repositories":{"roots":["~/Documents"]}}\n');
     mkdirSync(join(sourceHome, ".local", "bin"), { recursive: true });
     symlinkSync(join(repo, "bin", "tool"), join(sourceHome, ".local", "bin", "tool"));
 
     const manifest = await buildManifest({ sourceHome, targetHome, sourceRoot, targetRoot });
     expect(manifest.blockers).toEqual([]);
-    const manifestRelative = join(".config", "csm", "migrations", "test-manifest.json");
+    const manifestRelative = join(".config", "claude0", "migrations", "test-manifest.json");
     writeFileSync(join(sourceHome, manifestRelative), `${JSON.stringify(manifest, null, 2)}\n`);
     renameSync(sourceHome, targetHome); // what the OS account rename does to the home tree
 
@@ -88,7 +88,7 @@ describe("dev-layout migration path handling", () => {
     expect(runGit(finalWorktree, "rev-parse", "--show-toplevel").trim()).toBe(finalWorktree);
     expect(runGit(finalRepo, "worktree", "list", "--porcelain")).toContain(`worktree ${finalWorktree}`);
     expect(readFileSync(join(finalRepo, ".git", "info", "exclude"), "utf8")).toContain("/.claude/worktrees/");
-    expect(readFileSync(join(targetHome, ".config", "csm", "config.json"), "utf8")).toContain('"~/dev"');
+    expect(readFileSync(join(targetHome, ".config", "claude0", "config.json"), "utf8")).toContain('"~/dev"');
 
     const finalProjectDir = join(targetHome, ".claude", "projects", encodeClaudeProjectPath(finalWorktree));
     expect(readFileSync(join(finalProjectDir, "session.jsonl"), "utf8")).toContain(finalWorktree);
@@ -96,7 +96,7 @@ describe("dev-layout migration path handling", () => {
   });
 
   test("applies a home-only pass when repositories and worktrees already use the dev layout", async () => {
-    const root = mkdtempSync(`${realpathSync(tmpdir())}/csm-home-only-`);
+    const root = mkdtempSync(`${realpathSync(tmpdir())}/c0-home-only-`);
     const sourceHome = join(root, "old-user");
     const targetHome = join(root, "new-user");
     const sourceRoot = join(sourceHome, "dev");
@@ -118,11 +118,11 @@ describe("dev-layout migration path handling", () => {
     const oldProjectDir = join(sourceHome, ".claude", "projects", oldProjectName);
     mkdirSync(oldProjectDir, { recursive: true });
     writeFileSync(join(oldProjectDir, "session.jsonl"), `${JSON.stringify({ cwd: worktree })}\n`);
-    mkdirSync(join(sourceHome, ".config", "csm", "migrations"), { recursive: true });
+    mkdirSync(join(sourceHome, ".config", "claude0", "migrations"), { recursive: true });
 
     const manifest = await buildManifest({ sourceHome, targetHome, sourceRoot, targetRoot });
     expect(manifest.blockers).toEqual([]);
-    const manifestRelative = join(".config", "csm", "migrations", "home-only-manifest.json");
+    const manifestRelative = join(".config", "claude0", "migrations", "home-only-manifest.json");
     writeFileSync(join(sourceHome, manifestRelative), `${JSON.stringify(manifest, null, 2)}\n`);
     renameSync(sourceHome, targetHome);
 

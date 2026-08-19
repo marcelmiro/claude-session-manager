@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Provision an Ubuntu 24.04 host to run the CSM stack (tmux + Claude Code sessions +
+# Provision an Ubuntu 24.04 host to run the Claude0 stack (tmux + Claude Code sessions +
 # mobile bridge) headlessly. Idempotent: safe to re-run; every step checks before it
 # changes. Run as the login user (not root) — system steps use sudo.
 #
@@ -96,7 +96,7 @@ else
 fi
 
 # ── 4. Timezone ────────────────────────────────────────────────────────────────
-# CSM's 24h archive window and staleness heuristics are wall-clock sensitive; cloud
+# Claude0's 24h archive window and staleness heuristics are wall-clock sensitive; cloud
 # images default to UTC.
 if have timedatectl && [ -d /run/systemd/system ]; then
   current_tz=$(timedatectl show -p Timezone --value)
@@ -111,7 +111,7 @@ else
 fi
 
 # ── 5. journald cap ────────────────────────────────────────────────────────────
-JOURNAL_FILE=/etc/systemd/journald.conf.d/csm.conf
+JOURNAL_FILE=/etc/systemd/journald.conf.d/claude0.conf
 if [ ! -f "$JOURNAL_FILE" ]; then
   note "capping journald at 500M"
   sudo mkdir -p /etc/systemd/journald.conf.d
@@ -124,7 +124,7 @@ fi
 # ── 6. needrestart: list-only ──────────────────────────────────────────────────
 # Since 24.04 needrestart auto-restarts services after unattended-upgrades and can
 # reach into user managers. 'l' = list only ('i' can still prompt and hang a job).
-NEEDRESTART_FILE=/etc/needrestart/conf.d/50-csm.conf
+NEEDRESTART_FILE=/etc/needrestart/conf.d/50-claude0.conf
 if [ -d /etc/needrestart ] && [ ! -f "$NEEDRESTART_FILE" ]; then
   note "setting needrestart to list-only"
   printf "\$nrconf{restart} = 'l';\n" | sudo tee "$NEEDRESTART_FILE" >/dev/null
@@ -167,26 +167,26 @@ if [ -d /run/systemd/system ]; then
 
   UNIT_DIR="$HOME/.config/systemd/user"
   mkdir -p "$UNIT_DIR"
-  for unit in tmux.service csm-bridge.service csm-monitor.service csm-daemon.service snapshot-check.service snapshot-check.timer; do
+  for unit in tmux.service claude0-bridge.service claude0-monitor.service claude0-daemon.service snapshot-check.service snapshot-check.timer; do
     if ! cmp -s "$here/units/$unit" "$UNIT_DIR/$unit" 2>/dev/null; then
       note "installing user unit $unit"
       cp "$here/units/$unit" "$UNIT_DIR/$unit"
     fi
   done
 
-  # Bridge token: generated once, consumed by csm-bridge.service via EnvironmentFile.
-  BRIDGE_ENV="$HOME/.config/csm/bridge.env"
+  # Bridge token: generated once, consumed by claude0-bridge.service via EnvironmentFile.
+  BRIDGE_ENV="$HOME/.config/claude0/bridge.env"
   if [ ! -f "$BRIDGE_ENV" ]; then
     note "minting bridge token → $BRIDGE_ENV"
-    mkdir -p "$HOME/.config/csm"
-    printf 'CSM_BRIDGE_TOKEN=%s\n' "$(head -c 32 /dev/urandom | base64 | tr -dc 'a-zA-Z0-9' | head -c 43)" > "$BRIDGE_ENV"
+    mkdir -p "$HOME/.config/claude0"
+    printf 'CLAUDE0_BRIDGE_TOKEN=%s\n' "$(head -c 32 /dev/urandom | base64 | tr -dc 'a-zA-Z0-9' | head -c 43)" > "$BRIDGE_ENV"
     chmod 600 "$BRIDGE_ENV"
   fi
 
   systemctl --user daemon-reload
   # Enable independently: one missing/broken unit must not silently leave tmux
   # disabled while the rest succeed. This happened on the first VM cutover.
-  for unit in tmux.service csm-bridge.service csm-monitor.service csm-daemon.service snapshot-check.timer; do
+  for unit in tmux.service claude0-bridge.service claude0-monitor.service claude0-daemon.service snapshot-check.timer; do
     if systemctl --user enable "$unit" >/dev/null; then
       note "enabled user unit $unit"
     else
@@ -199,7 +199,7 @@ fi
 
 # ── 9. Personal terminal profile prerequisite ──────────────────────────────────
 # Host presentation, bindings, shell behavior, and TPM plugins belong to the
-# explicit Linux profile in the dotfiles repository. CSM provisioning must not
+# explicit Linux profile in the dotfiles repository. Claude0 provisioning must not
 # manufacture a second, divergent terminal environment.
 for profile_file in \
   "$HOME/.tmux.conf" \

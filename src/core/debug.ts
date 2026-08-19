@@ -1,5 +1,5 @@
 /**
- * Opt-in debug logging — active only when `~/.config/csm/debug.log` exists (create
+ * Opt-in debug logging — active only when `~/.config/claude0/debug.log` exists (create
  * the file to enable, delete to disable). Shared by the monitor and the headless
  * status core. Auto-truncating so it never grows unbounded; all IO in try/catch so
  * a logging failure can never crash a caller.

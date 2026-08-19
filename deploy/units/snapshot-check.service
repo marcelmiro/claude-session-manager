@@ -3,7 +3,7 @@ Description=Alert when EBS snapshots go stale
 
 [Service]
 Type=oneshot
-# Same rule as every other unit here: carry PATH so `csm` resolves regardless of
+# Same rule as every other unit here: carry PATH so `claude0` resolves regardless of
 # install order (%h = user home).
 Environment=PATH=%h/.bun/bin:%h/.local/bin:/usr/local/bin:/usr/bin:/bin
 # Newest snapshot of any csm-backup volume must be younger than the staleness
@@ -14,6 +14,6 @@ ExecStart=/bin/bash -c '\
   REGION=$(curl -s -H "X-aws-ec2-metadata-token: $TOK" http://169.254.169.254/latest/meta-data/placement/region); \
   LATEST=$(aws ec2 describe-snapshots --region "$REGION" --owner-ids self \
     --filters Name=tag:csm-backup,Values=true --query "max_by(Snapshots,&StartTime).StartTime" --output text); \
-  if [ "$LATEST" = "None" ] || [ -z "$LATEST" ]; then csm notify "EBS snapshots: none found for csm-backup volumes"; exit 0; fi; \
+  if [ "$LATEST" = "None" ] || [ -z "$LATEST" ]; then claude0 notify "EBS snapshots: none found for csm-backup volumes"; exit 0; fi; \
   AGE=$(( $(date +%%s) - $(date -d "$LATEST" +%%s) )); \
-  if [ "$AGE" -gt 18000 ]; then csm notify "EBS snapshots stale: newest is $((AGE/3600))h old"; fi'
+  if [ "$AGE" -gt 18000 ]; then claude0 notify "EBS snapshots stale: newest is $((AGE/3600))h old"; fi'

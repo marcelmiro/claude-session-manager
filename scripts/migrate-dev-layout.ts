@@ -258,8 +258,8 @@ export async function buildManifest(options: {
     }
   }
 
-  const processCheck = Bun.spawnSync(["pgrep", "-fl", "claude|csm|tmux"], { stdout: "pipe", stderr: "ignore" });
-  if (processCheck.exitCode === 0) warnings.push("Claude/CSM/tmux processes are running; stop them immediately before account cutover");
+  const processCheck = Bun.spawnSync(["pgrep", "-fl", "claude|c0|tmux"], { stdout: "pipe", stderr: "ignore" });
+  if (processCheck.exitCode === 0) warnings.push("Claude/Claude0/tmux processes are running; stop them immediately before account cutover");
 
   return {
     schemaVersion: 1,
@@ -326,7 +326,7 @@ async function rewriteFile(path: string, mappings: Array<[string, string]>, back
   const after = rewritePaths(before, mappings);
   if (after === before) return false;
   await backupFile(path, backupRoot, home);
-  const temp = `${path}.csm-migration.tmp`;
+  const temp = `${path}.c0-migration.tmp`;
   await writeFile(temp, after);
   await rename(temp, path);
   return true;
@@ -355,9 +355,9 @@ async function rewriteKnownState(
   const mappings = allPathMappings(manifest);
   const files: string[] = [];
   const candidates = [
-    join(home, ".config", "csm", "config.json"),
-    join(home, ".config", "csm", "state.json"),
-    join(home, ".config", "csm", "events"),
+    join(home, ".config", "claude0", "config.json"),
+    join(home, ".config", "claude0", "state.json"),
+    join(home, ".config", "claude0", "events"),
     join(home, ".claude", "settings.json"),
     join(home, ".claude.json"),
     join(home, ".tmux", "resurrect", "last"),
@@ -412,7 +412,7 @@ async function applyManifest(manifestPath: string): Promise<void> {
   }
 
   const runId = new Date().toISOString().replace(/[:.]/g, "-");
-  const backupRoot = join(manifest.targetHome, ".config", "csm", "migrations", `${runId}-backup`);
+  const backupRoot = join(manifest.targetHome, ".config", "claude0", "migrations", `${runId}-backup`);
   await mkdir(backupRoot, { recursive: true });
   await mkdir(manifest.targetRoot, { recursive: true });
 
@@ -497,11 +497,11 @@ async function applyManifest(manifestPath: string): Promise<void> {
   };
   await writeFile(join(backupRoot, "report.json"), `${JSON.stringify(report, null, 2)}\n`);
   console.log(JSON.stringify(report, null, 2));
-  console.log(`\nNext: bun run ${join(manifest.targetRoot, "csm", "bin", "csm.ts")} setup`);
+  console.log(`\nNext: bun run ${join(manifest.targetRoot, "claude0", "bin", "c0.ts")} setup`);
 }
 
 async function latestManifest(home: string): Promise<string | undefined> {
-  const root = join(home, ".config", "csm", "migrations");
+  const root = join(home, ".config", "claude0", "migrations");
   if (!(await isDirectory(root))) return undefined;
   const files = (await readdir(root)).filter((name) => name.endsWith("-manifest.json")).sort().reverse();
   return files[0] ? join(root, files[0]) : undefined;
@@ -528,7 +528,7 @@ async function main(): Promise<void> {
     const targetRoot = expandTilde(value(args, "--target-root") ?? join(targetHome, "dev"), targetHome);
     const manifest = await buildManifest({ sourceHome, targetHome, sourceRoot, targetRoot });
     const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-    const output = resolve(value(args, "--output") ?? join(sourceHome, ".config", "csm", "migrations", `${stamp}-manifest.json`));
+    const output = resolve(value(args, "--output") ?? join(sourceHome, ".config", "claude0", "migrations", `${stamp}-manifest.json`));
     await mkdir(dirname(output), { recursive: true });
     await writeFile(output, `${JSON.stringify(manifest, null, 2)}\n`);
     console.log(`Manifest: ${output}`);

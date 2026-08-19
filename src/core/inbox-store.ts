@@ -2,7 +2,7 @@
  * Durable inbox state — the authored layer of ADR 0013 (dispositions, done,
  * provenance links) plus an event log, in SQLite via bun:sqlite (no new deps).
  *
- * Why a database where the rest of CSM uses files: the inbox is the one
+ * Why a database where the rest of Claude0 uses files: the inbox is the one
  * domain with genuinely concurrent read-modify-write over SHARED rows — N
  * sidebar panes, the activity refresher, CLI verbs and eventually the bridge
  * all mutate the same disposition. The per-file-per-key pattern (verdicts/,

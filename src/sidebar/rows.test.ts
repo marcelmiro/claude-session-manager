@@ -8,7 +8,7 @@ const M = 60_000;
 const H = 3_600_000;
 
 function sess(over: Partial<InboxSession>): InboxSession {
-  return { id: "x", repo: "csm", name: "fix-auth", reason: "turn-done", since: NOW - H, ...over };
+  return { id: "x", repo: "claude0", name: "fix-auth", reason: "turn-done", since: NOW - H, ...over };
 }
 
 function vs(over: Partial<ViewState> = {}): ViewState {

@@ -1,4 +1,4 @@
-# CSM
+# Claude0
 
 Terminal TUI + mobile bridge ("portkey") for managing Claude Code sessions. This glossary pins the canonical terms; `CLAUDE.md` covers architecture and `docs/adr/` covers decisions.
 

@@ -24,7 +24,7 @@ import { renderSearchResults } from "./ui/search-list";
 import { createSpaceMenuState, renderSpaceMenu, handleSpaceMenuKey, getMenuDimensions, type SpaceMenuState } from "./ui/space-menu";
 import { createQuestionPicker, renderQuestionPicker, handleQuestionPickerKey, getPickerDimensions, type QuestionPickerState } from "./ui/question-picker";
 import { C } from "./ui/colors";
-import type { DisplayRow, Session, CsmConfig, WizardState, WizardRepo, GlobalSearchState, WorktreeMode } from "./types";
+import type { DisplayRow, Session, Config, WizardState, WizardRepo, GlobalSearchState, WorktreeMode } from "./types";
 import { existsSync, readFileSync } from "fs";
 import { homedir } from "os";
 
@@ -35,8 +35,8 @@ if (!process.stdout.isTTY) {
   process.exit(0);
 }
 
-const focusPaneId = process.env.CSM_FOCUS_PANE?.match(/^%\d+$/)
-  ? process.env.CSM_FOCUS_PANE
+const focusPaneId = process.env.CLAUDE0_FOCUS_PANE?.match(/^%\d+$/)
+  ? process.env.CLAUDE0_FOCUS_PANE
   : null;
 
 const { screen, listBox, previewBox, statusBar } = createLayout();
@@ -51,7 +51,7 @@ let isRefreshing = false;
 let previewGeneration = 0;
 let showArchived = false;
 let nameCache: NameCache = { version: 5, names: {}, sources: {}, pinned: {} };
-let notifConfig: CsmConfig = {
+let notifConfig: Config = {
   schemaVersion: 1,
   repositories: { roots: [], priority: [] },
   terminal: { defaultTarget: "local", remoteHost: null, localSession: "main", remoteSession: "main" },
@@ -665,7 +665,7 @@ async function handleResume() {
     const cmd = `claude --resume=${session.id}; exec ${USER_SHELL} -l`;
     await Bun.$`tmux new-window -a -t ${targetSession} -n ${repoName} -c ${effectivePath} ${USER_SHELL} -c ${cmd}`.quiet();
   } catch (e) {
-    console.error(`csm: failed to resume session: ${e instanceof Error ? e.message : e}`);
+    console.error(`claude0: failed to resume session: ${e instanceof Error ? e.message : e}`);
     process.exit(1);
   }
   process.exit(0);
@@ -758,7 +758,7 @@ async function handleFork() {
     const cmd = `claude --session-id ${forkId} --resume=${sourceId} --fork-session; exec ${USER_SHELL} -l`;
     await Bun.$`tmux new-window -a -t ${targetSession} -n ${forkName} -c ${effectivePath} ${USER_SHELL} -c ${cmd}`.quiet();
   } catch (e) {
-    console.error(`csm: failed to fork session: ${e instanceof Error ? e.message : e}`);
+    console.error(`claude0: failed to fork session: ${e instanceof Error ? e.message : e}`);
     process.exit(1);
   }
   process.exit(0);
@@ -1230,7 +1230,7 @@ async function handleSearchEnter() {
     const cmd = `claude --resume=${entry.sessionId}; exec ${USER_SHELL} -l`;
     await Bun.$`tmux new-window -a -t ${targetSession} -n ${repoName} -c ${effectivePath} ${USER_SHELL} -c ${cmd}`.quiet();
   } catch (e) {
-    console.error(`csm: failed to resume session: ${e instanceof Error ? e.message : e}`);
+    console.error(`claude0: failed to resume session: ${e instanceof Error ? e.message : e}`);
     process.exit(1);
   }
   process.exit(0);
@@ -1626,16 +1626,16 @@ Promise.all([loadNameCache(), loadConfig(), loadPaneSessions()]).then(([cache, c
   // Seed pane→sessionId cache from disk (persisted by monitor)
   seedPaneSessionCache(paneSessions);
   // Nudge: flash a message if the SessionStart hook is missing or outdated
-  const hookPath = `${homedir()}/.config/csm/hooks/session-start.sh`;
+  const hookPath = `${homedir()}/.config/claude0/hooks/session-start.sh`;
   let needsSetup = !existsSync(hookPath);
   if (!needsSetup) {
     try {
       const content = readFileSync(hookPath, "utf-8");
-      needsSetup = !content.includes("CSM_HOOK_VERSION=");
+      needsSetup = !content.includes("HOOK_VERSION=");
     } catch { needsSetup = true; }
   }
   if (needsSetup) {
-    setTimeout(() => flashStatusMessage(`{${C.muted}-fg}Run {${C.peach}-fg}csm setup{/${C.peach}-fg} for auto session naming{/${C.muted}-fg}`, 5000), 500);
+    setTimeout(() => flashStatusMessage(`{${C.muted}-fg}Run {${C.peach}-fg}claude0 setup{/${C.peach}-fg} for auto session naming{/${C.muted}-fg}`, 5000), 500);
   }
   // Initial load: skip archived summaries for instant render.
   // The 3s auto-refresh will fill in summaries and context %.

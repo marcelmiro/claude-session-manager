@@ -27,7 +27,7 @@ beforeEach(() => {
 function mkSession(over: Partial<Session> = {}): Session {
   return {
     id: "sess-1",
-    repo: "csm",
+    repo: "claude0",
     repoPath: "/x",
     baseRepoPath: "/x",
     branch: "",
@@ -38,7 +38,7 @@ function mkSession(over: Partial<Session> = {}): Session {
     modified: new Date(0),
     firstPrompt: "",
     lastPrompt: "",
-    name: "csm/fix-auth",
+    name: "claude0/fix-auth",
     ...over,
   };
 }
@@ -55,12 +55,12 @@ function writePreToolUse(id: string, tool: string): void {
 
 // --- pushLabel ---------------------------------------------------------------
 
-test('pushLabel humanizes the ai-name → "csm · Fix Auth"', () => {
-  expect(pushLabel(mkSession({ name: "csm/fix-auth" }))).toBe("csm · Fix Auth");
+test('pushLabel humanizes the ai-name → "claude0 · Fix Auth"', () => {
+  expect(pushLabel(mkSession({ name: "claude0/fix-auth" }))).toBe("claude0 · Fix Auth");
 });
 
 test("pushLabel falls back to repo alone when the window name has no ai-name", () => {
-  expect(pushLabel(mkSession({ name: "csm", repo: "csm" }))).toBe("csm");
+  expect(pushLabel(mkSession({ name: "claude0", repo: "claude0" }))).toBe("claude0");
 });
 
 // --- pushAction (tool → category) -------------------------------------------
@@ -106,7 +106,7 @@ test("blocked payload: label + category body, sessionId deep link, no capture te
     session: mkSession({ lastCapture: "SECRET pane contents" }),
   };
   const p = pushPayloadFor(event, event.session);
-  expect(p.title).toBe("⚡ csm · Fix Auth");
+  expect(p.title).toBe("⚡ claude0 · Fix Auth");
   expect(p.body).toBe("run a command?");
   expect(p.sessionId).toBe("sess-1");
   expect(JSON.stringify(p)).not.toContain("SECRET"); // never leaks pane capture
@@ -121,7 +121,7 @@ test("turnComplete payload: title only — iOS adds its own attribution line", (
     session: mkSession({ status: "ready" }),
   };
   const p = pushPayloadFor(event, event.session);
-  expect(p.title).toBe("✅ csm · Fix Auth");
+  expect(p.title).toBe("✅ claude0 · Fix Auth");
   expect(p.body).toBe("");
   expect(p.sessionId).toBe("sess-1");
 });

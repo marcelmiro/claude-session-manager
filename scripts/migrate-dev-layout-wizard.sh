@@ -197,10 +197,10 @@ PHASE="${1:-prepare}"
 if [[ "$PHASE" == "prepare" ]]; then
   TOTAL_STAGES=3
   TOTAL_MINUTES=15
-  banner "CSM macOS account cutover — prepare"
+  banner "Claude0 macOS account cutover — prepare"
 
   stage "Confirm staged layout" 3
-  step "Confirm ~/dev/csm exists and ~/Documents/csm does not."
+  step "Confirm ~/dev/claude0 exists and ~/Documents/claude0 does not."
   step "Confirm the VM already reports marcel, /Users/marcel, and a green doctor."
   warn "A full backup is still recommended. Continuing without one accepts possible data loss."
   pause "The staged Mac layout and completed VM migration are confirmed?"
@@ -214,20 +214,20 @@ if [[ "$PHASE" == "prepare" ]]; then
 
   stage "Preflight and rename the Mac account" 7
   step "Generate a fresh home-only manifest and confirm zero BLOCKER lines:"
-  note "cd /Users/throxy/dev/csm"
+  note "cd /Users/throxy/dev/claude0"
   note "bun run scripts/migrate-dev-layout.ts preflight --target-home /Users/marcel --source-root /Users/throxy/dev --target-root /Users/marcel/dev"
-  step "Finish active Claude work, then stop CSM/tmux and quit editors/terminals using this account."
+  step "Finish active Claude work, then stop Claude0/tmux and quit editors/terminals using this account."
   step "Log out of throxy and log into the temporary administrator."
   step "Rename /Users/throxy to /Users/marcel, then control-click throxy in Users & Groups → Advanced Options."
   step "Set Account name to marcel and Home directory to /Users/marcel. Do not change the password."
   step "Restart, log into marcel, and run:"
-  note "/Users/marcel/dev/csm/scripts/migrate-dev-layout-wizard.sh finish"
+  note "/Users/marcel/dev/claude0/scripts/migrate-dev-layout-wizard.sh finish"
   warn "This prepare process will end when you log out; that is expected."
   finish
 elif [[ "$PHASE" == "finish" ]]; then
   TOTAL_STAGES=3
   TOTAL_MINUTES=15
-  banner "CSM macOS account cutover — finish"
+  banner "Claude0 macOS account cutover — finish"
 
   stage "Verify the renamed Mac account" 4
   step "Confirm: whoami prints marcel and printf '%s\\n' \"$HOME\" prints /Users/marcel."
@@ -238,18 +238,18 @@ elif [[ "$PHASE" == "finish" ]]; then
 
   stage "Repair the renamed home" 6
   step "Apply the latest home-only manifest; repositories stay in ~/dev while absolute paths are repaired:"
-  note "cd /Users/marcel/dev/csm && bun run scripts/migrate-dev-layout.ts apply"
-  step "Reinstall generated CSM integration:"
-  note "bun install && bun run bin/csm.ts setup"
-  step "Run bun run /Users/marcel/dev/csm/bin/csm.ts config, open the printed file, and confirm repositories.roots is [\"~/dev\"]."
-  step "Verify: git -C ~/dev/csm worktree list; csm terminal status; csm"
-  pause "The Mac account, paths, Git worktrees, and CSM checks pass?"
+  note "cd /Users/marcel/dev/claude0 && bun run scripts/migrate-dev-layout.ts apply"
+  step "Reinstall generated Claude0 integration:"
+  note "bun install && bun run bin/claude0.ts setup"
+  step "Run bun run /Users/marcel/dev/claude0/bin/claude0.ts config, open the printed file, and confirm repositories.roots is [\"~/dev\"]."
+  step "Verify: git -C ~/dev/claude0 worktree list; claude0 terminal status; c0"
+  pause "The Mac account, paths, Git worktrees, and Claude0 checks pass?"
 
   stage "Close the recovery window" 5
   step "Restart the Mac once more and confirm marcel can unlock FileVault and log in."
   step "Resume one pre-migration Claude session and confirm its transcript continues."
   step "Only then remove Migration Admin. Keep its home only if it holds recovery data."
-  step "Keep ~/.config/csm/migrations/*-backup until the next normal backup cycle succeeds."
+  step "Keep ~/.config/claude0/migrations/*-backup until the next normal backup cycle succeeds."
   finish
 else
   printf 'Usage: %s [prepare|finish]\\n' "$0" >&2

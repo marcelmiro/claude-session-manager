@@ -142,7 +142,7 @@ test("pendingToolCall: an open PreToolUse before the last Stop is stale → null
   // NOT still running — without this guard the bridge showed a phantom "running — Bash".
   const id = "sess-stale-pre";
   writeLog(id, [
-    ev({ hook_event_name: "PreToolUse", tool_name: "Bash", tool_use_id: "tu_dangling", tool_input: { command: "caffeinate csm bridge" } }, "x"),
+    ev({ hook_event_name: "PreToolUse", tool_name: "Bash", tool_use_id: "tu_dangling", tool_input: { command: "caffeinate claude0 bridge" } }, "x"),
     ev({ hook_event_name: "Stop" }, "x"),
   ]);
   expect(pendingToolCall(id)).toBeNull();

@@ -6,7 +6,7 @@
  * landing mid-tick survives the replace); authored facts (dispositions,
  * archived) live in their own tables and are never touched by it.
  *
- * Run via `csm daemon --discover-once` in a FRESH process per tick: an
+ * Run via `claude0 daemon --discover-once` in a FRESH process per tick: an
  * in-process discovery loop leaks (~1.5 MB/s — JSC never returns
  * discovery's heap), so the long-lived daemon only spawns and reaps.
  */
@@ -192,20 +192,3 @@ export async function discoveryTick(store: InboxStore): Promise<void> {
   );
 }
 
-/**
- * The prototype sidebar's refresher owns the snapshot while it runs — there
- * must be exactly ONE producer at any moment, so the daemon defers to it
- * until the chassis swap retires it.
- */
-export async function prototypeRefresherAlive(): Promise<boolean> {
-  // CSM_HOME = test seam: a scratch home never defers to the real prototype.
-  if (process.env.CSM_HOME) return false;
-  try {
-    const pid = Number(await Bun.file("/tmp/csm-sidebar-refresher-default.pid").text());
-    if (pid > 0) {
-      process.kill(pid, 0); // throws if dead
-      return true;
-    }
-  } catch {}
-  return false;
-}

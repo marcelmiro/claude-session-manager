@@ -18,7 +18,7 @@ function baseState(over: Partial<WizardState> = {}): WizardState {
     repoFilter: "",
     repoFilterCursor: 0,
     expandedRepos: [],
-    selectedRepo: { name: "csm", path: "/tmp/csm", currentBranch: "main" },
+    selectedRepo: { name: "claude0", path: "/tmp/claude0", currentBranch: "main" },
     branches: [],
     filteredBranches: [],
     branchIndex: 0,

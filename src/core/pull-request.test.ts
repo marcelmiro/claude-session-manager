@@ -30,7 +30,7 @@ test("compareUrl keeps slashes in a branch name but escapes the segments", () =>
 // --- branchPullRequest ---
 
 test("a repo with no remote yields no PR surface (never shells out to gh)", async () => {
-  const dir = mkdtempSync(`${tmpdir()}/csm-pr-`);
+  const dir = mkdtempSync(`${tmpdir()}/c0-pr-`);
   try {
     await Bun.$`git init -q ${dir}`.nothrow().quiet();
     await Bun.write(`${dir}/a.txt`, "a");
@@ -43,7 +43,7 @@ test("a repo with no remote yields no PR surface (never shells out to gh)", asyn
 });
 
 test("the default branch yields no PR surface — compare/main would target itself", async () => {
-  const dir = mkdtempSync(`${tmpdir()}/csm-pr-`);
+  const dir = mkdtempSync(`${tmpdir()}/c0-pr-`);
   try {
     await Bun.$`git init -q -b main ${dir}`.nothrow().quiet();
     await Bun.write(`${dir}/a.txt`, "a");
@@ -57,7 +57,7 @@ test("the default branch yields no PR surface — compare/main would target itse
 });
 
 test("an unpushed feature branch reports local-only, not a bogus compare link", async () => {
-  const dir = mkdtempSync(`${tmpdir()}/csm-pr-`);
+  const dir = mkdtempSync(`${tmpdir()}/c0-pr-`);
   try {
     await Bun.$`git init -q -b main ${dir}`.nothrow().quiet();
     await Bun.write(`${dir}/a.txt`, "a");

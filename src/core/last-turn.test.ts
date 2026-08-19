@@ -7,7 +7,7 @@ let dir: string;
 let n = 0;
 
 beforeEach(() => {
-  dir = mkdtempSync(`${tmpdir()}/csm-last-turn-`);
+  dir = mkdtempSync(`${tmpdir()}/c0-last-turn-`);
 });
 afterEach(() => {
   rmSync(dir, { recursive: true, force: true });

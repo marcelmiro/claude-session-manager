@@ -36,12 +36,12 @@ git clone git@github.com:marcelmiro/dotfiles.git ~/.dotfiles
 ~/.dotfiles/install linux                                  # common tmux UI + Linux shell profile + TPM
 ~/.dotfiles/bin/setup-linux                                # personal zsh, Neovim, and Linux tools
 mkdir -p ~/dev
-git clone https://github.com/marcelmiro/claude-session-manager ~/dev/csm
-~/dev/csm/deploy/provision.sh --tz Europe/Madrid --swap-gb 16
+git clone https://github.com/marcelmiro/claude0 ~/dev/claude0
+~/dev/claude0/deploy/provision.sh --tz Europe/Madrid --swap-gb 16
 curl -fsSL https://bun.sh/install | bash                       # bun → ~/.bun/bin
-cd ~/dev/csm && bun install && ln -sf ~/dev/csm/bin/csm.ts ~/.bun/bin/csm
+cd ~/dev/claude0 && bun install && ln -sf ~/dev/claude0/bin/claude0.ts ~/.bun/bin/claude0
 curl -fsSL https://claude.ai/install.sh | bash -s stable       # claude (self-updating channel)
-csm setup                                                     # hooks + tmux/zsh fragments
+claude0 setup                                                     # hooks + tmux/zsh fragments
 sudo tailscale up --ssh --hostname=<name> --authkey=<PRE-TAGGED key>   # tag at join or expiry stays on
 sudo tailscale serve --bg 8473
 ```
@@ -67,11 +67,11 @@ collision silently mints `<name>-1` and the phone points at the wrong origin.
 On the Mac (VM reachable as `vm` over Tailscale):
 
 ```sh
-launchctl bootout gui/$UID/com.csm.daemon                             # stop the inbox daemon first (also teardown, below)
-sqlite3 ~/.config/csm/inbox.db "PRAGMA wal_checkpoint(TRUNCATE);"     # fold WAL into the db file before copying it
+launchctl bootout gui/$UID/com.claude0.daemon                             # stop the inbox daemon first (also teardown, below)
+sqlite3 ~/.config/claude0/inbox.db "PRAGMA wal_checkpoint(TRUNCATE);"     # fold WAL into the db file before copying it
 rsync -a --info=progress2 ~/dev/ vm:dev/                              # flat repos; worktrees travel inside each base repo
 rsync -a ~/.claude/projects/ vm:.claude/projects/                     # transcripts resolve as-is
-scp ~/.config/csm/config.json ~/.config/csm/names.json ~/.config/csm/push-vapid.json ~/.config/csm/inbox.db vm:.config/csm/
+scp ~/.config/claude0/config.json ~/.config/claude0/names.json ~/.config/claude0/push-vapid.json ~/.config/claude0/inbox.db vm:.config/claude0/
 ```
 
 `inbox.db` carries the authored inbox state — open snoozes, block notes, the
@@ -85,17 +85,17 @@ Do NOT copy: `push-subscriptions.json` (origin-bound — dead at the new origin)
 host-local or transient), `~/.claude/.credentials.json` (fresh login, phase C),
 `~/.claude/settings.json` (next line regenerates hooks at the current version).
 
-Then on the VM: `csm setup`.
+Then on the VM: `claude0 setup`.
 
 ## E. Bring up + verify
 
 ```sh
-systemctl --user daemon-reload && systemctl --user start tmux csm-bridge csm-monitor csm-daemon snapshot-check.timer
+systemctl --user daemon-reload && systemctl --user start tmux claude0-bridge claude0-monitor claude0-daemon snapshot-check.timer
 ```
 
 Run verification scenarios **4** (reboot with no SSH → everything back), **5/6**
 (presence: typing suppresses pushes; idle attach routes approvals/questions to the
-phone), **8** (reboot with live sessions → `csm restore-sessions` resumes each,
+phone), **8** (reboot with live sessions → `claude0 restore-sessions` resumes each,
 no duplicate claude per pane), **9** (Space→c over Mosh lands in the Mac
 clipboard), **7** (phone lists sessions, resume works, push round-trips).
 
@@ -104,24 +104,93 @@ clipboard), **7** (phone lists sessions, resume works, push round-trips).
 - iPhone: Tailscale app → VPN On Demand → cellular **Always**. Delete the old
   portkey icon; open `https://<vm>.<tailnet>.ts.net`, Add to Home Screen, re-grant
   push (the bell — permission needs the tap), confirm a test push.
-- Mac: `brew install mosh`; run `csm setup`, then set `terminal.remoteHost` and
-  `terminal.defaultTarget` in `$(csm config)`. Ghostty runs
-  `csm terminal` at startup; `csm terminal local` remains available
-  for a completely separate Mac-local CSM/tmux environment.
+- Mac: `brew install mosh`; run `claude0 setup`, then set `terminal.remoteHost` and
+  `terminal.defaultTarget` in `$(claude0 config)`. Ghostty runs
+  `claude0 terminal` at startup; `claude0 terminal local` remains available
+  for a completely separate Mac-local Claude0/tmux environment.
   `shell-integration-features = ssh-env,ssh-terminfo`, `clipboard-write = allow`.
 - Mac teardown: stop the launchd bridge / `caffeinate` wrapper, remove the plist,
   stop the monitor, and boot out the inbox daemon (`launchctl bootout
-  gui/$UID/com.csm.daemon` + delete `~/Library/LaunchAgents/com.csm.daemon.plist`
+  gui/$UID/com.claude0.daemon` + delete `~/Library/LaunchAgents/com.claude0.daemon.plist`
   — two daemons against two tmux servers means two divergent inboxes). Leave
-  `~/.config/csm` and repos in place as the rollback seed.
+  `~/.config/claude0` and repos in place as the rollback seed.
 - Flip CLAUDE.md's "Bridge restarts" section to the systemd procedure
-  (`systemctl --user restart csm-bridge`, log: `journalctl --user -u csm-bridge`),
+  (`systemctl --user restart claude0-bridge`, log: `journalctl --user -u claude0-bridge`),
   keeping the darwin procedure as a footnote (ADR 16).
 
 ## G. Rollback (valid ~days)
 
 Stop VM units → restart Mac monitor/bridge (old instructions) → reinstall the PWA
 at the Mac origin → rsync back only `~/.claude/projects/` deltas for sessions
-touched on the VM. The Mac's untouched `~/.config/csm` does the rest. After the
+touched on the VM. The Mac's untouched `~/.config/claude0` does the rest. After the
 window, restore from the VM's EBS snapshots instead (the DLM schedules in
 `aws/dlm-policies.sh`).
+
+## H. Rebrand cutover (CSM → Claude0, one-time)
+
+Run once on the host after the rebrand PR merges to main and the GitHub repo is
+renamed to `claude0`:
+
+```sh
+cd ~/dev/csm && git checkout main && git pull
+deploy/rebrand-cutover.sh
+```
+
+The script is idempotent — each step checks current state, so a partial failure
+is resumed by re-running it. It: backs up `~/.config/csm` to
+`~/claude0-cutover-backup.tgz` → stops and removes the `csm-*` units → moves the
+state dir to `~/.config/claude0` (renaming the `CSM_BRIDGE_*` keys in `bridge.env`) →
+renames `~/dev/csm` to `~/dev/claude0` (with `git worktree repair` and the
+remote re-pointed at `claude0`) → rewrites recorded absolute paths
+(resurrect map, pane files, `inbox.db` snapshot rows, `~/.claude/projects` dirs)
+→ `bun install` + `claude0 setup` → installs and starts the `claude0-*` units
+(re-pointing `~/.bun/bin/claude0`, which their `ExecStart` uses absolutely) →
+verifies (units active, `POST /auth` 200, `claude0 list`).
+
+The codebase carries no migration/compat code — this script is the only place
+the old names are known. It also deregisters the pre-rebrand Claude hooks from
+`~/.claude/settings.json` (backup at `settings.json.pre-rebrand.bak`), removes
+the old `csm`/`csm-terminal` commands and dotfile import lines, and resets
+per-device push state (`push-subscriptions.json`, `consumers/`, `source/`,
+`pushed/` — the VAPID keypair stays). The rebrand renames the phone's wire
+identifiers too (auth cookie, device-id storage key), so each phone re-enters
+the token once and silently resubscribes to push on its next PWA launch.
+
+**darwin machine** (no systemd, no script): run these by hand, then `claude0 setup` —
+
+```sh
+launchctl bootout "gui/$(id -u)/com.csm.daemon" 2>/dev/null || true
+rm -f ~/Library/LaunchAgents/com.csm.daemon.plist
+# A prior c0 run may already have minted ~/.config/claude0 — mv would then NEST the
+# old dir inside it as ~/.config/claude0/csm and strand all pre-rebrand state.
+[ -e ~/.config/claude0 ] && echo 'NOTE: ~/.config/claude0 already exists — merge from ~/.config/csm by hand' \
+  || mv ~/.config/csm ~/.config/claude0
+rm -f ~/.local/bin/csm ~/.local/bin/csm-terminal
+# Deregister the pre-rebrand hooks — their scripts rode the mv, so every
+# Claude lifecycle event would otherwise fire a nonexistent command forever.
+[ -f ~/.claude/settings.json.pre-rebrand.bak ] || cp ~/.claude/settings.json ~/.claude/settings.json.pre-rebrand.bak
+jq 'if (.hooks? // null | type) == "object"
+    then .hooks |= with_entries(
+      .value |= map(select((.hooks // [] | map(.command // "") | any(contains("/.config/csm/hooks/"))) | not))
+      | select(.value | length > 0))
+    else . end' \
+  ~/.claude/settings.json > ~/.claude/settings.json.tmp \
+  && [ -s ~/.claude/settings.json.tmp ] \
+  && mv ~/.claude/settings.json.tmp ~/.claude/settings.json
+```
+
+Then delete the two old import lines (and their `# CSM integration` comment)
+from `~/.tmux.conf` and `~/.zshrc` by hand — `claude0 setup` appends the new ones
+but never edits personal dotfile content.
+
+Personal dotfiles are never rewritten: the pre-flight prints every `csm`
+reference it finds in `~/.tmux.conf`, `~/.zshrc`, and `~/.config/tmux/*.conf`
+— update those by hand (notably a `status-right` interpolating `@csm_status`
+must move to `@claude0_status`, or the status segment silently disappears).
+
+Rollback: `systemctl --user stop claude0-{bridge,daemon,monitor}` → restore
+`~/.config/csm` from the backup tar → `mv ~/dev/claude0 ~/dev/csm` → check out
+the pre-rebrand commit → re-copy its `deploy/units/csm-*.service` into
+`~/.config/systemd/user` → `daemon-reload` + enable. The phone re-auths with the
+same token; push subscriptions are unaffected either way (`push-vapid.json`
+rides the state dir).

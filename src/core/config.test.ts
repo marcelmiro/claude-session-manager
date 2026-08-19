@@ -44,7 +44,7 @@ test("loadConfig migrates flat config and terminal sidecars without losing effec
   const rewritten = JSON.parse(readFileSync(PATHS.config, "utf8"));
   expect(rewritten.schemaVersion).toBe(1);
   expect(rewritten.ntfyTopic).toBeUndefined();
-  // Kept until setup installs the new launcher; `csm config` alone must not break
+  // Kept until setup installs the new launcher; `claude0 config` alone must not break
   // an older installed terminal launcher that still reads these files.
   expect(readFileSync(`${PATHS.dir}/terminal-mode`, "utf8")).toBe("remote\n");
   expect(readFileSync(`${PATHS.dir}/remote-host`, "utf8")).toBe("vm.example.ts.net\n");
@@ -53,7 +53,7 @@ test("loadConfig migrates flat config and terminal sidecars without losing effec
 test("loadConfig preserves the old implicit priority during a legacy empty-object migration", async () => {
   writeFileSync(PATHS.config, "{}");
   const config = await loadConfig();
-  expect(config.repositories.priority).toEqual(["throxy", "customeros", "~", "csm"]);
+  expect(config.repositories.priority).toEqual(["throxy", "customeros", "~", "claude0"]);
 });
 
 test("loadConfig leaves a valid v1 file byte-identical", async () => {
