@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/marcelmiro/claude-session-manager/blob/main/config/config.schema.json",
-  "title": "Claude Session Manager configuration",
+  "title": "Claude0 configuration",
   "type": "object",
   "additionalProperties": false,
   "required": ["schemaVersion", "repositories", "terminal", "ui", "notifications"],
@@ -22,7 +22,7 @@
         "priority": {
           "type": "array",
           "items": { "type": "string", "minLength": 1 },
-          "description": "Repository names pinned to the top of CSM lists."
+          "description": "Repository names pinned to the top of Claude0 lists."
         }
       }
     },

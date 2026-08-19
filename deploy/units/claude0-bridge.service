@@ -1,22 +1,22 @@
 [Unit]
-Description=CSM mobile bridge (portkey)
+Description=Claude0 mobile bridge (portkey)
 After=network-online.target tailscaled.service
 # The bridge drives panes in the tmux server, and pulling tmux in here also
 # sidesteps an observed oddity where tmux.service's own enable symlink got
 # removed at shutdown while this unit's reliably survived — Wants= makes the
 # bridge's enablement carry the whole stack.
-Wants=tmux.service csm-monitor.service
+Wants=tmux.service claude0-monitor.service
 # Default restart limits are 100ms×5-in-10s: five fast crashes (e.g. port already
 # bound) and systemd gives up permanently. Spaced retries never trip that way.
 StartLimitIntervalSec=300
 StartLimitBurst=5
 
 [Service]
-# csm's shebang resolves bun via env — the unit must carry the PATH itself (see
+# c0's shebang resolves bun via env — the unit must carry the PATH itself (see
 # tmux.service for why environment.d can't be trusted here).
 Environment=PATH=%h/.bun/bin:%h/.local/bin:/usr/local/bin:/usr/bin:/bin
-ExecStart=%h/.bun/bin/csm bridge
-EnvironmentFile=%h/.config/csm/bridge.env
+ExecStart=%h/.bun/bin/c0 bridge
+EnvironmentFile=%h/.config/c0/bridge.env
 Restart=always
 RestartSec=5s
 

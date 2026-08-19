@@ -2,8 +2,8 @@
  * Coverage for the subagent drill-in surface (`session-api.ts` subagent functions).
  *
  * Hermetic, repo style: pure fns asserted directly; the I/O fns are handed explicit
- * paths under the redirected CSM_HOME (so no homedir glob). `../../test/helpers/home`
- * MUST stay the first import — it redirects CSM_HOME before `config` freezes `PATHS.dir`.
+ * paths under the redirected CLAUDE0_HOME (so no homedir glob). `../../test/helpers/home`
+ * MUST stay the first import — it redirects CLAUDE0_HOME before `config` freezes `PATHS.dir`.
  *
  * The status rule is the validated core (content-shape, NOT `stop_reason`): `done` iff the
  * last conversational record is an `assistant` turn ending in a `text` block. The

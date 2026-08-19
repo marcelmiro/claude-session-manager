@@ -170,7 +170,7 @@ function stubFetch(status: number): { calls: { url: string; headers: Record<stri
 test("sendWebPush posts encrypted body with VAPID + aes128gcm headers", async () => {
   saveSubscription("dev-a", SUB);
   const { calls } = stubFetch(201);
-  await sendWebPush("dev-a", { title: "Turn complete", body: "csm · Fix Auth", sessionId: "s1" });
+  await sendWebPush("dev-a", { title: "Turn complete", body: "claude0 · Fix Auth", sessionId: "s1" });
   expect(calls.length).toBe(1);
   expect(calls[0]!.url).toBe(SUB.endpoint);
   expect(calls[0]!.headers["Content-Encoding"]).toBe("aes128gcm");

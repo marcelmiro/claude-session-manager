@@ -7,7 +7,7 @@ let dir: string;
 let n = 0;
 
 beforeEach(() => {
-  dir = mkdtempSync(`${tmpdir()}/csm-search-`);
+  dir = mkdtempSync(`${tmpdir()}/c0-search-`);
 });
 afterEach(() => {
   rmSync(dir, { recursive: true, force: true });
@@ -149,9 +149,9 @@ function mkEntry(over: Partial<SearchEntry>): SearchEntry {
 }
 
 test("repo-name match is capped: content match in another session outranks it", () => {
-  const repoOnly = mkEntry({ repo: "csm" });
-  const contentHit = mkEntry({ repo: "throxy", summary: "refactor csm bridge auth" });
-  const ranked = filterAndRankEntries([repoOnly, contentHit], "csm");
+  const repoOnly = mkEntry({ repo: "claude0" });
+  const contentHit = mkEntry({ repo: "throxy", summary: "refactor claude0 bridge auth" });
+  const ranked = filterAndRankEntries([repoOnly, contentHit], "claude0");
   expect(ranked[0]!.sessionId).toBe(contentHit.sessionId);
   expect(ranked).toHaveLength(2);
 });
@@ -180,8 +180,8 @@ test("summary match carries field + snippet around the hit", () => {
 });
 
 test("repo-only match carries field but no snippet (repo is already on the row)", () => {
-  const e = mkEntry({ repo: "csm" });
-  const [hit] = filterAndRankEntries([e], "csm");
+  const e = mkEntry({ repo: "claude0" });
+  const [hit] = filterAndRankEntries([e], "claude0");
   expect(hit!.matchField).toBe("repo");
   expect(hit!.matchSnippet).toBeUndefined();
 });
@@ -196,22 +196,22 @@ test("content-only match snippets from the original-case corpus", () => {
 // --- repo: scope + total ----------------------------------------------------
 
 test("repo: token scopes to that repo; a bare word does not exclude other repos", () => {
-  const inCsm = mkEntry({ repo: "csm", summary: "fix resurrect" });
-  const elsewhere = mkEntry({ repo: "throxy", summary: "resurrect the csm bridge" });
-  const scoped = searchEntries([inCsm, elsewhere], "repo:csm resurrect");
+  const inCsm = mkEntry({ repo: "claude0", summary: "fix resurrect" });
+  const elsewhere = mkEntry({ repo: "throxy", summary: "resurrect the claude0 bridge" });
+  const scoped = searchEntries([inCsm, elsewhere], "repo:claude0 resurrect");
   expect(scoped.results.map((e) => e.sessionId)).toEqual([inCsm.sessionId]);
   // Same words without the token: both repos stay in play.
-  const unscoped = searchEntries([inCsm, elsewhere], "csm resurrect");
+  const unscoped = searchEntries([inCsm, elsewhere], "claude0 resurrect");
   expect(unscoped.results).toHaveLength(2);
 });
 
 test("repo: matches by prefix and a bare scope browses that repo in given order", () => {
   // Entries arrive pre-sorted by recency from loadAllSessions; a word-less scope
   // must keep that order, only filtered.
-  const newer = mkEntry({ repo: "csm", modified: new Date("2026-07-01") });
+  const newer = mkEntry({ repo: "claude0", modified: new Date("2026-07-01") });
   const other = mkEntry({ repo: "throxy" });
-  const older = mkEntry({ repo: "csm", modified: new Date("2026-01-01") });
-  const { results, total } = searchEntries([newer, other, older], "repo:cs");
+  const older = mkEntry({ repo: "claude0", modified: new Date("2026-01-01") });
+  const { results, total } = searchEntries([newer, other, older], "repo:cl");
   expect(results.map((e) => e.sessionId)).toEqual([newer.sessionId, older.sessionId]);
   expect(total).toBe(2);
 });

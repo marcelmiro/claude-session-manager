@@ -13,7 +13,7 @@ let root: string; // stands in for the home dir in these tests
 let projectsDir: string;
 
 beforeEach(async () => {
-  root = await mkdtemp(`${tmpdir()}/csm-resurrect-`);
+  root = await mkdtemp(`${tmpdir()}/c0-resurrect-`);
   projectsDir = `${root}/projects`;
   await mkdir(projectsDir, { recursive: true });
 });

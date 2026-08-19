@@ -1,5 +1,5 @@
 /**
- * CSM Monitor — single state authority for tmux status-right.
+ * Claude0 Monitor — single state authority for tmux status-right.
  *
  * Called by tmux every `status-interval` seconds (e.g. 5s).
  * Phase 1 (fast, ~50ms): Detect transitions, manage attention, sync prefixes, output status.
@@ -31,7 +31,7 @@ import type { Session, AggregateStatus, PaneInfo, ClaudeProcess } from "./types"
 // Naming skip tracking — persistent across monitor invocations
 // ---------------------------------------------------------------------------
 
-const NAMING_SKIP_PATH = `${homedir()}/.config/csm/naming-skip.json`;
+const NAMING_SKIP_PATH = `${homedir()}/.config/c0/naming-skip.json`;
 const NAMING_SKIP_TTL = 5 * 60_000; // 5 minutes
 
 type NamingSkipMap = Record<string, number>; // sessionId → timestamp
@@ -52,7 +52,7 @@ async function saveNamingSkips(skips: NamingSkipMap): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
-// Debug logging — only active when ~/.config/csm/debug.log exists
+// Debug logging — only active when ~/.config/c0/debug.log exists
 // (shared logger in core/debug.ts; see debugLog import)
 // ---------------------------------------------------------------------------
 
@@ -256,7 +256,7 @@ async function main(): Promise<void> {
   // Fork override — MUST run after processHookEvents (which just re-imposed the hook's
   // parent id from disk onto fork panes). Force the fork's real, native-resolved id and
   // remember we changed the map so phase2 persists it (overwriting the wrong on-disk pane
-  // file), self-healing `csm list`, the TUI and the bridge on the next read.
+  // file), self-healing `c0 list`, the TUI and the bridge on the next read.
   let forkCorrected = false;
   for (const paneId of forkPaneIds) {
     const realId = resumeIds[paneId];
@@ -447,7 +447,7 @@ async function main(): Promise<void> {
     }
   }
 
-  // Save state — but first check if another process (csm next) modified state
+  // Save state — but first check if another process (c0 next) modified state
   // since we loaded it. If so, don't overwrite their changes.
   const freshState = await loadState();
   if (freshState.lastUpdatedAt !== state.lastUpdatedAt) {

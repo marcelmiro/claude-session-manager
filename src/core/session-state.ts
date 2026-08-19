@@ -6,15 +6,15 @@
  * `idle` ~1.5s after a turn ends — including the revert/interrupt cases that emit
  * NO hook, where the event model's `UserPromptSubmit → running` edge latches and
  * strands a session at "running" forever. Reading this file de-latches that and,
- * more broadly, aligns CSM's displayed status to Claude's own. It's the PRIMARY
+ * more broadly, aligns Claude0's displayed status to Claude's own. It's the PRIMARY
  * source for live sessions, with the event model then the scraper as fallbacks.
  *
  * Status mapping (verified empirically): busy→running, idle→ready, waiting→waiting.
  *
- * NOTE on the home root: Claude writes to the REAL home (`homedir()`), not CSM's
- * `CSM_HOME` test seam (config.ts:4-6). This reader intentionally diverges from
+ * NOTE on the home root: Claude writes to the REAL home (`homedir()`), not Claude0's
+ * `CLAUDE0_HOME` test seam (config.ts:4-6). This reader intentionally diverges from
  * that seam and takes a `dir` arg for test isolation, because the target dir is
- * Claude's, not CSM's. A future CSM_HOME-based integration test will NOT reach
+ * Claude's, not Claude0's. A future CLAUDE0_HOME-based integration test will NOT reach
  * `nativeStatus()` — that's expected, point it at `dir` instead.
  *
  * Headless: no blessed/ui imports (enforced by boundary.test.ts). All IO in
@@ -27,7 +27,7 @@ import type { SessionStatus } from "./status";
 
 const DEFAULT_DIR = `${homedir()}/.claude/sessions`;
 
-// Claude's `status` → CSM's SessionStatus. Anything else → skip (null).
+// Claude's `status` → Claude0's SessionStatus. Anything else → skip (null).
 function mapStatus(status: unknown): SessionStatus | null {
   switch (status) {
     case "busy":
@@ -103,7 +103,7 @@ export async function loadNativeStatuses(
  *
  * A parked job is a SEPARATE Claude session (`kind:"bg"`, own pid, own
  * transcript, own `tasks/` dir) that renders into the parent pane's viewport.
- * The parent session goes idle for its whole duration, so anything CSM asks
+ * The parent session goes idle for its whole duration, so anything Claude0 asks
  * about the pane's session — status, pending scripts, the transcript — answers
  * for the wrong half of what's on screen. The two files join exactly: the
  * parent carries `parkedJobId`, the job carries the matching `jobId` alongside
@@ -140,11 +140,11 @@ export async function parkedJobSessions(
  *
  * This is the ONLY correct id for a `--fork-session` pane. A fork's SessionStart
  * hook fires with the PARENT (resume-source) id — the fork's own id isn't minted
- * yet and no second SessionStart follows — so CSM's hook-owned pane map is
+ * yet and no second SessionStart follows — so Claude0's hook-owned pane map is
  * permanently wrong for forks, aliasing the fork onto its parent's status/name.
  * The native file, keyed by the fork's own pid, carries the real id. No
  * pid-liveness check: the caller passes the pid of a process it just saw in `ps`.
- * Pure on `dir` for tests (points at Claude's home, not CSM's — see the note on
+ * Pure on `dir` for tests (points at Claude's home, not Claude0's — see the note on
  * `loadNativeStatuses`).
  */
 export async function nativeSessionIdByPid(
@@ -165,7 +165,7 @@ export async function nativeSessionIdByPid(
  * Fold the three status sources into a verdict + its provenance. Order is
  * native › event-sourced › scraper, with ONE exception.
  *
- * Native status answers for a SESSION; CSM displays a PANE. Those diverge when
+ * Native status answers for a SESSION; Claude0 displays a PANE. Those diverge when
  * the pane parks a job (`parkedJobs`): the job runs as its own `kind:"bg"`
  * session, renders into the parent's viewport, and leaves the parent session
  * honestly `idle` — so its `<pid>.json` sits unchanged, sometimes for hours,

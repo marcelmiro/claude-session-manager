@@ -1,14 +1,14 @@
 import { test, expect, describe } from "bun:test";
 import { buildLaunchCommand, shellQuote, worktreeDirName } from "./launch-command";
 
-const repo = { name: "csm", path: "/tmp/proj/csm" };
+const repo = { name: "claude0", path: "/tmp/proj/claude0" };
 const local = (name: string) => ({ name, isRemote: false, isCurrent: false });
 const remote = (name: string) => ({ name, isRemote: true, isCurrent: false });
 
 describe("shellQuote", () => {
   test("leaves safe chars (incl. branch slashes) unquoted", () => {
     expect(shellQuote("cursor/ev-4-x")).toBe("cursor/ev-4-x");
-    expect(shellQuote("/tmp/proj/csm-x")).toBe("/tmp/proj/csm-x");
+    expect(shellQuote("/tmp/proj/c0-x")).toBe("/tmp/proj/c0-x");
   });
   test("single-quotes anything with shell metachars", () => {
     expect(shellQuote("a b")).toBe("'a b'");
@@ -32,7 +32,7 @@ describe("buildLaunchCommand", () => {
 
   test("reuse: no -b, branch stays fixed, dir derives from text", () => {
     const cmd = buildLaunchCommand("reuse", repo, local("feature"), "feature");
-    expect(cmd).toBe("git worktree add /tmp/proj/csm/.claude/worktrees/feature feature && cd /tmp/proj/csm/.claude/worktrees/feature && claude");
+    expect(cmd).toBe("git worktree add /tmp/proj/claude0/.claude/worktrees/feature feature && cd /tmp/proj/claude0/.claude/worktrees/feature && claude");
     expect(cmd).not.toContain("-b "); // the whole point: reuse never forks
   });
 
@@ -40,16 +40,16 @@ describe("buildLaunchCommand", () => {
     const cmd = buildLaunchCommand("reuse", repo, remote("cursor/ev-4-x"), "ev-4-x");
     expect(cmd).toContain("git fetch origin --end-of-options cursor/ev-4-x && ");
     // dir cleaned from the editable text; branch stays the full remote name
-    expect(cmd).toContain("git worktree add /tmp/proj/csm/.claude/worktrees/ev-4-x cursor/ev-4-x && cd /tmp/proj/csm/.claude/worktrees/ev-4-x && claude");
+    expect(cmd).toContain("git worktree add /tmp/proj/claude0/.claude/worktrees/ev-4-x cursor/ev-4-x && cd /tmp/proj/claude0/.claude/worktrees/ev-4-x && claude");
     expect(cmd).not.toContain("-b ");
   });
 
   test("new-branch local: -b <text> with --end-of-options guarding the base ref", () => {
     const cmd = buildLaunchCommand("new-branch", repo, local("main"), "my-feature");
     expect(cmd).toBe(
-      "{ git worktree add /tmp/proj/csm/.claude/worktrees/my-feature -b my-feature --end-of-options main 2>/dev/null" +
-      " || git worktree add /tmp/proj/csm/.claude/worktrees/my-feature my-feature; }" +
-      " && cd /tmp/proj/csm/.claude/worktrees/my-feature && claude",
+      "{ git worktree add /tmp/proj/claude0/.claude/worktrees/my-feature -b my-feature --end-of-options main 2>/dev/null" +
+      " || git worktree add /tmp/proj/claude0/.claude/worktrees/my-feature my-feature; }" +
+      " && cd /tmp/proj/claude0/.claude/worktrees/my-feature && claude",
     );
   });
 
@@ -79,12 +79,12 @@ describe("buildLaunchCommand shell-only (withClaude=false)", () => {
 
   test("reuse keeps the git setup + cd, drops the claude tail", () => {
     const cmd = buildLaunchCommand("reuse", repo, local("feature"), "feature", false);
-    expect(cmd).toBe("git worktree add /tmp/proj/csm/.claude/worktrees/feature feature && cd /tmp/proj/csm/.claude/worktrees/feature");
+    expect(cmd).toBe("git worktree add /tmp/proj/claude0/.claude/worktrees/feature feature && cd /tmp/proj/claude0/.claude/worktrees/feature");
   });
 
   test("new-branch keeps the cd into the worktree, drops the claude tail", () => {
     const cmd = buildLaunchCommand("new-branch", repo, local("main"), "my-feature", false);
-    expect(cmd.endsWith("&& cd /tmp/proj/csm/.claude/worktrees/my-feature")).toBe(true);
+    expect(cmd.endsWith("&& cd /tmp/proj/claude0/.claude/worktrees/my-feature")).toBe(true);
     expect(cmd).not.toContain(" && claude");
   });
 

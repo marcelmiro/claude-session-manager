@@ -1,12 +1,12 @@
 /**
- * CSM CLI subcommands — lightweight commands that don't require the full TUI.
+ * Claude0 CLI subcommands — lightweight commands that don't require the full TUI.
  *
- * csm next              — switch to the next session needing attention
- * csm reset             — reset all window names back to repo names
- * csm list              — print a text-only session list
- * csm switch <name>     — fuzzy-match a session by name and switch to it
- * csm save-sessions     — snapshot pane→session mappings for tmux-resurrect
- * csm restore-sessions  — restore Claude sessions after tmux-resurrect restore
+ * c0 next              — switch to the next session needing attention
+ * c0 reset             — reset all window names back to repo names
+ * c0 list              — print a text-only session list
+ * c0 switch <name>     — fuzzy-match a session by name and switch to it
+ * c0 save-sessions     — snapshot pane→session mappings for tmux-resurrect
+ * c0 restore-sessions  — restore Claude sessions after tmux-resurrect restore
  */
 
 import { homedir } from "os";
@@ -30,7 +30,7 @@ import { mkdirSync, writeFileSync, readFileSync, readlinkSync, rmSync, symlinkSy
 const home = homedir();
 
 // ---------------------------------------------------------------------------
-// csm next
+// c0 next
 // ---------------------------------------------------------------------------
 
 /**
@@ -42,7 +42,7 @@ export async function next(): Promise<void> {
   const state = await loadState();
 
   // Clear attention for the pane the user is currently viewing.
-  // Without this, csm-next ping-pongs: switches away from pane A (still flagged)
+  // Without this, c0-next ping-pongs: switches away from pane A (still flagged)
   // to pane B, then next call picks A again because its flag was never cleared.
   let activePaneId: string | undefined;
   try {
@@ -188,7 +188,7 @@ export async function next(): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
-// csm reset
+// c0 reset
 // ---------------------------------------------------------------------------
 
 /** Standard shell/tool names that shouldn't be renamed. */
@@ -270,7 +270,7 @@ export async function reset(): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
-// csm list
+// c0 list
 // ---------------------------------------------------------------------------
 
 const STATUS_ICONS: Record<string, string> = {
@@ -375,7 +375,7 @@ export async function list(): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
-// csm switch <name>
+// c0 switch <name>
 // ---------------------------------------------------------------------------
 
 /** Score a candidate name against a search needle */
@@ -395,7 +395,7 @@ function fuzzyScore(candidate: string, needle: string): number {
  */
 export async function switchTo(name?: string): Promise<void> {
   if (!name) {
-    console.error("Usage: csm switch <name>");
+    console.error("Usage: c0 switch <name>");
     process.exit(1);
   }
 
@@ -464,7 +464,7 @@ function isSubsequence(sub: string, str: string): boolean {
 }
 
 // ---------------------------------------------------------------------------
-// csm setup
+// c0 setup
 // ---------------------------------------------------------------------------
 
 export const HOOK_VERSION = 19;
@@ -480,14 +480,14 @@ const CONSUMER_FRESH_S = 40;
 // no consume-once log for readers to fight over (v6 appended to a truncate-once hook-events
 // file that only the monitor persisted, leaving sessions listed-but-unsendable).
 const HOOK_SCRIPT = `#!/bin/bash
-# CSM_HOOK_VERSION=${HOOK_VERSION}
+# CLAUDE0_HOOK_VERSION=${HOOK_VERSION}
 INPUT=$(cat)
 SESSION_ID=$(echo "$INPUT" | grep -o '"session_id":"[^"]*"' | head -1 | cut -d'"' -f4)
 # Only use $TMUX_PANE — never fall back to tmux display-message which returns
 # the active pane, not the pane running this Claude session.
 PANE_ID="$TMUX_PANE"
 if [ -n "$SESSION_ID" ] && [ -n "$PANE_ID" ]; then
-  D=~/.config/csm/panes
+  D=~/.config/c0/panes
   mkdir -p "$D"
   printf '%s' "$SESSION_ID" > "$D/$PANE_ID.tmp" && mv "$D/$PANE_ID.tmp" "$D/$PANE_ID"
 fi
@@ -505,7 +505,7 @@ const LOG_EVENT_SNIPPET = `INPUT=$(cat)
 # the value either way. session-start.sh keeps its proven compact-only pattern.
 SESSION_ID=$(printf '%s' "$INPUT" | grep -oE '"session_id"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | cut -d'"' -f4)
 if [ -n "$SESSION_ID" ]; then
-  DIR=~/.config/csm/events
+  DIR=~/.config/c0/events
   mkdir -p "$DIR"
   F="$DIR/$SESSION_ID.jsonl"
   LINE=$(printf '%s' "$INPUT" | tr '\\n' ' ')
@@ -518,8 +518,8 @@ fi`;
 
 // Non-blocking events (UserPromptSubmit/PostToolUse/Notification/Stop/SubagentStop).
 const EVENT_HOOK_SCRIPT = `#!/bin/bash
-# CSM_HOOK_VERSION=${HOOK_VERSION}
-# CSM event logger — see LOG_EVENT_SNIPPET.
+# CLAUDE0_HOOK_VERSION=${HOOK_VERSION}
+# Claude0 event logger — see LOG_EVENT_SNIPPET.
 ${LOG_EVENT_SNIPPET}
 `;
 
@@ -531,8 +531,8 @@ ${LOG_EVENT_SNIPPET}
 // timeout — the desk prompt is always the floor). Pure shell, no jq/new deps; the
 // full tool_input is recovered by listPendingApprovals from the logged event.
 const PRETOOLUSE_HOOK_SCRIPT = `#!/bin/bash
-# CSM_HOOK_VERSION=${HOOK_VERSION}
-# CSM PreToolUse handler — log, then attach-aware blocking approval
+# CLAUDE0_HOOK_VERSION=${HOOK_VERSION}
+# Claude0 PreToolUse handler — log, then attach-aware blocking approval
 # (AskUserQuestion is delegated to question-pretooluse.sh).
 ${LOG_EVENT_SNIPPET}
 
@@ -587,7 +587,7 @@ fi
 # portkey is open: hold for it. Stale/absent → nobody can answer a hold; fall
 # through so the desk prompt renders and flips status to waiting, which is what
 # fires the Web Push to the phone (a held call reads as running and never pushes).
-M="\$HOME/.config/csm/bridge-consumer"
+M="\$HOME/.config/c0/bridge-consumer"
 MT=$(stat -c %Y "\$M" 2>/dev/null || stat -f %m "\$M" 2>/dev/null || echo 0)
 case "\$MT" in ''|*[!0-9]*) MT=0 ;; esac
 if [ "\$MT" = 0 ] || [ \$(( \$(date +%s) - MT )) -ge ${CONSUMER_FRESH_S} ]; then exit 0; fi
@@ -605,8 +605,8 @@ case "\$TOOL" in
 esac
 
 TS=$(( $(date +%s) * 1000 ))
-PDIR=~/.config/csm/pending
-DFILE=~/.config/csm/decisions/"\$SESSION_ID".json
+PDIR=~/.config/c0/pending
+DFILE=~/.config/c0/decisions/"\$SESSION_ID".json
 mkdir -p "\$PDIR"
 # \$\$ stamps the poller's pid: readers treat a marker whose process is gone as abandoned
 # (killed hook) and drive the on-screen prompt instead of writing a decision nobody reads.
@@ -652,18 +652,18 @@ exit 0
 // forward-compatible; if a future claude breaks it the phone-answer just won't take
 // (visibly degraded) rather than silently reverting the feature on every patch bump.
 const QUESTION_PRETOOLUSE_HOOK_SCRIPT = `#!/bin/bash
-# CSM_HOOK_VERSION=${HOOK_VERSION}
-# CSM AskUserQuestion handler — focus-aware intercept (event logging stays in pretooluse.sh).
+# CLAUDE0_HOOK_VERSION=${HOOK_VERSION}
+# Claude0 AskUserQuestion handler — focus-aware intercept (event logging stays in pretooluse.sh).
 INPUT=$(cat)
 [ -z "\$TMUX_PANE" ] && exit 0
 SESS=$(tmux display-message -p -t "\$TMUX_PANE" '#{session_name}' 2>/dev/null)
 [ -z "\$SESS" ] && exit 0
 
-# 1. CSM-tracked pane (rules out an ad-hoc bare-terminal claude).
-[ -f "\$HOME/.config/csm/panes/\$TMUX_PANE" ] || exit 0
+# 1. Claude0-tracked pane (rules out an ad-hoc bare-terminal claude).
+[ -f "\$HOME/.config/c0/panes/\$TMUX_PANE" ] || exit 0
 # 2. Live bridge consumer: marker mtime <=${CONSUMER_FRESH_S}s (tolerates one missed 15s heartbeat).
 #    Stale/absent → nobody can answer → native widget, no long stall.
-M="\$HOME/.config/csm/bridge-consumer"
+M="\$HOME/.config/c0/bridge-consumer"
 MT=$(stat -c %Y "\$M" 2>/dev/null || stat -f %m "\$M" 2>/dev/null || echo 0)
 if [ "\$MT" = 0 ] || [ $(( $(date +%s) - MT )) -ge ${CONSUMER_FRESH_S} ]; then exit 0; fi
 # 3. Focus (three-part): active window + attached client (cheap tmux), and only then
@@ -695,11 +695,11 @@ if [ "\$WA" = "1" ] && [ -n "\$CL" ]; then
   fi
 fi
 # All gates passed → hold and answer via the file channel (releases early on refocus).
-printf '%s' "\$INPUT" | csm question-hook
+printf '%s' "\$INPUT" | c0 question-hook
 exit \$?
 `;
 
-/** Hook scripts CSM installs under ~/.config/csm/hooks. */
+/** Hook scripts Claude0 installs under ~/.config/c0/hooks. */
 const HOOK_SCRIPTS = [
   { name: "session-start.sh", content: HOOK_SCRIPT },
   { name: "event.sh", content: EVENT_HOOK_SCRIPT },
@@ -741,20 +741,20 @@ const HOOK_REGISTRATIONS: { event: string; script: string; matcher?: string; tim
   },
 ];
 
-const CSM_TMUX_SOURCE = "if-shell 'test -f ~/.config/csm/tmux.conf' 'source-file ~/.config/csm/tmux.conf' ''";
-const CSM_ZSH_SOURCE = '[[ -r "$HOME/.config/csm/shell.zsh" ]] && source "$HOME/.config/csm/shell.zsh"';
+const CLAUDE0_TMUX_SOURCE = "if-shell 'test -f ~/.config/c0/tmux.conf' 'source-file ~/.config/c0/tmux.conf' ''";
+const CLAUDE0_ZSH_SOURCE = '[[ -r "$HOME/.config/c0/shell.zsh" ]] && source "$HOME/.config/c0/shell.zsh"';
 
 /**
- * Install the CSM-owned terminal profile and add one import to the user's base
+ * Install the Claude0-owned terminal profile and add one import to the user's base
  * tmux/zsh files. Personal config stays personal; setup can update its fragment
  * without rewriting or templating somebody else's dotfiles.
  */
 async function installTerminalIntegration(home: string): Promise<string[]> {
   const configDir = `${import.meta.dir}/../config`;
   const files = [
-    { source: `${configDir}/tmux.conf`, target: `${home}/.config/csm/tmux.conf`, executable: false },
-    { source: `${configDir}/shell.zsh`, target: `${home}/.config/csm/shell.zsh`, executable: false },
-    { source: `${configDir}/csm-terminal`, target: `${home}/.config/csm/terminal-launcher`, executable: true },
+    { source: `${configDir}/tmux.conf`, target: `${home}/.config/c0/tmux.conf`, executable: false },
+    { source: `${configDir}/shell.zsh`, target: `${home}/.config/c0/shell.zsh`, executable: false },
+    { source: `${configDir}/c0-terminal`, target: `${home}/.config/c0/terminal-launcher`, executable: true },
   ];
   const changed: string[] = [];
 
@@ -772,7 +772,7 @@ async function installTerminalIntegration(home: string): Promise<string[]> {
   }
 
   // Migrate the old public implementation-detail command out of PATH. Only
-  // remove it when it is recognizably CSM-owned; never clobber an unrelated file.
+  // remove it when it is recognizably Claude0-owned; never clobber an unrelated file.
   const legacyLauncher = `${home}/.local/bin/csm-terminal`;
   let legacyContents = "";
   try { legacyContents = await Bun.file(legacyLauncher).text(); } catch {}
@@ -781,8 +781,18 @@ async function installTerminalIntegration(home: string): Promise<string[]> {
     changed.push(legacyLauncher);
   }
 
-  const commandSource = `${import.meta.dir}/../bin/csm.ts`;
-  const commandTarget = `${home}/.local/bin/csm`;
+  // The pre-rebrand `csm` command: remove only when the symlink points at this
+  // project's entry script — never clobber an unrelated `csm` binary.
+  const legacyCommand = `${home}/.local/bin/csm`;
+  let legacyCommandTarget = "";
+  try { legacyCommandTarget = readlinkSync(legacyCommand); } catch {}
+  if (/\/bin\/(csm|c0)\.ts$/.test(legacyCommandTarget)) {
+    rmSync(legacyCommand, { force: true });
+    changed.push(legacyCommand);
+  }
+
+  const commandSource = `${import.meta.dir}/../bin/c0.ts`;
+  const commandTarget = `${home}/.local/bin/c0`;
   let installedCommand = "";
   try { installedCommand = readlinkSync(commandTarget); } catch {}
   if (installedCommand !== commandSource) {
@@ -793,35 +803,46 @@ async function installTerminalIntegration(home: string): Promise<string[]> {
   }
 
   const imports = [
-    { path: `${home}/.tmux.conf`, line: CSM_TMUX_SOURCE, label: "tmux import" },
-    { path: `${home}/.zshrc`, line: CSM_ZSH_SOURCE, label: "zsh import" },
+    { path: `${home}/.tmux.conf`, line: CLAUDE0_TMUX_SOURCE, label: "tmux import" },
+    { path: `${home}/.zshrc`, line: CLAUDE0_ZSH_SOURCE, label: "zsh import" },
   ];
   for (const entry of imports) {
     let existing = "";
     try { existing = await Bun.file(entry.path).text(); } catch {}
+    // Drop the pre-rebrand import lines (they referenced ~/.config/csm) and the
+    // comment that introduced them, so dotfiles don't accumulate dead sources.
+    const lines = existing.split("\n");
+    const kept = lines.filter(
+      (l) => !l.includes(".config/csm/") && l.trim() !== "# CSM integration (managed by csm setup)",
+    );
+    if (kept.length !== lines.length) {
+      existing = kept.join("\n");
+      await Bun.write(entry.path, existing);
+      changed.push(`${entry.label} (legacy line removed)`);
+    }
     if (!existing.split("\n").includes(entry.line)) {
       const prefix = existing.length === 0 ? "" : existing.endsWith("\n") ? "\n" : "\n\n";
-      await Bun.write(entry.path, `${existing}${prefix}# CSM integration (managed by csm setup)\n${entry.line}\n`);
+      await Bun.write(entry.path, `${existing}${prefix}# Claude0 integration (managed by c0 setup)\n${entry.line}\n`);
       changed.push(entry.label);
     }
   }
 
-  // Apply updates to an existing server without creating one. CSM_HOME is the
+  // Apply updates to an existing server without creating one. CLAUDE0_HOME is the
   // test seam and must never touch the developer's real tmux server.
-  if (!process.env.CSM_HOME && Bun.which("tmux")) {
+  if (!process.env.CLAUDE0_HOME && Bun.which("tmux")) {
     await Bun.$`tmux has-session`.quiet().nothrow().then(async (result) => {
-      if (result.exitCode === 0) await Bun.$`tmux source-file ${home}/.config/csm/tmux.conf`.quiet();
+      if (result.exitCode === 0) await Bun.$`tmux source-file ${home}/.config/c0/tmux.conf`.quiet();
     });
   }
 
   return changed;
 }
 
-/** Read the CSM_HOOK_VERSION from an installed hook script. Returns 0 if missing or unreadable. */
+/** Read the CLAUDE0_HOOK_VERSION from an installed hook script. Returns 0 if missing or unreadable. */
 async function getInstalledHookVersion(hookPath: string): Promise<number> {
   try {
     const content = await Bun.file(hookPath).text();
-    const match = content.match(/^# CSM_HOOK_VERSION=(\d+)/m);
+    const match = content.match(/^# CLAUDE0_HOOK_VERSION=(\d+)/m);
     return match ? parseInt(match[1], 10) : 0;
   } catch {
     return 0;
@@ -829,17 +850,17 @@ async function getInstalledHookVersion(hookPath: string): Promise<number> {
 }
 
 /**
- * Install the CSM hooks into ~/.claude/settings.json and create the hook scripts.
+ * Install the Claude0 hooks into ~/.claude/settings.json and create the hook scripts.
  *
- * Registers CSM's tracking and approval hooks. Safe to run multiple
+ * Registers Claude0's tracking and approval hooks. Safe to run multiple
  * times — rewrites outdated scripts and adds only missing registrations, so a
  * second run is a no-op and user hooks are preserved.
  */
 export async function setup(): Promise<void> {
   const { homedir } = await import("os");
-  const home = process.env.CSM_HOME ?? homedir(); // CSM_HOME: test seam (see config.ts)
+  const home = process.env.CLAUDE0_HOME ?? homedir(); // CLAUDE0_HOME: test seam (see config.ts)
   const settingsPath = `${home}/.claude/settings.json`;
-  const hookDir = `${home}/.config/csm/hooks`;
+  const hookDir = `${home}/.config/c0/hooks`;
   const scriptPath = (name: string) => `${hookDir}/${name}`;
 
   const configCreated = await ensureUserConfig();
@@ -858,7 +879,7 @@ export async function setup(): Promise<void> {
   }
   if (!settings.hooks) settings.hooks = {};
 
-  // v17 returns worktree lifecycle ownership to Claude Code. Remove only CSM's
+  // v17 returns worktree lifecycle ownership to Claude Code. Remove only Claude0's
   // retired commands; user-authored hooks on the same events remain untouched.
   let settingsChanged = false;
   for (const event of Object.keys(settings.hooks)) {
@@ -871,6 +892,9 @@ export async function setup(): Promise<void> {
       }
       const hooks = entry.hooks.filter((hook: any) => {
         if (typeof hook?.command !== "string") return true;
+        // Pre-rebrand registrations point at ~/.config/csm/hooks — this project's
+        // own scripts under the old name, replaced by the ~/.config/c0 registrations.
+        if (hook.command.includes("/.config/csm/hooks/")) return false;
         return !RETIRED_WORKTREE_HOOK_SCRIPTS.some((script) => hook.command.includes(`${hookDir}/${script}`));
       });
       if (hooks.length !== entry.hooks.length) settingsChanged = true;
@@ -889,7 +913,7 @@ export async function setup(): Promise<void> {
   const fileHookScripts = await Promise.all(FILE_HOOK_SCRIPTS.map(async (name) => ({
     name,
     content: (await Bun.file(`${import.meta.dir}/../config/hooks/${name}`).text())
-      .replace("__CSM_HOOK_VERSION__", String(HOOK_VERSION)),
+      .replace("__CLAUDE0_HOOK_VERSION__", String(HOOK_VERSION)),
   })));
   let scriptsWritten = 0;
   let scriptsUpdated = false;
@@ -904,7 +928,7 @@ export async function setup(): Promise<void> {
     }
   }
 
-  // Ensure each event has exactly one CSM registration. Match on the full script
+  // Ensure each event has exactly one Claude0 registration. Match on the full script
   // path (a stable idempotency key) so a re-run never duplicates an entry.
   for (const { event, script, matcher, timeout } of HOOK_REGISTRATIONS) {
     const path = scriptPath(script);
@@ -959,56 +983,56 @@ export async function setup(): Promise<void> {
   } catch {}
 
   if (!scriptsWritten && !settingsChanged && daemonResult === "unchanged" && integrationChanged.length === 0 && !configCreated) {
-    console.log("CSM hooks and terminal integration already configured.");
+    console.log("Claude0 hooks and terminal integration already configured.");
     return;
   }
 
   if (integrationChanged.length > 0) {
-    console.log("CSM terminal integration installed.");
-    console.log(`  Profile: ${home}/.config/csm/{tmux.conf,shell.zsh}`);
-    console.log(`  Command: ${home}/.local/bin/csm`);
-    console.log(`  Launcher: ${home}/.config/csm/terminal-launcher`);
+    console.log("Claude0 terminal integration installed.");
+    console.log(`  Profile: ${home}/.config/c0/{tmux.conf,shell.zsh}`);
+    console.log(`  Command: ${home}/.local/bin/c0`);
+    console.log(`  Launcher: ${home}/.config/c0/terminal-launcher`);
   }
 
-  if (configCreated) console.log(`CSM config created: ${PATHS.config}`);
+  if (configCreated) console.log(`Claude0 config created: ${PATHS.config}`);
 
   if (scriptsWritten || settingsChanged) {
-    console.log(scriptsUpdated ? "CSM hooks updated." : "CSM hooks installed.");
+    console.log(scriptsUpdated ? "Claude0 hooks updated." : "Claude0 hooks installed.");
     console.log(`  Hook scripts: ${hookDir} (tracking and approvals)`);
     console.log(`  Settings: ${settingsPath}`);
   }
   if (daemonResult !== "unchanged") {
-    console.log(`Inbox daemon ${daemonResult} (launchd: com.csm.daemon — snooze wakes fire without a terminal open).`);
+    console.log(`Inbox daemon ${daemonResult} (launchd: com.claude0.daemon — snooze wakes fire without a terminal open).`);
   }
   console.log("\nNew Claude Code sessions will now emit status/transcript events.");
 }
 
 /**
- * Install/refresh the launchd agent that keeps `csm daemon` alive. launchd
+ * Install/refresh the launchd agent that keeps `c0 daemon` alive. launchd
  * (KeepAlive + RunAtLoad) is what makes a snooze survive reboots: the wake
  * pass must run with no tmux client attached and no terminal open. The plist
- * pins the bun binary and the csm entry script that ran this setup, plus a
+ * pins the bun binary and the c0 entry script that ran this setup, plus a
  * PATH that reaches tmux — launchd's default PATH doesn't include homebrew.
  */
 async function installDaemonAgent(home: string): Promise<"installed" | "updated" | "unchanged"> {
   // launchd is darwin-only. On the Linux VM host the daemon runs as the
-  // csm-daemon.service user unit, installed by deploy/provision.sh like the
+  // claude0-daemon.service user unit, installed by deploy/provision.sh like the
   // other units — setup must not scatter launchd artifacts there.
   if (process.platform !== "darwin") return "unchanged";
   const { resolve } = await import("node:path");
   const agentDir = `${home}/Library/LaunchAgents`;
-  const plistPath = `${agentDir}/com.csm.daemon.plist`;
+  const plistPath = `${agentDir}/com.claude0.daemon.plist`;
   const entry = resolve(process.argv[1] ?? "");
   // The PATH symlink, not process.execPath: execPath resolves to the
   // versioned Cellar binary, which a brew upgrade deletes — silently killing
   // the daemon that snoozes depend on.
   const bunBin = Bun.which("bun") ?? process.execPath;
-  const logPath = `${home}/.config/csm/daemon.log`;
+  const logPath = `${home}/.config/c0/daemon.log`;
   const plist = `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>Label</key><string>com.csm.daemon</string>
+  <key>Label</key><string>com.claude0.daemon</string>
   <key>ProgramArguments</key>
   <array>
     <string>${bunBin}</string>
@@ -1038,10 +1062,13 @@ async function installDaemonAgent(home: string): Promise<"installed" | "updated"
     await Bun.write(plistPath, plist);
   }
 
-  // CSM_HOME is the test seam — never touch the real launchd from tests.
-  if (!process.env.CSM_HOME) {
+  // CLAUDE0_HOME is the test seam — never touch the real launchd from tests.
+  if (!process.env.CLAUDE0_HOME) {
     const uid = process.getuid?.() ?? 501;
-    const target = `gui/${uid}/com.csm.daemon`;
+    const target = `gui/${uid}/com.claude0.daemon`;
+    // Retire the pre-rebrand agent so two daemons never race over one inbox.
+    await Bun.$`launchctl bootout gui/${uid}/com.csm.daemon`.quiet().nothrow();
+    rmSync(`${agentDir}/com.csm.daemon.plist`, { force: true });
     if (changed) {
       await Bun.$`launchctl bootout ${target}`.quiet().nothrow();
       // bootstrap right after bootout races the old service's teardown and
@@ -1064,7 +1091,7 @@ async function installDaemonAgent(home: string): Promise<"installed" | "updated"
 }
 
 // ---------------------------------------------------------------------------
-// csm save-sessions  (tmux-resurrect post-save hook)
+// c0 save-sessions  (tmux-resurrect post-save hook)
 // ---------------------------------------------------------------------------
 
 const RESURRECT_SESSIONS_PATH = `${PATHS.dir}/resurrect-sessions.json`;
@@ -1163,13 +1190,13 @@ export async function saveSessions(): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
-// csm restore-sessions  (tmux-resurrect post-restore hook)
+// c0 restore-sessions  (tmux-resurrect post-restore hook)
 // ---------------------------------------------------------------------------
 
 /**
  * Restore Claude Code sessions after tmux-resurrect restores panes.
  *
- * Reads the coordinate→sessionId mapping saved by `csm save-sessions`,
+ * Reads the coordinate→sessionId mapping saved by `c0 save-sessions`,
  * matches coordinates to newly created panes, and launches
  * `claude --resume=<id>` in each via tmux send-keys.
  *
@@ -1184,7 +1211,7 @@ export async function restoreSessions(): Promise<void> {
     const raw = await Bun.file(RESURRECT_SESSIONS_PATH).text();
     map = JSON.parse(raw);
   } catch {
-    console.log("No saved session map found. Run 'csm save-sessions' first or configure the tmux-resurrect hook.");
+    console.log("No saved session map found. Run 'c0 save-sessions' first or configure the tmux-resurrect hook.");
     return;
   }
 
@@ -1268,11 +1295,11 @@ export async function restoreSessions(): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
-// csm question-hook (invoked by pretooluse.sh for an intercepted AskUserQuestion)
+// c0 question-hook (invoked by pretooluse.sh for an intercepted AskUserQuestion)
 // ---------------------------------------------------------------------------
 
 /**
- * `csm question-hook` — invoked by `pretooluse.sh` ONLY for an intercept-eligible
+ * `c0 question-hook` — invoked by `pretooluse.sh` ONLY for an intercept-eligible
  * AskUserQuestion (tracked pane + live phone + not focused).
  * Reads the hook stdin, registers a `pending/<session_id>.json` (kind:"question")
  * marker so both surfaces know a question is held, then block-polls
@@ -1387,11 +1414,11 @@ export async function questionHook(): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
-// csm daemon
+// c0 daemon
 // ---------------------------------------------------------------------------
 
 /**
- * Long-lived inbox daemon (launchd-kept-alive, installed by `csm setup`).
+ * Long-lived inbox daemon (launchd-kept-alive, installed by `c0 setup`).
  * Owns the snooze wake pass — the status-right monitor can't: tmux only
  * evaluates the status line while a client is attached, so a midnight wake
  * with no terminal open would never fire from there. `--once` runs a single
@@ -1464,7 +1491,7 @@ export async function daemon(): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
-// csm sidebar-pane / sidebar-ctl  (M2 single-renderer chassis)
+// c0 sidebar-pane / sidebar-ctl  (M2 single-renderer chassis)
 // ---------------------------------------------------------------------------
 
 /** One-shot control message to the renderer (M-s focus / M-S toggle bindings). */
@@ -1498,7 +1525,7 @@ export async function sidebarCtl(cmd: string | undefined, paneId: string | undef
 }
 
 // ---------------------------------------------------------------------------
-// csm notify <message> — broadcast a web push to every subscribed device
+// c0 notify <message> — broadcast a web push to every subscribed device
 // ---------------------------------------------------------------------------
 
 /**
@@ -1509,18 +1536,18 @@ export async function sidebarCtl(cmd: string | undefined, paneId: string | undef
  */
 export async function notify(message: string): Promise<void> {
   if (!message.trim()) {
-    console.error("usage: csm notify <message>");
+    console.error("usage: c0 notify <message>");
     process.exit(2);
   }
   const { listDeviceIds, sendWebPush } = await import("./core/web-push");
   const ids = listDeviceIds();
   if (ids.length === 0) {
-    console.error("csm: no push subscriptions — nothing to notify");
+    console.error("c0: no push subscriptions — nothing to notify");
     process.exit(1);
   }
   // Empty sessionId on purpose: it keeps the push out of the tap-attribution ledger
   // (a tap must NOT navigate to a session — there is none behind an ops alert; the
   // service worker falls back to a shared "csm" tag so repeats still collapse).
-  await Promise.all(ids.map((id) => sendWebPush(id, { title: "CSM", body: message, sessionId: "" })));
-  console.log(`csm: pushed to ${ids.length} device(s)`);
+  await Promise.all(ids.map((id) => sendWebPush(id, { title: "Claude0", body: message, sessionId: "" })));
+  console.log(`c0: pushed to ${ids.length} device(s)`);
 }

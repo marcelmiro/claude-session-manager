@@ -1,5 +1,5 @@
 /**
- * Deterministic fixture data for the bridge UI — enabled by CSM_BRIDGE_FIXTURES.
+ * Deterministic fixture data for the bridge UI — enabled by CLAUDE0_BRIDGE_FIXTURES.
  *
  * When set, server.ts serves these canned payloads instead of querying `core/`, so the
  * web app renders stable, representative content (every status, a markdown turn, a tool
@@ -19,7 +19,7 @@ const agoMs = (ms: number) => Date.now() - ms;
 export const FIXTURE_SESSIONS = [
   {
     id: "fix-auth",
-    repo: "csm",
+    repo: "claude0",
     branch: "eng-2687-cookie-auth",
     status: "waiting",
     name: "cookie-auth",
@@ -35,7 +35,7 @@ export const FIXTURE_SESSIONS = [
   },
   {
     id: "push-retry",
-    repo: "csm",
+    repo: "claude0",
     branch: "push-retry-backoff",
     status: "ready",
     name: "push-retry",
@@ -52,7 +52,7 @@ export const FIXTURE_SESSIONS = [
   },
   {
     id: "api-refactor",
-    repo: "csm",
+    repo: "claude0",
     branch: "refactor-session-api",
     status: "running",
     name: "session-api",
@@ -68,7 +68,7 @@ export const FIXTURE_SESSIONS = [
   },
   {
     id: "docs-pass",
-    repo: "csm",
+    repo: "claude0",
     branch: "main",
     status: "ready",
     name: "docs-pass",
@@ -121,7 +121,7 @@ export const FIXTURE_SESSIONS = [
   },
   {
     id: "done-usage",
-    repo: "csm",
+    repo: "claude0",
     branch: "usage-readout",
     status: "archived",
     name: "usage-readout",
@@ -309,7 +309,7 @@ export const FIXTURE_REPOS = [
   { name: "throxy", path: "/Users/throxy/dev/throxy", branch: "main", isWorktree: false },
   { name: "throxy", path: "/Users/throxy/dev/throxy/.claude/worktrees/add-tomba-as-enrichment-provider", branch: "add-tomba-as-enrichment-provider", isWorktree: true },
   { name: "throxy", path: "/Users/throxy/dev/throxy/.claude/worktrees/workspace-cleanup", branch: "feature/workspace-context-cleanup", isWorktree: true },
-  { name: "csm", path: "/Users/throxy/dev/csm", branch: "main", isWorktree: false },
+  { name: "claude0", path: "/Users/throxy/dev/claude0", branch: "main", isWorktree: false },
   { name: "customeros", path: "/Users/throxy/dev/customeros", branch: "main", isWorktree: false },
   { name: "customeros", path: "/Users/throxy/dev/customeros/.claude/worktrees/ticket-output-piping", branch: "ticket-output-piping", isWorktree: true },
   { name: "~", path: "/Users/throxy", branch: "", isWorktree: false },
@@ -318,7 +318,7 @@ export const FIXTURE_REPOS = [
 
 // Branch-vs-base changed files for the changed-files card/list demo (latest-modified first).
 const FIXTURE_CHANGES = {
-  root: "/Users/throxy/dev/csm",
+  root: "/Users/throxy/dev/claude0",
   branch: "eng-2687-cookie-auth",
   base: "main",
   files: [
@@ -366,7 +366,7 @@ const FIXTURE_HISTORY = {
   rows: [
     {
       id: "api-refactor",
-      repo: "csm",
+      repo: "claude0",
       branch: "refactor-session-api",
       name: "session-api",
       summary: "Extract session-api helpers from sessions.ts",
@@ -377,7 +377,7 @@ const FIXTURE_HISTORY = {
     },
     {
       id: "hist-restore-fix",
-      repo: "csm",
+      repo: "claude0",
       branch: "restore-sessions",
       name: "resurrect-fix",
       summary: "Never overwrite a real cwd with $HOME in pickSavedCwd",
@@ -389,7 +389,7 @@ const FIXTURE_HISTORY = {
     },
     {
       id: "hist-diff-view",
-      repo: "csm",
+      repo: "claude0",
       branch: "portkey-diff-view",
       name: "diff-view",
       summary: "Changed-files strip styling for the thread",
@@ -425,7 +425,7 @@ const FIXTURE_HISTORY = {
     },
     {
       id: "hist-usage",
-      repo: "csm",
+      repo: "claude0",
       branch: "main",
       name: "usage-readout",
       summary: "Token-usage readout thresholds",
@@ -439,7 +439,7 @@ const FIXTURE_HISTORY = {
   before: null,
   // cortex lives outside configured repository roots in this fixture → no chip (rows still list).
   repos: [
-    { repo: "csm", count: 4 },
+    { repo: "claude0", count: 4 },
     { repo: "throxy", count: 1 },
   ],
 };
@@ -460,7 +460,7 @@ const FIXTURE_HISTORY_SEARCH = {
     },
   ],
   before: null,
-  repos: [{ repo: "csm", count: 2 }],
+  repos: [{ repo: "claude0", count: 2 }],
 };
 
 /**

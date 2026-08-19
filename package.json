@@ -1,9 +1,9 @@
 {
-  "name": "csm",
+  "name": "claude0",
   "version": "0.1.0",
   "type": "module",
   "bin": {
-    "csm": "./bin/csm.ts"
+    "c0": "./bin/c0.ts"
   },
   "scripts": {
     "start": "bun run src/index.ts",

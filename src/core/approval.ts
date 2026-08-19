@@ -38,7 +38,7 @@ export const HOLD_WINDOW_MS = 600_000;
 export const QUESTION_HOLD_MS = 14_400_000;
 
 /**
- * Extra time CSM registers on top of `HOLD_WINDOW_MS` for Claude Code's own PreToolUse
+ * Extra time Claude0 registers on top of `HOLD_WINDOW_MS` for Claude Code's own PreToolUse
  * timeout — the SIGKILL the poll loops are racing.
  *
  * Claude measures its timeout from hook SPAWN, while a loop can only start its clock once

@@ -92,7 +92,7 @@ export async function discoverSessions(opts?: { skipArchivedSummaries?: boolean;
   const {
     changed: hookChanged,
     changedPaneIds: hookChangedPanes,
-    // The persisted map (the same source `csm list` trusts) is a fallback for panes the
+    // The persisted map (the same source `c0 list` trusts) is a fallback for panes the
     // in-memory cache has pruned: a freshly-launched session's hook event can be read on
     // a cycle before its pane has a running claude process, and without this fallback
     // that session would never resolve an id. processHookEvents just loaded it — reuse
@@ -218,7 +218,7 @@ async function attachLastTurn(sessions: Session[]): Promise<void> {
  * command-line flags, try to match them using two strategies:
  *
  * 1. Window name reverse lookup (reliable): If the tmux window was previously
- *    named by CSM, look up the name in the name cache to find the session ID.
+ *    named by Claude0, look up the name in the name cache to find the session ID.
  *    Only matches unique names (skips collisions within same repo).
  *
  * 2. JSONL mtime heuristic (1:1 only): When exactly one unmatched session
@@ -346,7 +346,7 @@ async function enrichUnmatchedSessions(
           await enrichSession(session, sessionId, candidate?.mtime, index, projectDir);
           claimedIds.add(sessionId);
 
-          // Cache window-name matches — these are reliable (CSM set the name)
+          // Cache window-name matches — these are reliable (Claude0 set the name)
           if (session.tmuxPane) {
             paneSessionCache.set(session.tmuxPane.paneId, sessionId);
           }

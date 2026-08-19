@@ -1,15 +1,15 @@
-// Home helper FIRST so CSM_HOME is set before config.ts freezes PATHS.dir —
+// Home helper FIRST so CLAUDE0_HOME is set before config.ts freezes PATHS.dir —
 // `liveScripts` now resolves verdicts through the persisted store, which must
-// land in the throwaway temp home rather than the real ~/.config/csm.
+// land in the throwaway temp home rather than the real ~/.config/c0.
 import "../../test/helpers/home";
-import { CSM_DIR } from "../../test/helpers/home";
+import { C0_DIR } from "../../test/helpers/home";
 import { describe, expect, test, beforeEach } from "bun:test";
 import { rmSync } from "node:fs";
 import { join } from "node:path";
 import { parseBackgroundTasks, pendingScripts, liveScripts } from "./background-tasks";
 
 // Dead verdicts are terminal AND persisted, so they would otherwise leak between tests.
-beforeEach(() => rmSync(join(CSM_DIR, "runner-verdicts.json"), { force: true }));
+beforeEach(() => rmSync(join(C0_DIR, "runner-verdicts.json"), { force: true }));
 
 /** Batched-probe stand-in: alive iff the path satisfies `isAlive`. */
 const probeWhere = (isAlive: (p: string) => boolean) => async (paths: string[]) =>

@@ -1,5 +1,5 @@
 /**
- * CSM Bridge (Impl #3) — a thin HTTP/SSE transport over the headless `core/` API
+ * Claude0 Bridge (Impl #3) — a thin HTTP/SSE transport over the headless `core/` API
  * so an iPhone (over Tailscale) can see sessions, read transcripts, approve tools,
  * answer questions, and send messages. Adds NO Claude-wrapping logic: every route
  * delegates to an existing `core/` function. Headless like `monitor.ts` — imports
@@ -88,7 +88,7 @@ const PUBLIC_DIR = `${import.meta.dir}/public`;
 
 // Demo/test mode: serve canned data (fixtures.ts) instead of querying core/, so the UI
 // renders deterministically with no live sessions. Auth + static serving stay real.
-const FIXTURES = !!process.env.CSM_BRIDGE_FIXTURES;
+const FIXTURES = !!process.env.CLAUDE0_BRIDGE_FIXTURES;
 
 // Explicit allow-map: request path → file under public/. Never join a raw
 // url.pathname onto PUBLIC_DIR (path traversal). Unlisted paths → 404.
@@ -1546,24 +1546,24 @@ function isAllowedHost(host: string): boolean {
   return false;
 }
 
-/** Returns the server so tests can bind port 0 and stop it; `csm bridge` ignores it. */
+/** Returns the server so tests can bind port 0 and stop it; `c0 bridge` ignores it. */
 export function startBridge(): ReturnType<typeof Bun.serve> {
-  const host = process.env.CSM_BRIDGE_HOST ?? "127.0.0.1";
-  const port = Number(process.env.CSM_BRIDGE_PORT ?? "8473");
-  rawToken = process.env.CSM_BRIDGE_TOKEN ?? "";
+  const host = process.env.CLAUDE0_BRIDGE_HOST ?? "127.0.0.1";
+  const port = Number(process.env.CLAUDE0_BRIDGE_PORT ?? "8473");
+  rawToken = process.env.CLAUDE0_BRIDGE_TOKEN ?? "";
 
   if (!rawToken) {
-    throw new Error("CSM_BRIDGE_TOKEN is required — refusing to start without a token (fail-closed)");
+    throw new Error("CLAUDE0_BRIDGE_TOKEN is required — refusing to start without a token (fail-closed)");
   }
   if (!isAllowedHost(host)) {
     throw new Error(
-      `CSM_BRIDGE_HOST=${host} is not loopback or tailnet (100.64.0.0/10) — refusing to bind (fail-closed)`,
+      `CLAUDE0_BRIDGE_HOST=${host} is not loopback or tailnet (100.64.0.0/10) — refusing to bind (fail-closed)`,
     );
   }
   tokenDigest = createHash("sha256").update(rawToken).digest();
 
   if (!existsSync(EVENTS_DIR)) {
-    console.error("EVENTS_DIR not found: live push disabled; restart bridge after csm setup");
+    console.error("EVENTS_DIR not found: live push disabled; restart bridge after c0 setup");
   }
   watchEvents((id) => {
     broadcast({ type: "session-changed", id });
@@ -1633,7 +1633,7 @@ export function startBridge(): ReturnType<typeof Bun.serve> {
       }
     },
   });
-  console.error(`csm bridge listening on http://${host}:${server.port}${FIXTURES ? " (fixtures mode — canned data)" : ""}`);
+  console.error(`c0 bridge listening on http://${host}:${server.port}${FIXTURES ? " (fixtures mode — canned data)" : ""}`);
 
   // Pre-warm the /sessions projection so the phone's first request after a bridge
   // (re)start hits the served-from-cache path instead of paying the discovery sweep.

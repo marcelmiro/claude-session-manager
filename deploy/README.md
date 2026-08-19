@@ -1,6 +1,6 @@
-# deploy/ — CSM on an always-on Linux host
+# deploy/ — Claude0 on an always-on Linux host
 
-Provisioning for running the whole CSM stack (tmux + Claude Code sessions + the
+Provisioning for running the whole Claude0 stack (tmux + Claude Code sessions + the
 portkey bridge) on a headless Ubuntu 24.04 VM, with the Mac and iPhone as thin
 clients over Tailscale. The cutover itself (state copy, auth, PWA reinstall) is
 `RUNBOOK.md`; decision records are ADRs 14–17.
@@ -9,15 +9,15 @@ clients over Tailscale. The cutover itself (state copy, auth, PWA reinstall) is
 
 | File | Purpose |
 |---|---|
-| `provision.sh` | Idempotent CSM host setup — runtime packages, inotify sysctl, swap, TZ, journald cap, needrestart list-only, bubblewrap AppArmor profile, linger + user units, bridge token, and Tailscale. It requires the Linux dotfiles profile and does not own terminal presentation or plugins. Re-run any time. |
-| `units/tmux.service` | User unit: tmux server at boot (linger), `csm save-sessions` on stop. |
-| `units/csm-bridge.service` | User unit: the bridge, `Restart=always` with spaced retries, token via 0600 `EnvironmentFile`. |
-| `units/csm-monitor.service` | User unit: fallback monitor tick + resurrect autosave while no tmux client is attached (status-right — and continuum riding it — only runs for attached clients). |
-| `units/csm-daemon.service` | User unit: the inbox daemon (snooze wakes, discovery snapshots, sidebar renderer) — systemd twin of darwin's `com.csm.daemon` launchd agent. Off-darwin the wake alert is a broadcast Web Push (no banner tier on a headless host). |
-| `../config/tmux.conf` | CSM-owned, cross-platform tmux integration installed by `csm setup`. Personal tmux settings remain separate. |
-| `doctor.sh` | Read-only post-provision audit of CSM integration, auth, services, bridge, Tailscale, and host capacity. Run `~/.dotfiles/doctor` for tmux UI, bindings, clipboard, and TPM. |
+| `provision.sh` | Idempotent Claude0 host setup — runtime packages, inotify sysctl, swap, TZ, journald cap, needrestart list-only, bubblewrap AppArmor profile, linger + user units, bridge token, and Tailscale. It requires the Linux dotfiles profile and does not own terminal presentation or plugins. Re-run any time. |
+| `units/tmux.service` | User unit: tmux server at boot (linger), `c0 save-sessions` on stop. |
+| `units/claude0-bridge.service` | User unit: the bridge, `Restart=always` with spaced retries, token via 0600 `EnvironmentFile`. |
+| `units/claude0-monitor.service` | User unit: fallback monitor tick + resurrect autosave while no tmux client is attached (status-right — and continuum riding it — only runs for attached clients). |
+| `units/claude0-daemon.service` | User unit: the inbox daemon (snooze wakes, discovery snapshots, sidebar renderer) — systemd twin of darwin's `com.claude0.daemon` launchd agent. Off-darwin the wake alert is a broadcast Web Push (no banner tier on a headless host). |
+| `../config/tmux.conf` | Claude0-owned, cross-platform tmux integration installed by `c0 setup`. Personal tmux settings remain separate. |
+| `doctor.sh` | Read-only post-provision audit of Claude0 integration, auth, services, bridge, Tailscale, and host capacity. Run `~/.dotfiles/doctor` for tmux UI, bindings, clipboard, and TPM. |
 | `aws/dlm-policies.sh` | DLM snapshot schedules (4-hourly/3d + daily/14d on `csm-backup=true` volumes) + budget-stop guardrail pointer. CLI-only — the console can't do sub-daily. |
-| `units/snapshot-check.{service,timer}` | Hourly staleness probe: newest `csm-backup` snapshot older than 5h → `csm notify` pushes to the phone. Needs the aws CLI and an instance role with `ec2:DescribeSnapshots`. |
+| `units/snapshot-check.{service,timer}` | Hourly staleness probe: newest `csm-backup` snapshot older than 5h → `c0 notify` pushes to the phone. Needs the aws CLI and an instance role with `ec2:DescribeSnapshots`. |
 
 ## Usage
 
@@ -27,7 +27,7 @@ git clone git@github.com:marcelmiro/dotfiles.git ~/.dotfiles
 ~/.dotfiles/bin/setup-linux
 
 ./provision.sh --tz Europe/Madrid --swap-gb 16
-csm setup
+c0 setup
 ~/.dotfiles/doctor
 ./doctor.sh
 ```
@@ -47,17 +47,17 @@ Prerequisites the script checks but cannot create:
 - **Tailscale join** is interactive by design: `sudo tailscale up --ssh
   --hostname=<name> --authkey=<key>`. Use a **pre-tagged auth key** — tagging after
   join does not disable key expiry, and an expired node key strands the box.
-- **bun + csm + claude** installs are in the runbook (they're user-level, not host
+- **bun + c0 + claude** installs are in the runbook (they're user-level, not host
   provisioning).
 
 The Linux host installs the explicit `common + linux` Stow profiles from the
 personal dotfiles repository. This imports the same tmux presentation, bindings,
 clipboard behavior, and TPM-managed plugins as macOS without linking macOS app
-configuration. `csm setup` owns and updates only its application fragments under
-`~/.config/csm/`.
+configuration. `c0 setup` owns and updates only its application fragments under
+`~/.config/c0/`.
 
 Mac-to-VM paste is terminal input, not a Linux clipboard operation: use `Cmd+V`
-in Ghostty. VM-to-Mac copy (including CSM's Space→c) uses OSC 52. Ghostty needs
+in Ghostty. VM-to-Mac copy (including Claude0's Space→c) uses OSC 52. Ghostty needs
 `clipboard-read = allow` and `clipboard-write = allow`; tmux advertises both
 `clipboard` and `bpaste` client features when the chain is healthy. `doctor.sh`
 checks the remote half and prints the attached client's capabilities. Ghostty's
@@ -67,7 +67,7 @@ like a local terminal; no remote clipboard service or tmux prefix is involved.
 ## After a reboot
 
 Everything must come back with no SSH login (linger): `systemctl --user status
-tmux csm-bridge csm-monitor` from an SSH one-liner, `tailscale serve status` shows
+tmux claude0-bridge claude0-monitor` from an SSH one-liner, `tailscale serve status` shows
 8473, and the phone reaches the bridge. That's verification scenario 4; scenario 8
 covers session restore (resurrect's restore from tmux.service's `ExecStartPost`,
-whose post-restore hook runs `csm restore-sessions`).
+whose post-restore hook runs `c0 restore-sessions`).

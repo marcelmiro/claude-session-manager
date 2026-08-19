@@ -1,18 +1,18 @@
 #!/bin/sh
-# Start the local or remote tmux environment used by CSM. All durable choices
+# Start the local or remote tmux environment used by Claude0. All durable choices
 # live in the single user-editable config.json; CLI arguments are transient.
 
 PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$HOME/.bun/bin:/usr/bin:/bin:${PATH:-}"
 export PATH
 
-config_file="$HOME/.config/csm/config.json"
+config_file="$HOME/.config/c0/config.json"
 
 usage() {
   cat <<'EOF'
-Usage: csm terminal [local|remote|status]
+Usage: c0 terminal [local|remote|status]
 
-With no argument, uses terminal.defaultTarget from ~/.config/csm/config.json.
-Edit the file shown by: csm config
+With no argument, uses terminal.defaultTarget from ~/.config/c0/config.json.
+Edit the file shown by: c0 config
 EOF
 }
 
@@ -21,7 +21,7 @@ command -v jq >/dev/null 2>&1 || {
   exit 127
 }
 [ -r "$config_file" ] || {
-  printf 'CSM config is missing. Run: csm setup\n' >&2
+  printf 'Claude0 config is missing. Run: c0 setup\n' >&2
   exit 2
 }
 
@@ -49,22 +49,22 @@ esac
 
 case "$mode" in
   local)
-    session=${CSM_LOCAL_TMUX_SESSION:-$(read_json '.terminal.localSession' main)}
+    session=${CLAUDE0_LOCAL_TMUX_SESSION:-$(read_json '.terminal.localSession' main)}
     command -v tmux >/dev/null 2>&1 || {
-      printf 'tmux is required for local CSM mode.\n' >&2
+      printf 'tmux is required for local Claude0 mode.\n' >&2
       exit 127
     }
     tmux new-session -A -s "$session"
     ;;
   remote)
-    host=${CSM_REMOTE_HOST:-$(read_json '.terminal.remoteHost // empty' '')}
-    session=${CSM_REMOTE_TMUX_SESSION:-$(read_json '.terminal.remoteSession' main)}
+    host=${CLAUDE0_REMOTE_HOST:-$(read_json '.terminal.remoteHost // empty' '')}
+    session=${CLAUDE0_REMOTE_TMUX_SESSION:-$(read_json '.terminal.remoteSession' main)}
     [ -n "$host" ] || {
       printf 'No remote host configured. Edit terminal.remoteHost in %s.\n' "$config_file" >&2
       exit 2
     }
     command -v mosh >/dev/null 2>&1 || {
-      printf 'Mosh is required for remote CSM mode.\n' >&2
+      printf 'Mosh is required for remote Claude0 mode.\n' >&2
       exit 127
     }
     mosh --predict=always \

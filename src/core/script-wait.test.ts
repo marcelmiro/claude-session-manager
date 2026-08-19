@@ -3,11 +3,11 @@
  * verdict store every caller shares (TUI, monitor and bridge are all short-lived
  * or concurrent, so nothing in-memory can be relied on).
  *
- * Home helper FIRST so CSM_HOME is set before config.ts freezes PATHS.dir.
+ * Home helper FIRST so CLAUDE0_HOME is set before config.ts freezes PATHS.dir.
  */
 
 import "../../test/helpers/home";
-import { CSM_DIR } from "../../test/helpers/home";
+import { C0_DIR } from "../../test/helpers/home";
 import { test, expect, beforeEach } from "bun:test";
 import { rmSync, writeFileSync, readFileSync, readdirSync, mkdirSync, statSync } from "node:fs";
 import { join } from "node:path";
@@ -15,11 +15,11 @@ import { detectScriptWaits, isWaiting, type ScriptWaitEntry } from "./script-wai
 import { resolveVerdicts, runnersAlive, type ProbeTarget } from "./runner-verdicts";
 import { desiredPrefix, stripAllPrefixes, ATTENTION_PREFIX, RUNNING_PREFIX, SCRIPT_PREFIX } from "./notifications";
 
-const VERDICTS_DIR = join(CSM_DIR, "verdicts");
+const VERDICTS_DIR = join(C0_DIR, "verdicts");
 const storedKeys = () => readdirSync(VERDICTS_DIR).filter((f) => !f.endsWith(".tmp")).sort();
 
 beforeEach(() => {
-  mkdirSync(CSM_DIR, { recursive: true });
+  mkdirSync(C0_DIR, { recursive: true });
   rmSync(VERDICTS_DIR, { recursive: true, force: true });
 });
 
@@ -34,10 +34,10 @@ test("desiredPrefix precedence: ⚡ > 🔄 > ⏳ > none", () => {
 });
 
 test("stripAllPrefixes strips ⏳ like the others", () => {
-  expect(stripAllPrefixes("⏳csm/fix-auth")).toBe("csm/fix-auth");
-  expect(stripAllPrefixes("⚡csm")).toBe("csm");
-  expect(stripAllPrefixes("🔄csm")).toBe("csm");
-  expect(stripAllPrefixes("csm")).toBe("csm");
+  expect(stripAllPrefixes("⏳claude0/fix-auth")).toBe("claude0/fix-auth");
+  expect(stripAllPrefixes("⚡claude0")).toBe("claude0");
+  expect(stripAllPrefixes("🔄claude0")).toBe("claude0");
+  expect(stripAllPrefixes("claude0")).toBe("claude0");
 });
 
 // --- isWaiting ------------------------------------------------------------
@@ -138,7 +138,7 @@ test("no targets → no probe, no store write", async () => {
 // --- runnersAlive (the real lsof probe) -----------------------------------
 
 test("runnersAlive: a file nothing holds open reads dead, and never throws", async () => {
-  const path = join(CSM_DIR, "nobody-holds-this.output");
+  const path = join(C0_DIR, "nobody-holds-this.output");
   writeFileSync(path, "x");
   expect(await runnersAlive([path])).toEqual(new Map([[path, false]]));
 });
@@ -146,12 +146,12 @@ test("runnersAlive: a file nothing holds open reads dead, and never throws", asy
 test("runnersAlive: a missing path reads dead without aborting the batch", async () => {
   // lsof exits non-zero when any path is missing, so verdicts must come from its
   // output, not its exit code — otherwise one stale path blinds the whole batch.
-  const held = join(CSM_DIR, "held.output");
+  const held = join(C0_DIR, "held.output");
   writeFileSync(held, "x");
   const proc = Bun.spawn(["/bin/sh", "-c", `exec 9>>"${held}"; sleep 5`], { stdout: "ignore", stderr: "ignore" });
   try {
-    const verdicts = await runnersAlive([join(CSM_DIR, "gone-abc.output"), held]);
-    expect(verdicts.get(join(CSM_DIR, "gone-abc.output"))).toBe(false);
+    const verdicts = await runnersAlive([join(C0_DIR, "gone-abc.output"), held]);
+    expect(verdicts.get(join(C0_DIR, "gone-abc.output"))).toBe(false);
     expect(verdicts.get(held)).toBe(true);
   } finally {
     proc.kill();
@@ -162,7 +162,7 @@ test("runnersAlive: a missing path reads dead without aborting the batch", async
 test("runnersAlive: a live runner under a symlinked root still reads alive", async () => {
   // On macOS /tmp is a symlink to /private/tmp and lsof reports the resolved path.
   // Matching raw strings would report this live runner as dead.
-  const real = join(CSM_DIR, "symlinked.output");
+  const real = join(C0_DIR, "symlinked.output");
   writeFileSync(real, "x");
   const viaSymlink = real.startsWith("/private/") ? real.slice("/private".length) : real;
   const proc = Bun.spawn(["/bin/sh", "-c", `exec 9>>"${real}"; sleep 5`], { stdout: "ignore", stderr: "ignore" });
@@ -180,7 +180,7 @@ test("runnersAlive: empty input does not spawn anything", async () => {
 
 // --- detectScriptWaits: the per-session transcript-parse cache ------------
 
-const PROJECTS = join(CSM_DIR, "projects");
+const PROJECTS = join(C0_DIR, "projects");
 
 /** Write a transcript whose only content is one pending background script. */
 function transcript(sessionId: string, taskId: string): void {
@@ -212,7 +212,7 @@ function transcript(sessionId: string, taskId: string): void {
   );
 }
 
-const CACHE = join(CSM_DIR, "script-wait.json");
+const CACHE = join(C0_DIR, "script-wait.json");
 const readCache = () => JSON.parse(readFileSync(CACHE, "utf-8"));
 
 test("a live runner makes the session wait; a dead one does not", async () => {

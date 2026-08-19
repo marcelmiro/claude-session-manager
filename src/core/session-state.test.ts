@@ -1,7 +1,7 @@
 /**
  * I/O coverage for the native session-status reader. `loadNativeStatuses(dir)` is
- * pure on its `dir` arg (it deliberately bypasses the CSM_HOME seam — it reads
- * Claude's dir, not CSM's), so fixtures are `<pid>.json` files written to a fresh
+ * pure on its `dir` arg (it deliberately bypasses the CLAUDE0_HOME seam — it reads
+ * Claude's dir, not Claude0's), so fixtures are `<pid>.json` files written to a fresh
  * temp dir. `process.pid` stands in for a guaranteed-live pid; `999999` for a dead
  * one.
  */
@@ -15,7 +15,7 @@ import { loadNativeStatuses, nativeSessionIdByPid, parkedJobSessions, resolveSta
 let dir: string;
 
 beforeEach(() => {
-  dir = mkdtempSync(join(tmpdir(), "csm-native-"));
+  dir = mkdtempSync(join(tmpdir(), "c0-native-"));
 });
 
 afterEach(() => {
@@ -82,7 +82,7 @@ test("missing dir returns empty map without throwing", async () => {
 
 // --- nativeSessionIdByPid — the fork's REAL id, keyed by pid ---------------------
 // A --fork-session pane's SessionStart hook records the PARENT id; the fork's own
-// id lives only in Claude's per-pid native file. This is how CSM recovers it.
+// id lives only in Claude's per-pid native file. This is how Claude0 recovers it.
 
 test("nativeSessionIdByPid returns the id from the pid's native file", async () => {
   writeFile("12461.json", { ...base, pid: 12461, sessionId: "fork-real-id", status: "idle" });

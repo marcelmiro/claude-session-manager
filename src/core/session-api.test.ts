@@ -3,7 +3,7 @@
  *
  * Hermetic, repo style: pure fns asserted directly + temp-HOME real-fs (no
  * `mock.module`). `../../test/helpers/home` MUST stay the first import — it redirects
- * CSM_HOME before `config`/`hook-events` freeze `PATHS.dir`/`EVENTS_DIR`.
+ * CLAUDE0_HOME before `config`/`hook-events` freeze `PATHS.dir`/`EVENTS_DIR`.
  *
  * Scope note: the transcript ASSEMBLY is tested via the pure `buildSessionTranscript`
  * (the I/O path resolution uses `homedir()`, which tests can't redirect — matching how

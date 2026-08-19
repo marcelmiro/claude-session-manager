@@ -3,7 +3,7 @@
  * clean naming signal. Skill-launched sessions (e.g. `/implement-plan`) store the
  * real intent only in the command block; the message that follows is generic
  * skill boilerplate ("Base directory for this skill: …"). Naming off the
- * boilerplate produced unstable, hallucinated names (a csm session got named
+ * boilerplate produced unstable, hallucinated names (a claude0 session got named
  * `papi-list-methods`); surfacing the command makes it stable.
  */
 
@@ -123,7 +123,7 @@ test("pickRepoPath: a normal pane keeps its own cwd even when the transcript /cd
 
 function makeSession(over: Partial<Session> & { id: string }): Session {
   return {
-    repo: "csm",
+    repo: "claude0",
     repoPath: "/repo",
     baseRepoPath: "/repo",
     branch: "main",
@@ -135,7 +135,7 @@ function makeSession(over: Partial<Session> & { id: string }): Session {
     firstPrompt: "",
     lastPrompt: "",
     name: "",
-    tmuxPane: { paneId: `%${over.id}`, windowIndex: 0, sessionName: "main", windowName: "csm" },
+    tmuxPane: { paneId: `%${over.id}`, windowIndex: 0, sessionName: "main", windowName: "claude0" },
     ...over,
   };
 }
@@ -174,12 +174,12 @@ test("groupSessions: priority repos pin group order ahead of alphabetical", () =
   const groups = groupSessions(
     [
       makeSession({ id: "a", repo: "alpha", repoPath: "/alpha", baseRepoPath: "/alpha" }),
-      makeSession({ id: "b", repo: "csm" }),
+      makeSession({ id: "b", repo: "claude0" }),
       makeSession({ id: "c", repo: "throxy", repoPath: "/throxy", baseRepoPath: "/throxy" }),
     ],
-    ["throxy", "customeros", "~", "csm"],
+    ["throxy", "customeros", "~", "claude0"],
   );
-  expect(groups.map((g) => g.name)).toEqual(["throxy", "csm", "alpha"]);
+  expect(groups.map((g) => g.name)).toEqual(["throxy", "claude0", "alpha"]);
 });
 
 // --- getLatestUserPrompt: backward doubling-window scan over the transcript tail ---
@@ -187,7 +187,7 @@ test("groupSessions: priority repos pin group order ahead of alphabetical", () =
 // edge must not lose or corrupt the record the doubling pass exists to recover.
 
 async function writeTranscript(lines: string[]): Promise<string> {
-  const path = join(tmpdir(), `csm-latest-prompt-${Date.now()}-${Math.random().toString(36).slice(2)}.jsonl`);
+  const path = join(tmpdir(), `c0-latest-prompt-${Date.now()}-${Math.random().toString(36).slice(2)}.jsonl`);
   await Bun.write(path, lines.join("\n") + "\n");
   return path;
 }

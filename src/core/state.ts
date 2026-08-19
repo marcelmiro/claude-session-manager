@@ -12,7 +12,7 @@ const PANE_SESSIONS_PATH = `${PATHS.dir}/pane-sessions.json`; // legacy (pre-v7)
 const HOOK_EVENTS_PATH = `${PATHS.dir}/hook-events`; // legacy (pre-v7); drained by migratePaneMap
 
 /** Read the hook-owned per-pane map. Falls back to the legacy single-file map only when the
- *  `panes/` dir doesn't exist yet (a pre-v7 machine before `csm setup` runs the migration). */
+ *  `panes/` dir doesn't exist yet (a pre-v7 machine before `c0 setup` runs the migration). */
 export async function loadPaneSessions(): Promise<Record<string, string>> {
   let files: string[];
   try {
@@ -70,7 +70,7 @@ export async function reconcilePaneFiles(livePaneIds: Set<string>): Promise<void
   } catch {}
 }
 
-/** One-time pre-v7 migration (idempotent; run on every `csm setup`): fold the legacy single-file
+/** One-time pre-v7 migration (idempotent; run on every `c0 setup`): fold the legacy single-file
  *  map plus any residual hook-events append log into per-pane files, so sessions already running
  *  at upgrade time stay resolvable without waiting for their next SessionStart. */
 export async function migratePaneMap(): Promise<void> {

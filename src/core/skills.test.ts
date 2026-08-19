@@ -14,7 +14,7 @@ import { listSlashCommands } from "./skills";
 let PROJ: string;
 
 beforeAll(() => {
-  PROJ = mkdtempSync(join(tmpdir(), "csm-skills-"));
+  PROJ = mkdtempSync(join(tmpdir(), "c0-skills-"));
   const skills = join(PROJ, ".claude", "skills");
   const cmds = join(PROJ, ".claude", "commands");
   mkdirSync(skills, { recursive: true });

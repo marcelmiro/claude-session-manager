@@ -72,7 +72,7 @@ export async function listPanes(): Promise<PaneInfo[]> {
  * Returns an empty string if the pane doesn't exist or tmux isn't running.
  *
  * Scraper-fallback width caveat (Inc7 #4): `detectStatus` patterns assume a wide
- * enough pane that the spinner/prompt lines don't wrap. CSM launches sessions with
+ * enough pane that the spinner/prompt lines don't wrap. Claude0 launches sessions with
  * `tmux new-window` (inherits the client width) and must not reflow existing panes,
  * so there is no `new-session -x 120` site to pin. This only affects pre-hook
  * sessions on the scraper path; event-status (now primary) is width-independent.

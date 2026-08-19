@@ -15,7 +15,7 @@ function enc(p: string): string {
 let projectsDir: string;
 
 beforeEach(async () => {
-  projectsDir = await mkdtemp(`${tmpdir()}/csm-recover-`);
+  projectsDir = await mkdtemp(`${tmpdir()}/c0-recover-`);
 });
 
 afterEach(async () => {

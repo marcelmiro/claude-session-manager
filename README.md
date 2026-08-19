@@ -1,35 +1,35 @@
-# CSM — Claude Session Manager
+# Claude0
 
-CSM is a tmux-based workspace for running and monitoring multiple Claude Code
+Claude0 is a tmux-based workspace for running and monitoring multiple Claude Code
 sessions. It supports two independent modes:
 
-- **Local:** CSM, tmux, and Claude run on the current computer.
-- **Remote:** a Mac or Linux client uses Mosh to attach to an always-on Linux CSM
+- **Local:** Claude0, tmux, and Claude run on the current computer.
+- **Remote:** a Mac or Linux client uses Mosh to attach to an always-on Linux Claude0
   host. tmux owns session persistence; the client is only a terminal.
 
-## Install CSM on a computer
+## Install Claude0 on a computer
 
 Requirements: [Bun](https://bun.sh), tmux, zsh, Git, jq, and Claude Code. Remote
 mode also requires Mosh on the client and host.
 
 ```sh
 mkdir -p ~/dev
-git clone https://github.com/marcelmiro/claude-session-manager ~/dev/csm
-cd ~/dev/csm
+git clone https://github.com/marcelmiro/claude0 ~/dev/claude0
+cd ~/dev/claude0
 bun install
 mkdir -p ~/.local/bin
-ln -sf "$PWD/bin/csm.ts" ~/.local/bin/csm
-csm setup
+ln -sf "$PWD/bin/c0.ts" ~/.local/bin/c0
+c0 setup
 ```
 
-`csm setup` is idempotent. It installs Claude hooks plus narrowly scoped
-CSM-owned extensions at:
+`c0 setup` is idempotent. It installs Claude hooks plus narrowly scoped
+Claude0-owned extensions at:
 
 ```text
-~/.config/csm/tmux.conf
-~/.config/csm/shell.zsh
-~/.config/csm/terminal-launcher  # private transport implementation
-~/.local/bin/csm
+~/.config/c0/tmux.conf
+~/.config/c0/shell.zsh
+~/.config/c0/terminal-launcher  # private transport implementation
+~/.local/bin/c0
 ```
 
 It adds one import line to `~/.tmux.conf` and `~/.zshrc`; it does not replace
@@ -63,68 +63,68 @@ bun run scripts/migrate-dev-layout.ts preflight \
 scripts/migrate-dev-layout-wizard.sh prepare
 ```
 
-The wizard resumes from `~/dev/csm` with `finish` after the required macOS
+The wizard resumes from `~/dev/claude0` with `finish` after the required macOS
 logout. Each apply phase keeps path-state backups under
-`~/.config/csm/migrations/`. See
+`~/.config/c0/migrations/`. See
 [ADR 17](docs/adr/0017-user-centric-development-layout.md) for the invariants.
 
 ## One user config
 
 ```sh
 # Print the absolute path, creating the documented defaults on first use:
-csm config
+c0 config
 
 # Edit it with any editor:
-${EDITOR:-vim} "$(csm config)"
+${EDITOR:-vim} "$(c0 config)"
 ```
 
-CSM has one machine-local, schema-backed settings file. Repository discovery,
-terminal attachment, UI, and notification preferences all live in that file; CSM
+Claude0 has one machine-local, schema-backed settings file. Repository discovery,
+terminal attachment, UI, and notification preferences all live in that file; Claude0
 does not maintain hidden sidecar settings. The default repository layout is flat:
 `~/dev/<repo>`. Set `repositories.priority` only when you want selected repos pinned.
 
 ## Local and remote terminal modes
 
-Set `terminal.defaultTarget` and `terminal.remoteHost` in `$(csm config)`, then:
+Set `terminal.defaultTarget` and `terminal.remoteHost` in `$(c0 config)`, then:
 
 ```sh
 # Explicit invocations do not mutate the default:
-csm terminal local
-csm terminal remote
-csm terminal status
+c0 terminal local
+c0 terminal remote
+c0 terminal status
 
 # No argument uses terminal.defaultTarget:
-csm terminal
+c0 terminal
 ```
 
-On macOS, Ghostty invokes the CSM command so a failed connection or detach falls
+On macOS, Ghostty invokes the Claude0 command so a failed connection or detach falls
 through to a local login shell:
 
 ```text
-/bin/zsh -lc '"$HOME/.local/bin/csm" terminal; exec /bin/zsh -l'
+/bin/zsh -lc '"$HOME/.local/bin/c0" terminal; exec /bin/zsh -l'
 ```
 
 Remote mode requires Mosh on both machines. Hostname, mode, and session choices
-are fields in the machine-local `~/.config/csm/config.json`, never committed to dotfiles.
+are fields in the machine-local `~/.config/c0/config.json`, never committed to dotfiles.
 The remote Mosh server keeps a reconnect window of 30 days so ordinary laptop
 sleep, roaming, and travel do not strand an open terminal.
 
 On Linux, install the optional Linux profile from the dotfiles repository for
 the same tmux UI, bindings, plugins, and portable shell defaults used on macOS.
-CSM contributes only its command path and application integration.
+Claude0 contributes only its command path and application integration.
 
 ## Provision an always-on Linux host
 
-Install the explicit Linux dotfiles profile before provisioning CSM:
+Install the explicit Linux dotfiles profile before provisioning Claude0:
 
 ```sh
 git clone git@github.com:marcelmiro/dotfiles.git ~/.dotfiles
 ~/.dotfiles/install linux
 ~/.dotfiles/bin/setup-linux
 
-cd ~/dev/csm
+cd ~/dev/claude0
 ./deploy/provision.sh --tz Europe/Madrid --swap-gb 16
-csm setup
+c0 setup
 ~/.dotfiles/doctor
 ./deploy/doctor.sh
 ```

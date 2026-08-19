@@ -24,9 +24,9 @@ export function sessionIdFromCommand(command: string): string | undefined {
 
 const UUID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/;
 
-/** The id CSM dictated with `--session-id <uuid>` (create-only, so it IS the session's own id),
- *  or undefined. Authoritative for BOTH a CSM fork (whose hook records the parent id) and a
- *  CSM-created session — it's on the command line the instant the pane launches, before any
+/** The id Claude0 dictated with `--session-id <uuid>` (create-only, so it IS the session's own id),
+ *  or undefined. Authoritative for BOTH a Claude0 fork (whose hook records the parent id) and a
+ *  Claude0-created session — it's on the command line the instant the pane launches, before any
  *  hook or native file exists. External forks/sessions carry no `--session-id`, so they keep
  *  the native-file / --resume resolution below. */
 export function dictatedSessionId(command: string): string | undefined {
@@ -78,8 +78,8 @@ export async function findClaudeProcesses(): Promise<ClaudeProcess[]> {
       // Skip entries with no associated TTY (macOS ps prints "??", Linux prints "?")
       if (tty === "??" || tty === "?") continue;
 
-      // Prefer an id CSM dictated with `--session-id` — authoritative and instant for
-      // both a CSM fork (whose hook records the PARENT id) and a CSM-created session,
+      // Prefer an id Claude0 dictated with `--session-id` — authoritative and instant for
+      // both a Claude0 fork (whose hook records the PARENT id) and a Claude0-created session,
       // present on the command line before any hook or native file exists. Otherwise
       // extract from --resume/-r (fast, no lsof); a fork's --resume points at its PARENT,
       // so sessionIdFromCommand suppresses it, and the REAL id is recovered from Claude's

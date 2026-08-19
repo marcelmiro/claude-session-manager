@@ -12,7 +12,7 @@ export function createLayout() {
   const screen = blessed.screen({
     terminal: BLESSED_TERMINAL,
     smartCSR: true,
-    title: "csm",
+    title: "c0",
     fullUnicode: true,
   });
 

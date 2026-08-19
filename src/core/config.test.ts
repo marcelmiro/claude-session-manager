@@ -44,7 +44,7 @@ test("loadConfig migrates flat config and terminal sidecars without losing effec
   const rewritten = JSON.parse(readFileSync(PATHS.config, "utf8"));
   expect(rewritten.schemaVersion).toBe(1);
   expect(rewritten.ntfyTopic).toBeUndefined();
-  // Kept until setup installs the new launcher; `csm config` alone must not break
+  // Kept until setup installs the new launcher; `c0 config` alone must not break
   // an older installed terminal launcher that still reads these files.
   expect(readFileSync(`${PATHS.dir}/terminal-mode`, "utf8")).toBe("remote\n");
   expect(readFileSync(`${PATHS.dir}/remote-host`, "utf8")).toBe("vm.example.ts.net\n");

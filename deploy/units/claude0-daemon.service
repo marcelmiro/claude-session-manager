@@ -1,5 +1,5 @@
 [Unit]
-Description=CSM inbox daemon (snooze wakes, discovery snapshots, sidebar renderer)
+Description=Claude0 inbox daemon (snooze wakes, discovery snapshots, sidebar renderer)
 After=tmux.service
 BindsTo=tmux.service
 
@@ -7,9 +7,9 @@ BindsTo=tmux.service
 Environment=PATH=%h/.bun/bin:%h/.local/bin:/usr/local/bin:/usr/bin:/bin
 # The wake pass must run with no tmux client attached and no terminal open —
 # that's the whole point of a daemon: a snooze survives reboots and fires on a
-# headless host. launchd (com.csm.daemon) owns this on darwin; this unit is the
+# headless host. launchd (com.claude0.daemon) owns this on darwin; this unit is the
 # systemd twin. ExecStart must be absolute — systemd does not PATH-resolve.
-ExecStart=%h/.bun/bin/csm daemon
+ExecStart=%h/.bun/bin/c0 daemon
 Restart=always
 RestartSec=5s
 

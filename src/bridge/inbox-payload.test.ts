@@ -7,7 +7,7 @@ const H = 3_600_000;
 const D = 86_400_000;
 
 function sess(over: Partial<InboxSession>): InboxSession {
-  return { id: "x", repo: "csm", name: "n", reason: "turn-done", since: NOW - H, ...over };
+  return { id: "x", repo: "claude0", name: "n", reason: "turn-done", since: NOW - H, ...over };
 }
 
 function seen(over: Partial<DiscoverySeen> = {}): DiscoverySeen {

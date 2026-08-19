@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# Read-only health check for a provisioned CSM Linux host. It deliberately never
+# Read-only health check for a provisioned Claude0 Linux host. It deliberately never
 # prints credentials or the bridge token.
 set -uo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CSM_TMUX_SOURCE="if-shell 'test -f ~/.config/csm/tmux.conf' 'source-file ~/.config/csm/tmux.conf' ''"
+CLAUDE0_TMUX_SOURCE="if-shell 'test -f ~/.config/c0/tmux.conf' 'source-file ~/.config/c0/tmux.conf' ''"
 # Literal line expected in the user's zsh configuration.
 # shellcheck disable=SC2016
-CSM_ZSH_SOURCE='[[ -r "$HOME/.config/csm/shell.zsh" ]] && source "$HOME/.config/csm/shell.zsh"'
+CLAUDE0_ZSH_SOURCE='[[ -r "$HOME/.config/c0/shell.zsh" ]] && source "$HOME/.config/c0/shell.zsh"'
 
 failures=0
 warnings=0
@@ -25,7 +25,7 @@ expect_eq() {
   fi
 }
 
-printf 'CSM Linux service doctor\n\n'
+printf 'Claude0 Linux service doctor\n\n'
 
 case "$(uname -s)" in
   Linux) pass "host is Linux ($(uname -m))" ;;
@@ -36,7 +36,7 @@ case "$HOME" in
   *) fail "HOME is $HOME; copied Claude sessions expect /Users/<name>" ;;
 esac
 
-for cmd in tmux mosh-server zsh git gh jq curl bun csm claude bwrap socat lsof; do
+for cmd in tmux mosh-server zsh git gh jq curl bun c0 claude bwrap socat lsof; do
   if command -v "$cmd" >/dev/null 2>&1; then
     pass "$cmd: $(command -v "$cmd")"
   else
@@ -45,7 +45,7 @@ for cmd in tmux mosh-server zsh git gh jq curl bun csm claude bwrap socat lsof; 
 done
 
 if [ -d /run/systemd/system ]; then
-  for unit in tmux.service csm-bridge.service csm-monitor.service csm-daemon.service snapshot-check.timer; do
+  for unit in tmux.service claude0-bridge.service claude0-monitor.service claude0-daemon.service snapshot-check.timer; do
     active=$(systemctl --user is-active "$unit" 2>/dev/null || true)
     enabled=$(systemctl --user is-enabled "$unit" 2>/dev/null || true)
     expect_eq "$unit active" "$active" active
@@ -66,47 +66,47 @@ if tmux has-session -t main 2>/dev/null; then
   else
     fail "tmux server PATH is missing $HOME/.bun/bin or $HOME/.local/bin: $tmux_path"
   fi
-  if PATH="$tmux_path" command -v csm >/dev/null 2>&1; then
-    pass "tmux run-shell can resolve csm"
+  if PATH="$tmux_path" command -v c0 >/dev/null 2>&1; then
+    pass "tmux run-shell can resolve c0"
   else
-    fail "csm is not resolvable through the tmux server PATH"
+    fail "c0 is not resolvable through the tmux server PATH"
   fi
 
-  csm_status=$(tmux show-options -gqv @csm_status 2>/dev/null || true)
-  if [[ "$csm_status" == *"csm status"* ]]; then pass "CSM status segment is active"; else fail "@csm_status is missing or inactive"; fi
-  csm_popup=$(tmux list-keys -T prefix a 2>/dev/null || true)
-  if [[ "$csm_popup" == *"display-popup"* && "$csm_popup" == *"csm"* ]]; then pass "CSM popup binding is active"; else fail "prefix+a is not bound to the CSM popup"; fi
+  claude0_status=$(tmux show-options -gqv @claude0_status 2>/dev/null || true)
+  if [[ "$claude0_status" == *"c0 status"* ]]; then pass "Claude0 status segment is active"; else fail "@claude0_status is missing or inactive"; fi
+  claude0_popup=$(tmux list-keys -T prefix a 2>/dev/null || true)
+  if [[ "$claude0_popup" == *"display-popup"* && "$claude0_popup" == *"c0"* ]]; then pass "Claude0 popup binding is active"; else fail "prefix+a is not bound to the Claude0 popup"; fi
 
 else
   fail "tmux session main is not alive"
 fi
 
-if cmp -s "$here/../config/tmux.conf" "$HOME/.config/csm/tmux.conf" 2>/dev/null; then
-  pass "current CSM-owned tmux fragment is installed"
+if cmp -s "$here/../config/tmux.conf" "$HOME/.config/c0/tmux.conf" 2>/dev/null; then
+  pass "current Claude0-owned tmux fragment is installed"
 else
-  fail "CSM-owned tmux fragment is missing or stale: $HOME/.config/csm/tmux.conf"
+  fail "Claude0-owned tmux fragment is missing or stale: $HOME/.config/c0/tmux.conf"
 fi
-if grep -Fxq "$CSM_TMUX_SOURCE" "$HOME/.tmux.conf" 2>/dev/null; then
-  pass "$HOME/.tmux.conf imports the CSM fragment"
+if grep -Fxq "$CLAUDE0_TMUX_SOURCE" "$HOME/.tmux.conf" 2>/dev/null; then
+  pass "$HOME/.tmux.conf imports the Claude0 fragment"
 else
-  fail "$HOME/.tmux.conf does not import the CSM fragment"
+  fail "$HOME/.tmux.conf does not import the Claude0 fragment"
 fi
-if cmp -s "$here/../config/shell.zsh" "$HOME/.config/csm/shell.zsh" 2>/dev/null; then
-  pass "current CSM-owned zsh fragment is installed"
+if cmp -s "$here/../config/shell.zsh" "$HOME/.config/c0/shell.zsh" 2>/dev/null; then
+  pass "current Claude0-owned zsh fragment is installed"
 else
-  fail "CSM-owned zsh fragment is missing or stale: $HOME/.config/csm/shell.zsh"
+  fail "Claude0-owned zsh fragment is missing or stale: $HOME/.config/c0/shell.zsh"
 fi
-if grep -Fxq "$CSM_ZSH_SOURCE" "$HOME/.zshrc" 2>/dev/null; then
-  pass "$HOME/.zshrc imports the CSM fragment"
+if grep -Fxq "$CLAUDE0_ZSH_SOURCE" "$HOME/.zshrc" 2>/dev/null; then
+  pass "$HOME/.zshrc imports the Claude0 fragment"
 else
-  fail "$HOME/.zshrc does not import the CSM fragment"
+  fail "$HOME/.zshrc does not import the Claude0 fragment"
 fi
 
-csm_config="$HOME/.config/csm/config.json"
-if jq -e '.schemaVersion == 1 and (.repositories.roots | type == "array") and (.repositories.roots | length > 0)' "$csm_config" >/dev/null 2>&1; then
-  pass "single-file CSM config is valid: $csm_config"
+claude0_config="$HOME/.config/c0/config.json"
+if jq -e '.schemaVersion == 1 and (.repositories.roots | type == "array") and (.repositories.roots | length > 0)' "$claude0_config" >/dev/null 2>&1; then
+  pass "single-file Claude0 config is valid: $claude0_config"
 else
-  fail "missing or invalid schemaVersion 1 CSM config: $csm_config"
+  fail "missing or invalid schemaVersion 1 Claude0 config: $claude0_config"
 fi
 
 if gh auth status >/dev/null 2>&1; then
@@ -120,22 +120,22 @@ else
   fail "Claude Code is not authenticated"
 fi
 
-bridge_env="$HOME/.config/csm/bridge.env"
+bridge_env="$HOME/.config/c0/bridge.env"
 if [ -r "$bridge_env" ]; then
   # Generated EnvironmentFile at a fixed local path.
   set -a
   # shellcheck disable=SC1090
   . "$bridge_env"
   set +a
-  if [ -n "${CSM_BRIDGE_TOKEN:-}" ]; then
-    payload=$(jq -cn --arg token "$CSM_BRIDGE_TOKEN" '{token:$token}')
+  if [ -n "${CLAUDE0_BRIDGE_TOKEN:-}" ]; then
+    payload=$(jq -cn --arg token "$CLAUDE0_BRIDGE_TOKEN" '{token:$token}')
     code=$(curl -sS -o /dev/null -w '%{http_code}' -X POST \
       -H 'content-type: application/json' --data-binary "$payload" \
       http://127.0.0.1:8473/auth 2>/dev/null || true)
     expect_eq "bridge authentication" "$code" 200
-    unset CSM_BRIDGE_TOKEN payload
+    unset CLAUDE0_BRIDGE_TOKEN payload
   else
-    fail "bridge EnvironmentFile has no CSM_BRIDGE_TOKEN"
+    fail "bridge EnvironmentFile has no CLAUDE0_BRIDGE_TOKEN"
   fi
 else
   fail "bridge EnvironmentFile is missing or unreadable: $bridge_env"

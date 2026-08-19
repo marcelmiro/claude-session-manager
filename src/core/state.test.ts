@@ -2,27 +2,27 @@
  * Hook-owned per-pane session map (v7). Verifies the storage swap that fixed the
  * listed-but-unsendable bug: per-pane files are the source of truth, reads are
  * non-destructive (no consume-once race), change-detection still diffs only id
- * CHANGES, and `csm setup` migrates the pre-v7 single-file map forward.
+ * CHANGES, and `c0 setup` migrates the pre-v7 single-file map forward.
  *
- * Home helper FIRST so CSM_HOME is set before config.ts freezes PATHS.dir.
+ * Home helper FIRST so CLAUDE0_HOME is set before config.ts freezes PATHS.dir.
  */
 
 import "../../test/helpers/home";
-import { CSM_DIR } from "../../test/helpers/home";
+import { C0_DIR } from "../../test/helpers/home";
 import { test, expect, beforeEach } from "bun:test";
 import { mkdirSync, writeFileSync, rmSync, existsSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { loadPaneSessions, savePaneSessions, processHookEvents, reconcilePaneFiles, migratePaneMap } from "./state";
 
-const PANES_DIR = join(CSM_DIR, "panes");
-const LEGACY_JSON = join(CSM_DIR, "pane-sessions.json");
-const HOOK_EVENTS = join(CSM_DIR, "hook-events");
+const PANES_DIR = join(C0_DIR, "panes");
+const LEGACY_JSON = join(C0_DIR, "pane-sessions.json");
+const HOOK_EVENTS = join(C0_DIR, "hook-events");
 
 beforeEach(() => {
   rmSync(PANES_DIR, { recursive: true, force: true });
   rmSync(LEGACY_JSON, { force: true });
   rmSync(HOOK_EVENTS, { force: true });
-  mkdirSync(CSM_DIR, { recursive: true });
+  mkdirSync(C0_DIR, { recursive: true });
 });
 
 test("save/load round-trips per-pane files (the % paneId is a valid filename)", async () => {

@@ -3,9 +3,9 @@ export {};
 
 function help() {
   console.log(`
-  \x1b[1mcsm\x1b[0m — Claude Session Manager
+  \x1b[1mc0\x1b[0m — Claude0
 
-  \x1b[1mUsage:\x1b[0m  csm [command]
+  \x1b[1mUsage:\x1b[0m  c0 [command]
 
   \x1b[1mCommands:\x1b[0m
     \x1b[36m(none)\x1b[0m              Open the full TUI
@@ -15,7 +15,7 @@ function help() {
     \x1b[36mlist\x1b[0m                Print sessions with status, repo, and context %
     \x1b[36mswitch <name>\x1b[0m       Fuzzy-match a session by name and switch to it
     \x1b[36mnotify <message>\x1b[0m    Web-push a message to every subscribed device
-    \x1b[36msetup\x1b[0m               Install CSM commands, hooks, and terminal integration
+    \x1b[36msetup\x1b[0m               Install Claude0 commands, hooks, and terminal integration
     \x1b[36mconfig\x1b[0m              Print the absolute user config path
     \x1b[36mterminal [command]\x1b[0m  Manage local/remote terminal attachment
     \x1b[36msave-sessions\x1b[0m       Snapshot pane→session map for tmux-resurrect
@@ -26,19 +26,19 @@ function help() {
   \x1b[1mOptions:\x1b[0m
     \x1b[36m-h, --help\x1b[0m          Show this help message
 
-  Run \x1b[36mcsm terminal --help\x1b[0m for terminal commands.
+  Run \x1b[36mc0 terminal --help\x1b[0m for terminal commands.
 `.trimEnd());
 }
 
 function terminalHelp() {
   console.log(`
-  \x1b[1mcsm terminal\x1b[0m — Manage terminal attachment
+  \x1b[1mc0 terminal\x1b[0m — Manage terminal attachment
 
   \x1b[1mUsage:\x1b[0m
-    \x1b[36mcsm terminal\x1b[0m                   Attach using config.json's defaultTarget
-    \x1b[36mcsm terminal local\x1b[0m             Attach to local tmux for this invocation
-    \x1b[36mcsm terminal remote\x1b[0m            Attach to the configured remote host
-    \x1b[36mcsm terminal status\x1b[0m            Show the effective terminal configuration
+    \x1b[36mc0 terminal\x1b[0m                   Attach using config.json's defaultTarget
+    \x1b[36mc0 terminal local\x1b[0m             Attach to local tmux for this invocation
+    \x1b[36mc0 terminal remote\x1b[0m            Attach to the configured remote host
+    \x1b[36mc0 terminal status\x1b[0m            Show the effective terminal configuration
 
   \x1b[1mOptions:\x1b[0m
     \x1b[36m-h, --help\x1b[0m                     Show this help message
@@ -49,8 +49,8 @@ const cmd = process.argv[2];
 
 async function runTerminal(args: string[]): Promise<never> {
   const home = process.env.HOME;
-  const installed = home ? `${home}/.config/csm/terminal-launcher` : "";
-  const bundled = `${import.meta.dir}/../config/csm-terminal`;
+  const installed = home ? `${home}/.config/c0/terminal-launcher` : "";
+  const bundled = `${import.meta.dir}/../config/c0-terminal`;
   const command = installed && (await Bun.file(installed).exists())
     ? [installed, ...args]
     : ["/bin/sh", bundled, ...args];

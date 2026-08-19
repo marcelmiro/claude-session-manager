@@ -1,4 +1,4 @@
-// CSM mobile bridge UI — Preact + signals + htm, no build step. Auth is the
+// Claude0 (portkey) mobile bridge UI — Preact + signals + htm, no build step. Auth is the
 // HttpOnly `csm` cookie (set by POST /auth); this file never touches the token
 // after the one login POST, and never puts it in a URL.
 import { h, render } from "preact";

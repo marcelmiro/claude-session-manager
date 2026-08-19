@@ -8,9 +8,9 @@
  *
  * State files (the monitor is a fresh process per tick — everything reads from
  * disk, nothing caches in memory):
- * - `~/.config/csm/push-vapid.json`      { publicKey: base64url raw P-256 point,
+ * - `~/.config/c0/push-vapid.json`      { publicKey: base64url raw P-256 point,
  *                                          privateJwk: JsonWebKey }
- * - `~/.config/csm/push-subscriptions.json`  { [deviceId]: PushSubscriptionJSON }
+ * - `~/.config/c0/push-subscriptions.json`  { [deviceId]: PushSubscriptionJSON }
  *
  * The RFC 8291 §5 test vector fixes the salt and the "ephemeral" sender keypair,
  * so `encryptPayload` accepts both as an optional seam; production callers omit
@@ -91,7 +91,7 @@ export function getSubscription(deviceId: string): StoredSubscription | null {
   return readSubscriptions()[deviceId] ?? null;
 }
 
-/** Every subscribed device id — for broadcast pushes (`csm notify`). */
+/** Every subscribed device id — for broadcast pushes (`c0 notify`). */
 export function listDeviceIds(): string[] {
   return Object.keys(readSubscriptions());
 }

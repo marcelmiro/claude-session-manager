@@ -343,7 +343,7 @@ export interface TranscriptTurn {
 
 /**
  * The on-disk `pending/<sessionId>.json` marker, as written by a blocking PreToolUse hook
- * (`pretooluse.sh` for an approval, `csm question-hook` for a held AskUserQuestion) and
+ * (`pretooluse.sh` for an approval, `c0 question-hook` for a held AskUserQuestion) and
  * parsed by every reader that has to decide which answer channel to use.
  *
  * `pid` is the holding hook's own process id — readers probe it to tell a live hold from

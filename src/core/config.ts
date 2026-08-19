@@ -3,23 +3,23 @@ import { mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import defaultConfigJson from "../../config/default.json";
 import type { CsmConfig } from "../types";
 
-// CSM_HOME overrides the home root (tests point it at a temp dir; bun's
+// CLAUDE0_HOME overrides the home root (tests point it at a temp dir; bun's
 // os.homedir() ignores a runtime-set $HOME, so an env seam is the reliable hook).
-const CSM_DIR = `${process.env.CSM_HOME ?? homedir()}/.config/csm`;
+const C0_DIR = `${process.env.CLAUDE0_HOME ?? homedir()}/.config/c0`;
 
 export const PATHS = {
-  dir: CSM_DIR,
-  config: `${CSM_DIR}/config.json`,
-  configSchema: `${CSM_DIR}/config.schema.json`,
-  state: `${CSM_DIR}/state.json`,
-  uploads: `${CSM_DIR}/uploads`, // images uploaded from the mobile bridge, pasted into a pane
+  dir: C0_DIR,
+  config: `${C0_DIR}/config.json`,
+  configSchema: `${C0_DIR}/config.schema.json`,
+  state: `${C0_DIR}/state.json`,
+  uploads: `${C0_DIR}/uploads`, // images uploaded from the mobile bridge, pasted into a pane
 } as const;
 
 const DEFAULT_CONFIG = defaultConfigJson as CsmConfig;
 const LEGACY_DEFAULT_PRIORITY = ["throxy", "customeros", "~", "csm"];
 const RETIRED_KEYS = new Set(["ntfyTopic", "bridgeUrl"]);
 const LEGACY_TERMINAL_FILES = ["terminal-mode", "remote-host", "local-session", "remote-session"];
-const CONFIG_MIGRATION_LOCK = `${CSM_DIR}/config-migration.lock`;
+const CONFIG_MIGRATION_LOCK = `${C0_DIR}/config-migration.lock`;
 
 /**
  * Write `text` to `path` atomically (tmp→rename) so a concurrent reader never
@@ -179,7 +179,7 @@ async function migrateLegacyConfigOnce(): Promise<CsmConfig> {
       }
     }
   }
-  if (!ownsLock) throw new Error(`timed out waiting for ${CONFIG_MIGRATION_LOCK}; remove it only if no CSM process is migrating config`);
+  if (!ownsLock) throw new Error(`timed out waiting for ${CONFIG_MIGRATION_LOCK}; remove it only if no Claude0 process is migrating config`);
 
   try {
     // The config may have been migrated between our initial read and lock acquisition.
@@ -216,7 +216,7 @@ export async function loadConfig(): Promise<CsmConfig> {
     }
     return validateConfig(raw);
   } catch (error) {
-    throw new Error(`Invalid CSM config at ${PATHS.config}: ${error instanceof Error ? error.message : String(error)}`);
+    throw new Error(`Invalid Claude0 config at ${PATHS.config}: ${error instanceof Error ? error.message : String(error)}`);
   }
 }
 
@@ -240,7 +240,7 @@ export async function ensureUserConfig(): Promise<boolean> {
 
 /**
  * Retire terminal sidecars only after setup has installed the config.json-aware
- * launcher. `csm config` may migrate JSON while an older launcher is still live;
+ * launcher. `c0 config` may migrate JSON while an older launcher is still live;
  * deleting its inputs there would silently reset terminal attachment behavior.
  */
 export function removeLegacyConfigSidecars(): void {

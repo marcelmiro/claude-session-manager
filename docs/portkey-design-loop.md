@@ -8,8 +8,8 @@ touching real sessions. Verified 2026-08-18 on the Linux VM host (Chrome at
 
 1. **Playground bridge** (fixtures, never real sessions):
    ```sh
-   CSM_BRIDGE_FIXTURES=1 CSM_BRIDGE_TOKEN=design-token \
-   CSM_BRIDGE_HOST=127.0.0.2 CSM_BRIDGE_PORT=8481 bun run bin/csm.ts bridge
+   CLAUDE0_BRIDGE_FIXTURES=1 CLAUDE0_BRIDGE_TOKEN=design-token \
+   CLAUDE0_BRIDGE_HOST=127.0.0.2 CLAUDE0_BRIDGE_PORT=8481 bun run bin/c0.ts bridge
    ```
    Fixtures cover every status/section including woken/blocked/done rows;
    mutating POSTs are stubbed.
@@ -39,7 +39,7 @@ touching real sessions. Verified 2026-08-18 on the Linux VM host (Chrome at
 ## Real-data variant
 
 Same tool against `http://127.0.0.1:8473` with the token from
-`~/.config/csm/bridge.env` — read-only discipline: screenshots and opens are
+`~/.config/c0/bridge.env` — read-only discipline: screenshots and opens are
 fine; never tap approve/archive/send there.
 
 `bun run shoot` captures the fixture screens headlessly

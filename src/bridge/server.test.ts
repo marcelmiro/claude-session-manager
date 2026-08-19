@@ -21,8 +21,8 @@ let cookie = "";
 
 beforeAll(async () => {
   mkdirSync(EVENTS_DIR, { recursive: true });
-  process.env.CSM_BRIDGE_TOKEN = TOKEN;
-  process.env.CSM_BRIDGE_PORT = "0"; // ephemeral — never collides with a live bridge
+  process.env.CLAUDE0_BRIDGE_TOKEN = TOKEN;
+  process.env.CLAUDE0_BRIDGE_PORT = "0"; // ephemeral — never collides with a live bridge
   server = startBridge();
   base = `http://127.0.0.1:${server.port}`;
   const res = await fetch(`${base}/auth`, {

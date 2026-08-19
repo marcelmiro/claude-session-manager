@@ -10,24 +10,24 @@
  *   bun run scripts/shoot.ts [--out <dir>] [--port <n>] [--cdp-port <n>] [--keep]
  *
  * Requires Google Chrome (or set CHROME=/path/to/chrome). Writes login.png, list.png,
- * detail.png to <dir> (default: $TMPDIR/csm-shots).
+ * detail.png to <dir> (default: $TMPDIR/c0-shots).
  */
 
 import { existsSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-const ROOT = join(import.meta.dir, ".."); // repo root, for spawning `bin/csm.ts`
+const ROOT = join(import.meta.dir, ".."); // repo root, for spawning `bin/c0.ts`
 const args = process.argv.slice(2);
 const flag = (name: string, def: string) => {
   const i = args.indexOf(name);
   return i >= 0 && args[i + 1] ? args[i + 1]! : def;
 };
-const OUT = flag("--out", join(tmpdir(), "csm-shots"));
+const OUT = flag("--out", join(tmpdir(), "c0-shots"));
 const BRIDGE_PORT = Number(flag("--port", "8479"));
 const CDP_PORT = Number(flag("--cdp-port", "9223"));
 const KEEP = args.includes("--keep");
-const TOKEN = process.env.CSM_BRIDGE_TOKEN || "shoot-token";
+const TOKEN = process.env.CLAUDE0_BRIDGE_TOKEN || "shoot-token";
 const BASE = `http://127.0.0.1:${BRIDGE_PORT}`;
 
 const log = (m: string) => console.error(`[shoot] ${m}`);
@@ -121,14 +121,14 @@ async function main() {
   const CHROME = resolveChrome();
 
   // 1. Boot the bridge in fixtures mode.
-  bridge = Bun.spawn(["bun", "run", "bin/csm.ts", "bridge"], {
+  bridge = Bun.spawn(["bun", "run", "bin/c0.ts", "bridge"], {
     cwd: ROOT,
     env: {
       ...process.env,
-      CSM_BRIDGE_TOKEN: TOKEN,
-      CSM_BRIDGE_HOST: "127.0.0.1",
-      CSM_BRIDGE_PORT: String(BRIDGE_PORT),
-      CSM_BRIDGE_FIXTURES: "1",
+      CLAUDE0_BRIDGE_TOKEN: TOKEN,
+      CLAUDE0_BRIDGE_HOST: "127.0.0.1",
+      CLAUDE0_BRIDGE_PORT: String(BRIDGE_PORT),
+      CLAUDE0_BRIDGE_FIXTURES: "1",
     },
     stdout: "ignore",
     stderr: "inherit",
@@ -137,7 +137,7 @@ async function main() {
   log(`bridge up on ${BASE} (fixtures)`);
 
   // 2. Launch headless Chrome with a throwaway profile + remote debugging.
-  const profile = mkdtempSync(join(tmpdir(), "csm-chrome-"));
+  const profile = mkdtempSync(join(tmpdir(), "c0-chrome-"));
   chrome = Bun.spawn(
     [
       CHROME,
