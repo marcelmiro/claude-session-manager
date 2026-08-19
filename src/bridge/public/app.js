@@ -367,6 +367,11 @@ function applySessions(data) {
   inboxStale.value = !Array.isArray(data) && !!data.inboxStale;
   if (!Array.isArray(data)) inboxAware.value = true;
   followClearedSession(); // /clear or /compact on the open session → follow to its successor
+  // Re-arm the read clear for the open session on every payload (idempotent while a
+  // timer is pending): the one hook both stream pushes and GET fallbacks pass through,
+  // so a session that turns unread while its detail is showing — or whose row was
+  // stale at open() — still gets its ⚡ consumed.
+  if (selectedId.value) markRead(selectedId.value);
   authed.value = true;
   if (error.value === "bridge unreachable") error.value = ""; // recovered — drop the banner
   // Persist for the next cold open (iOS evicts the page constantly): boot hydrates
@@ -936,6 +941,8 @@ function clearAttachments() {
 }
 
 function open(id) {
+  // Leaving a session before its read-grace elapsed: that glance doesn't count as read.
+  if (selectedId.value && selectedId.value !== id) cancelReadTimer(selectedId.value);
   selectedId.value = id;
   // Paint the last-fetched copy instantly (stale-while-revalidate) instead of blanking
   // to "loading…"; the refetch below replaces it. First-ever open still shows loading.
@@ -1011,22 +1018,42 @@ function closeSubagent() {
 // instantly. The delay closes a race: the monitor sets ⚡ once, on the running→ready
 // transition, so if Claude finishes right as you open (or glance and leave), an
 // immediate read would clobber that fresh ⚡ before it reaches the phone and you'd miss
-// the completion. We clear only if the session is still unread with the SAME `modified`
-// we saw at open — a turn completing within the window advances `modified`, so its ⚡
-// survives. Clears locally + on the bridge (which writes needsAttention:false to
-// state.json so the Mac's ⚡ clears too).
+// the completion. We clear only if the session is still unread with the SAME last-turn
+// timestamp we saw at arm time — a turn completing within the window advances it, so
+// its ⚡ survives (`activityAt`, not `modified`: the transcript mtime moves on
+// bookkeeping writes with no conversation behind them, which would abort real clears).
+// Arming is idempotent: a pending timer is never reset, so the steady refresh stream
+// can't starve the clear. Every applied payload re-arms for the open session, which
+// (1) catches a session that turns unread while its detail is already showing and
+// (2) retries a clear the bridge dropped (transient pane-resolution failure). Timers
+// are cancelled on selection change and on page hide — a clear fires only while that
+// session's detail is open and the page visible. Clears locally + on the bridge
+// (which writes needsAttention:false to state.json so the Mac's ⚡ clears too).
 const readTimers = new Map();
+function cancelReadTimer(id) {
+  const t = readTimers.get(id);
+  if (t !== undefined) {
+    clearTimeout(t);
+    readTimers.delete(id);
+  }
+}
 function markRead(id) {
   const s = sessions.value.find((x) => x.id === id);
-  if (!s || !s.unread) return;
-  const seen = s.modified;
-  clearTimeout(readTimers.get(id));
+  if (!s || !s.unread || readTimers.has(id)) return;
+  const seen = activityAt(s);
   readTimers.set(
     id,
     setTimeout(() => {
       readTimers.delete(id);
       const cur = sessions.value.find((x) => x.id === id);
-      if (!cur || !cur.unread || cur.modified !== seen) return; // gone, or a fresh turn arrived → keep ⚡
+      if (!cur || !cur.unread) return;
+      if (activityAt(cur) !== seen) {
+        // A fresh turn arrived mid-grace: keep its ⚡, but restart the grace if the
+        // user is still looking at this session — the stream may stay quiet after the
+        // turn's own payloads, so waiting for the next one could strand the clear.
+        if (selectedId.value === id && document.visibilityState === "visible") markRead(id);
+        return;
+      }
       // Clear in the raw list too — overlays re-derive from it, and a re-derive from a
       // copy still flagged unread would resurrect the glow until the server's own clear.
       if (rawSessions) rawSessions = rawSessions.map((x) => (x.id === id ? { ...x, unread: false } : x));
@@ -1037,6 +1064,7 @@ function markRead(id) {
 }
 
 function back() {
+  if (selectedId.value) cancelReadTimer(selectedId.value); // backing out within the grace keeps the ⚡
   openSubscription(null); // tear down the transcript push + its server-side watcher
   selectedId.value = null;
   transcript.value = null;
@@ -1352,6 +1380,7 @@ async function archiveSession() {
   const s = sessionMenu.value;
   sessionMenu.value = null;
   if (!s) return;
+  cancelReadTimer(s.id); // a disposed session never gets a deferred read-clear
   // If we're viewing the session we just archived, drop back to the list.
   if (selectedId.value === s.id) selectedId.value = null;
   await action(`/sessions/${encodeURIComponent(s.id)}/archive`, {});
@@ -1364,6 +1393,7 @@ async function snoozeSession(preset) {
   const s = sessionMenu.value;
   sessionMenu.value = null;
   if (!s) return;
+  cancelReadTimer(s.id); // a disposed session never gets a deferred read-clear
   if (selectedId.value === s.id) selectedId.value = null;
   await action(`/sessions/${encodeURIComponent(s.id)}/snooze`, { preset });
 }
@@ -1372,6 +1402,7 @@ async function blockSession(note) {
   const s = sessionMenu.value;
   sessionMenu.value = null;
   if (!s) return;
+  cancelReadTimer(s.id); // a disposed session never gets a deferred read-clear
   if (selectedId.value === s.id) selectedId.value = null;
   await action(`/sessions/${encodeURIComponent(s.id)}/block`, { note });
 }
@@ -4349,6 +4380,12 @@ startTick();
 // instead of after the 40s staleness window. `resync` on return reopens the
 // stream (re-touching the marker).
 function sendGoodbye() {
+  // Drop pending read clears: a suspended timer would fire on resume against the
+  // pre-background list and could consume an ⚡ set while away. Runs on both the
+  // visibilitychange-hidden path and the pagehide backstop; the resume resync's
+  // payload re-arms for the open session once fresh data lands.
+  for (const t of readTimers.values()) clearTimeout(t);
+  readTimers.clear();
   if (es) {
     es.close();
     es = null;
