@@ -38,6 +38,7 @@ export function desiredPrefix(hasAttention: boolean, isRunning: boolean, hasScri
 /** Display abbreviations for long repo names on tmux windows. Window names only —
  *  the TUI list, grouping, and push labels keep the real repo name. */
 const REPO_ABBREVIATIONS: Record<string, string> = {
+  claude0: "c0",
   customeros: "cos",
   throxy: "thr",
 };
