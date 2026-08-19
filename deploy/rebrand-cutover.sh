@@ -98,8 +98,8 @@ done
 # The `// null` keeps the condition total: without it, a non-object
 # .repositories makes `.priority?` the empty stream and the whole filter emits
 # NOTHING with exit 0 — the mv would then install a 0-byte config. With it,
-# every input takes the else-branch identity; a real jq failure exits non-zero
-# and set -e aborts before the mv.
+# a non-array/absent priority takes the else-branch identity instead of the
+# empty stream; a real jq failure exits non-zero and set -e aborts before the mv.
 if [[ -f "$NEW_CFG/config.json" ]]; then
   jq 'if ((.repositories.priority? // null) | type) == "array"
       then .repositories.priority |= map(if . == "csm" then "claude0" else . end)
