@@ -143,8 +143,14 @@ state dir to `~/.config/c0` (renaming the `CSM_BRIDGE_*` keys in `bridge.env`) �
 renames `~/dev/csm` to `~/dev/claude0` (with `git worktree repair` and the
 remote re-pointed at `claude0`) → rewrites recorded absolute paths
 (resurrect map, pane files, `inbox.db` snapshot rows, `~/.claude/projects` dirs)
-→ `bun install` + `c0 setup` → installs and starts the `claude0-*` units →
+→ `bun install` + `c0 setup` → installs and starts the `claude0-*` units
+(re-pointing `~/.bun/bin/c0`, which their `ExecStart` uses absolutely) →
 verifies (units active, `POST /auth` 200, `c0 list`).
+
+Personal dotfiles are never rewritten: the pre-flight prints every `csm`
+reference it finds in `~/.tmux.conf`, `~/.zshrc`, and `~/.config/tmux/*.conf`
+— update those by hand (notably a `status-right` interpolating `@csm_status`
+must move to `@claude0_status`, or the status segment silently disappears).
 
 Rollback: `systemctl --user stop claude0-{bridge,daemon,monitor}` → restore
 `~/.config/csm` from the backup tar → `mv ~/dev/claude0 ~/dev/csm` → check out

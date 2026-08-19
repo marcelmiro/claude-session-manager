@@ -809,11 +809,16 @@ async function installTerminalIntegration(home: string): Promise<string[]> {
   for (const entry of imports) {
     let existing = "";
     try { existing = await Bun.file(entry.path).text(); } catch {}
-    // Drop the pre-rebrand import lines (they referenced ~/.config/csm) and the
-    // comment that introduced them, so dotfiles don't accumulate dead sources.
+    // Drop the pre-rebrand import lines and the comment that introduced them, so
+    // dotfiles don't accumulate dead sources. Exact-line match only — these files
+    // are personal; anything setup didn't write verbatim is not ours to delete.
+    const legacyImports = [
+      "if-shell 'test -f ~/.config/csm/tmux.conf' 'source-file ~/.config/csm/tmux.conf' ''",
+      '[[ -r "$HOME/.config/csm/shell.zsh" ]] && source "$HOME/.config/csm/shell.zsh"',
+    ];
     const lines = existing.split("\n");
     const kept = lines.filter(
-      (l) => !l.includes(".config/csm/") && l.trim() !== "# CSM integration (managed by csm setup)",
+      (l) => !legacyImports.includes(l) && l.trim() !== "# CSM integration (managed by csm setup)",
     );
     if (kept.length !== lines.length) {
       existing = kept.join("\n");
@@ -862,6 +867,24 @@ export async function setup(): Promise<void> {
   const settingsPath = `${home}/.claude/settings.json`;
   const hookDir = `${home}/.config/c0/hooks`;
   const scriptPath = (name: string) => `${hookDir}/${name}`;
+
+  // darwin has no cutover script (deploy/rebrand-cutover.sh targets the Linux
+  // host), so carry the pre-rebrand state dir across the rename here — before
+  // ensureUserConfig can mint a fresh default in the new location. Never on
+  // Linux: there the move belongs to the cutover script, which stops the
+  // csm-* units first so nothing writes to the dir mid-move.
+  if (process.platform === "darwin") {
+    const oldStateDir = `${home}/.config/csm`;
+    const { existsSync, renameSync } = await import("node:fs");
+    if (existsSync(oldStateDir)) {
+      if (!existsSync(PATHS.dir)) {
+        renameSync(oldStateDir, PATHS.dir);
+        console.log(`Migrated state: ${oldStateDir} → ${PATHS.dir}`);
+      } else {
+        console.log(`NOTE: both ${oldStateDir} and ${PATHS.dir} exist — state may be forked; merge or remove the old dir manually.`);
+      }
+    }
+  }
 
   const configCreated = await ensureUserConfig();
 

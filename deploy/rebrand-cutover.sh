@@ -31,11 +31,13 @@ existing_c0=$(command -v c0 || true)
 if [[ -n "$existing_c0" && "$existing_c0" != "$HOME/.local/bin/c0" ]]; then
   die "a different 'c0' is already on PATH: $existing_c0"
 fi
-# Personal dotfile lines invoking the old command keep failing after cutover
-# (setup only rewrites the Claude0-owned fragments, never personal content).
-for f in "$HOME/.tmux.conf" "$HOME/.zshrc"; do
-  hits=$(grep -n '\bcsm\b' "$f" 2>/dev/null | grep -v '\.config/csm' || true)
-  [[ -n "$hits" ]] && { note "WARNING: $f references 'csm' outside the managed import — review after cutover:"; printf '%s\n' "$hits"; }
+# Personal dotfile lines invoking the old command or the @csm_status tmux
+# option keep failing SILENTLY after cutover (setup only rewrites the
+# Claude0-owned fragments, never personal content). `csm_` catches option
+# names like @csm_status where \b\… can't (underscore is a word char).
+for f in "$HOME/.tmux.conf" "$HOME/.zshrc" "$HOME"/.config/tmux/*.conf; do
+  hits=$(grep -nE '\bcsm\b|csm_' "$f" 2>/dev/null | grep -v '\.config/csm' || true)
+  [[ -n "$hits" ]] && { note "WARNING: $f references 'csm' outside the managed import — update these after cutover (e.g. @csm_status → @claude0_status):"; printf '%s\n' "$hits"; }
 done
 # Anything still working inside the old repo path loses its cwd at the mv.
 live=""
@@ -90,8 +92,12 @@ step "backfill recorded paths"
 for f in "$NEW_CFG/resurrect-sessions.json" "$NEW_CFG"/panes/*; do
   [[ -f "$f" ]] && sed -i "s#$OLD_REPO#$NEW_REPO#g" "$f"
 done
-# The priority list may pin this repo by its old name.
-[[ -f "$NEW_CFG/config.json" ]] && sed -i 's/"csm"/"claude0"/g' "$NEW_CFG/config.json"
+# The priority list may pin this repo by its old name. Scoped with jq — a
+# blanket sed would rewrite any other string field that happens to be "csm".
+if [[ -f "$NEW_CFG/config.json" ]] && command -v jq >/dev/null; then
+  jq '(.repositories.priority // []) |= map(if . == "csm" then "claude0" else . end)' \
+    "$NEW_CFG/config.json" > "$NEW_CFG/config.json.tmp" && mv "$NEW_CFG/config.json.tmp" "$NEW_CFG/config.json"
+fi
 # inbox.db snapshot rows carry absolute repoPath. Live rows self-heal at the
 # next discovery tick, but pane-less parked/done rows are fact-preserved and
 # would resume into the dead path — rewrite in place while units are stopped.
@@ -130,6 +136,11 @@ step "bun install + c0 setup + claude0-* units"
 for u in "${NEW_UNITS[@]}" tmux.service snapshot-check.service snapshot-check.timer; do
   [[ -f "$NEW_REPO/deploy/units/$u" ]] && cp "$NEW_REPO/deploy/units/$u" "$UNIT_DIR/$u"
 done
+# claude0-bridge/daemon ExecStart %h/.bun/bin/c0 absolutely (systemd does not
+# PATH-resolve); provision created the old csm link there — swap it.
+mkdir -p "$HOME/.bun/bin"
+ln -sf "$NEW_REPO/bin/c0.ts" "$HOME/.bun/bin/c0"
+[[ -L "$HOME/.bun/bin/csm" ]] && rm -f "$HOME/.bun/bin/csm"
 systemctl --user daemon-reload
 for u in "${NEW_UNITS[@]}"; do
   systemctl --user enable --now "$u"
