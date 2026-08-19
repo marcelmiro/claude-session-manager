@@ -10,7 +10,7 @@
 import "../test/helpers/home";
 import { TEST_HOME } from "../test/helpers/home";
 import { test, expect, beforeEach } from "bun:test";
-import { mkdirSync, rmSync, writeFileSync, readFileSync, readlinkSync, existsSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync, readFileSync, readlinkSync, existsSync, symlinkSync } from "node:fs";
 import { setup, HOOK_VERSION } from "./cli";
 import { HOLD_WINDOW_MS } from "./core/approval";
 
@@ -147,6 +147,22 @@ test("zsh import is skipped when a dotfiles layer already sources the fragment",
   expect(zshrc).not.toContain("shell.zsh"); // sourced via common.zsh already
   // the tmux side has no aux import, so it still gets the entry-point line
   expect(readFileSync(`${TEST_HOME}/.tmux.conf`, "utf8")).toContain(".config/claude0/tmux.conf");
+});
+
+test("zsh import dedup sees a stow-symlinked aux file", async () => {
+  writeFileSync(`${TEST_HOME}/.zshrc`, "# user zsh config\n");
+  mkdirSync(`${TEST_HOME}/dotfiles`, { recursive: true });
+  writeFileSync(
+    `${TEST_HOME}/dotfiles/common.zsh`,
+    '[[ -r "$HOME/.config/claude0/shell.zsh" ]] && source "$HOME/.config/claude0/shell.zsh"\n',
+  );
+  mkdirSync(`${TEST_HOME}/.config/zsh`, { recursive: true });
+  symlinkSync(`${TEST_HOME}/dotfiles/common.zsh`, `${TEST_HOME}/.config/zsh/common.zsh`);
+
+  await setup();
+
+  const zshrc = readFileSync(`${TEST_HOME}/.zshrc`, "utf8");
+  expect(zshrc).not.toContain("shell.zsh"); // sourced via the symlinked common.zsh
 });
 
 test("running setup() twice leaves exactly one Claude0 entry per event and preserves user content", async () => {
