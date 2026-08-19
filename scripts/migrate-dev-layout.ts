@@ -355,9 +355,9 @@ async function rewriteKnownState(
   const mappings = allPathMappings(manifest);
   const files: string[] = [];
   const candidates = [
-    join(home, ".config", "c0", "config.json"),
-    join(home, ".config", "c0", "state.json"),
-    join(home, ".config", "c0", "events"),
+    join(home, ".config", "claude0", "config.json"),
+    join(home, ".config", "claude0", "state.json"),
+    join(home, ".config", "claude0", "events"),
     join(home, ".claude", "settings.json"),
     join(home, ".claude.json"),
     join(home, ".tmux", "resurrect", "last"),
@@ -412,7 +412,7 @@ async function applyManifest(manifestPath: string): Promise<void> {
   }
 
   const runId = new Date().toISOString().replace(/[:.]/g, "-");
-  const backupRoot = join(manifest.targetHome, ".config", "c0", "migrations", `${runId}-backup`);
+  const backupRoot = join(manifest.targetHome, ".config", "claude0", "migrations", `${runId}-backup`);
   await mkdir(backupRoot, { recursive: true });
   await mkdir(manifest.targetRoot, { recursive: true });
 
@@ -501,7 +501,7 @@ async function applyManifest(manifestPath: string): Promise<void> {
 }
 
 async function latestManifest(home: string): Promise<string | undefined> {
-  const root = join(home, ".config", "c0", "migrations");
+  const root = join(home, ".config", "claude0", "migrations");
   if (!(await isDirectory(root))) return undefined;
   const files = (await readdir(root)).filter((name) => name.endsWith("-manifest.json")).sort().reverse();
   return files[0] ? join(root, files[0]) : undefined;
@@ -528,7 +528,7 @@ async function main(): Promise<void> {
     const targetRoot = expandTilde(value(args, "--target-root") ?? join(targetHome, "dev"), targetHome);
     const manifest = await buildManifest({ sourceHome, targetHome, sourceRoot, targetRoot });
     const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-    const output = resolve(value(args, "--output") ?? join(sourceHome, ".config", "c0", "migrations", `${stamp}-manifest.json`));
+    const output = resolve(value(args, "--output") ?? join(sourceHome, ".config", "claude0", "migrations", `${stamp}-manifest.json`));
     await mkdir(dirname(output), { recursive: true });
     await writeFile(output, `${JSON.stringify(manifest, null, 2)}\n`);
     console.log(`Manifest: ${output}`);

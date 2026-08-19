@@ -3,7 +3,7 @@
 // skipWaiting/claim so an updated worker takes over on next launch instead of
 // iOS's lazy default (otherwise stale push handlers linger for days).
 
-const NAV_CACHE = "c0-nav";
+const NAV_CACHE = "claude0-nav";
 
 self.addEventListener("install", () => self.skipWaiting());
 self.addEventListener("activate", (event) => event.waitUntil(self.clients.claim()));
@@ -27,7 +27,7 @@ self.addEventListener("push", (event) => {
       // swallow the push entirely). The tag keeps the session id as a prefix for
       // tap attribution; the page splits on "|".
       const ts = Date.now();
-      const tag = `${sessionId || "c0"}|${ts}`;
+      const tag = `${sessionId || "claude0"}|${ts}`;
       await self.registration.showNotification(p.title || "portkey", {
         body: p.body || "",
         tag,

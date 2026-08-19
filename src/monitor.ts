@@ -31,7 +31,7 @@ import type { Session, AggregateStatus, PaneInfo, ClaudeProcess } from "./types"
 // Naming skip tracking — persistent across monitor invocations
 // ---------------------------------------------------------------------------
 
-const NAMING_SKIP_PATH = `${homedir()}/.config/c0/naming-skip.json`;
+const NAMING_SKIP_PATH = `${homedir()}/.config/claude0/naming-skip.json`;
 const NAMING_SKIP_TTL = 5 * 60_000; // 5 minutes
 
 type NamingSkipMap = Record<string, number>; // sessionId → timestamp
@@ -52,7 +52,7 @@ async function saveNamingSkips(skips: NamingSkipMap): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
-// Debug logging — only active when ~/.config/c0/debug.log exists
+// Debug logging — only active when ~/.config/claude0/debug.log exists
 // (shared logger in core/debug.ts; see debugLog import)
 // ---------------------------------------------------------------------------
 

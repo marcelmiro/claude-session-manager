@@ -49,7 +49,7 @@ const cmd = process.argv[2];
 
 async function runTerminal(args: string[]): Promise<never> {
   const home = process.env.HOME;
-  const installed = home ? `${home}/.config/c0/terminal-launcher` : "";
+  const installed = home ? `${home}/.config/claude0/terminal-launcher` : "";
   const bundled = `${import.meta.dir}/../config/terminal-launcher`;
   const command = installed && (await Bun.file(installed).exists())
     ? [installed, ...args]

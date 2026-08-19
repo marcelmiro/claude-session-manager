@@ -5,7 +5,7 @@ import type { Config } from "../types";
 
 // CLAUDE0_HOME overrides the home root (tests point it at a temp dir; bun's
 // os.homedir() ignores a runtime-set $HOME, so an env seam is the reliable hook).
-const CONFIG_DIR = `${process.env.CLAUDE0_HOME ?? homedir()}/.config/c0`;
+const CONFIG_DIR = `${process.env.CLAUDE0_HOME ?? homedir()}/.config/claude0`;
 
 export const PATHS = {
   dir: CONFIG_DIR,

@@ -1,6 +1,6 @@
 // Home helper FIRST so CLAUDE0_HOME is set before config.ts freezes PATHS.dir —
 // `liveScripts` now resolves verdicts through the persisted store, which must
-// land in the throwaway temp home rather than the real ~/.config/c0.
+// land in the throwaway temp home rather than the real ~/.config/claude0.
 import "../../test/helpers/home";
 import { CONFIG_DIR } from "../../test/helpers/home";
 import { describe, expect, test, beforeEach } from "bun:test";

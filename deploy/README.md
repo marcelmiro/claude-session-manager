@@ -54,7 +54,7 @@ The Linux host installs the explicit `common + linux` Stow profiles from the
 personal dotfiles repository. This imports the same tmux presentation, bindings,
 clipboard behavior, and TPM-managed plugins as macOS without linking macOS app
 configuration. `claude0 setup` owns and updates only its application fragments under
-`~/.config/c0/`.
+`~/.config/claude0/`.
 
 Mac-to-VM paste is terminal input, not a Linux clipboard operation: use `Cmd+V`
 in Ghostty. VM-to-Mac copy (including Claude0's Space→c) uses OSC 52. Ghostty needs

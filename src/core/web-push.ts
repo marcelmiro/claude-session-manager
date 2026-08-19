@@ -8,9 +8,9 @@
  *
  * State files (the monitor is a fresh process per tick — everything reads from
  * disk, nothing caches in memory):
- * - `~/.config/c0/push-vapid.json`      { publicKey: base64url raw P-256 point,
+ * - `~/.config/claude0/push-vapid.json`      { publicKey: base64url raw P-256 point,
  *                                          privateJwk: JsonWebKey }
- * - `~/.config/c0/push-subscriptions.json`  { [deviceId]: PushSubscriptionJSON }
+ * - `~/.config/claude0/push-subscriptions.json`  { [deviceId]: PushSubscriptionJSON }
  *
  * The RFC 8291 §5 test vector fixes the salt and the "ephemeral" sender keypair,
  * so `encryptPayload` accepts both as an optional seam; production callers omit

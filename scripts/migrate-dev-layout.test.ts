@@ -61,14 +61,14 @@ describe("dev-layout migration path handling", () => {
     const oldProjectDir = join(sourceHome, ".claude", "projects", oldProjectName);
     mkdirSync(oldProjectDir, { recursive: true });
     writeFileSync(join(oldProjectDir, "session.jsonl"), `${JSON.stringify({ cwd: worktree })}\n`);
-    mkdirSync(join(sourceHome, ".config", "c0", "migrations"), { recursive: true });
-    writeFileSync(join(sourceHome, ".config", "c0", "config.json"), '{"repositories":{"roots":["~/Documents"]}}\n');
+    mkdirSync(join(sourceHome, ".config", "claude0", "migrations"), { recursive: true });
+    writeFileSync(join(sourceHome, ".config", "claude0", "config.json"), '{"repositories":{"roots":["~/Documents"]}}\n');
     mkdirSync(join(sourceHome, ".local", "bin"), { recursive: true });
     symlinkSync(join(repo, "bin", "tool"), join(sourceHome, ".local", "bin", "tool"));
 
     const manifest = await buildManifest({ sourceHome, targetHome, sourceRoot, targetRoot });
     expect(manifest.blockers).toEqual([]);
-    const manifestRelative = join(".config", "c0", "migrations", "test-manifest.json");
+    const manifestRelative = join(".config", "claude0", "migrations", "test-manifest.json");
     writeFileSync(join(sourceHome, manifestRelative), `${JSON.stringify(manifest, null, 2)}\n`);
     renameSync(sourceHome, targetHome); // what the OS account rename does to the home tree
 
@@ -88,7 +88,7 @@ describe("dev-layout migration path handling", () => {
     expect(runGit(finalWorktree, "rev-parse", "--show-toplevel").trim()).toBe(finalWorktree);
     expect(runGit(finalRepo, "worktree", "list", "--porcelain")).toContain(`worktree ${finalWorktree}`);
     expect(readFileSync(join(finalRepo, ".git", "info", "exclude"), "utf8")).toContain("/.claude/worktrees/");
-    expect(readFileSync(join(targetHome, ".config", "c0", "config.json"), "utf8")).toContain('"~/dev"');
+    expect(readFileSync(join(targetHome, ".config", "claude0", "config.json"), "utf8")).toContain('"~/dev"');
 
     const finalProjectDir = join(targetHome, ".claude", "projects", encodeClaudeProjectPath(finalWorktree));
     expect(readFileSync(join(finalProjectDir, "session.jsonl"), "utf8")).toContain(finalWorktree);
@@ -118,11 +118,11 @@ describe("dev-layout migration path handling", () => {
     const oldProjectDir = join(sourceHome, ".claude", "projects", oldProjectName);
     mkdirSync(oldProjectDir, { recursive: true });
     writeFileSync(join(oldProjectDir, "session.jsonl"), `${JSON.stringify({ cwd: worktree })}\n`);
-    mkdirSync(join(sourceHome, ".config", "c0", "migrations"), { recursive: true });
+    mkdirSync(join(sourceHome, ".config", "claude0", "migrations"), { recursive: true });
 
     const manifest = await buildManifest({ sourceHome, targetHome, sourceRoot, targetRoot });
     expect(manifest.blockers).toEqual([]);
-    const manifestRelative = join(".config", "c0", "migrations", "home-only-manifest.json");
+    const manifestRelative = join(".config", "claude0", "migrations", "home-only-manifest.json");
     writeFileSync(join(sourceHome, manifestRelative), `${JSON.stringify(manifest, null, 2)}\n`);
     renameSync(sourceHome, targetHome);
 

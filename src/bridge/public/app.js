@@ -22,10 +22,10 @@ const html = htm.bind(h);
 // pushes only to that device (and only while it isn't watching live via SSE).
 const DEVICE_ID = (() => {
   try {
-    let id = localStorage.getItem("c0-device");
+    let id = localStorage.getItem("claude0-device");
     if (!id) {
       id = crypto.randomUUID();
-      localStorage.setItem("c0-device", id);
+      localStorage.setItem("claude0-device", id);
     }
     return id;
   } catch {
@@ -39,7 +39,7 @@ const DEVICE_ID = (() => {
 const rawFetch = window.fetch.bind(window);
 window.fetch = (input, init = {}) => {
   const headers = new Headers(init.headers || {});
-  headers.set("x-c0-device", DEVICE_ID);
+  headers.set("x-claude0-device", DEVICE_ID);
   return rawFetch(input, { ...init, headers });
 };
 
@@ -108,7 +108,7 @@ const tick = signal(Date.now());
 const viewMode = signal(
   (() => {
     try {
-      return localStorage.getItem("c0-view") || "inbox";
+      return localStorage.getItem("claude0-view") || "inbox";
     } catch {
       return "inbox";
     }
@@ -117,7 +117,7 @@ const viewMode = signal(
 function toggleView() {
   viewMode.value = viewMode.value === "inbox" ? "classic" : "inbox";
   try {
-    localStorage.setItem("c0-view", viewMode.value);
+    localStorage.setItem("claude0-view", viewMode.value);
   } catch {
     /* private mode — the toggle still works for this page's life */
   }
@@ -327,7 +327,7 @@ async function refreshSessions() {
     // Persist for the next cold open (iOS evicts the page constantly): boot hydrates
     // from this so reopening paints the list instantly instead of a spinner.
     try {
-      localStorage.setItem("c0-sessions", JSON.stringify(sessions.value));
+      localStorage.setItem("claude0-sessions", JSON.stringify(sessions.value));
     } catch {
       /* private mode / quota — persistence is best-effort */
     }
@@ -2348,7 +2348,7 @@ function RunningTool({ tool }) {
 // unsent text. Written from syncHasText — the one choke point every el.value
 // mutation already calls — so sending (value → "") clears the entry for free.
 // Best-effort: storage failures are swallowed. Bounded to the newest 20 sessions.
-const DRAFTS_KEY = "c0-drafts";
+const DRAFTS_KEY = "claude0-drafts";
 function readDrafts() {
   try {
     return JSON.parse(localStorage.getItem(DRAFTS_KEY)) || {};
@@ -4301,7 +4301,7 @@ function applyDeepLink() {
 async function takeStashedTap() {
   if (!("caches" in self)) return null;
   try {
-    const cache = await caches.open("c0-nav");
+    const cache = await caches.open("claude0-nav");
     const res = await cache.match("pending");
     if (!res) return null;
     await cache.delete("pending");
@@ -4366,7 +4366,7 @@ async function followNotificationTap() {
 // the last-persisted list immediately and let the auth probe below reconcile: a fresh
 // snapshot replaces it in place, and a 401 flips authed → the login screen as before.
 try {
-  const saved = JSON.parse(localStorage.getItem("c0-sessions") || "null");
+  const saved = JSON.parse(localStorage.getItem("claude0-sessions") || "null");
   if (Array.isArray(saved) && saved.length) {
     sessions.value = saved;
     authed.value = true;

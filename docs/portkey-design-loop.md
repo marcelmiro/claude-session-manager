@@ -39,7 +39,7 @@ touching real sessions. Verified 2026-08-18 on the Linux VM host (Chrome at
 ## Real-data variant
 
 Same tool against `http://127.0.0.1:8473` with the token from
-`~/.config/c0/bridge.env` — read-only discipline: screenshots and opens are
+`~/.config/claude0/bridge.env` — read-only discipline: screenshots and opens are
 fine; never tap approve/archive/send there.
 
 `bun run shoot` captures the fixture screens headlessly

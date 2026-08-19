@@ -249,7 +249,7 @@ elif [[ "$PHASE" == "finish" ]]; then
   step "Restart the Mac once more and confirm marcel can unlock FileVault and log in."
   step "Resume one pre-migration Claude session and confirm its transcript continues."
   step "Only then remove Migration Admin. Keep its home only if it holds recovery data."
-  step "Keep ~/.config/c0/migrations/*-backup until the next normal backup cycle succeeds."
+  step "Keep ~/.config/claude0/migrations/*-backup until the next normal backup cycle succeeds."
   finish
 else
   printf 'Usage: %s [prepare|finish]\\n' "$0" >&2

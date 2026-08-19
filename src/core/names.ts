@@ -3,7 +3,7 @@ import { homedir } from "os";
 // Config root honors the CLAUDE0_HOME test seam (matches config.ts); unset in prod → real home.
 const CLAUDE0_ROOT = process.env.CLAUDE0_HOME ?? homedir();
 
-const NAMING_LOCK = `${CLAUDE0_ROOT}/.config/c0/naming.lock`;
+const NAMING_LOCK = `${CLAUDE0_ROOT}/.config/claude0/naming.lock`;
 
 /** Resolve the full path to `claude` CLI, searching common install locations beyond PATH. */
 function resolveClaudePath(): string {
@@ -166,7 +166,7 @@ export function deslugify(slug: string): string {
     .join(" ");
 }
 
-const CACHE_PATH = `${CLAUDE0_ROOT}/.config/c0/names.json`;
+const CACHE_PATH = `${CLAUDE0_ROOT}/.config/claude0/names.json`;
 
 /**
  * Extract a meaningful title from structured prompts like:

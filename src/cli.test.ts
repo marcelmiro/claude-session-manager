@@ -16,7 +16,7 @@ import { HOLD_WINDOW_MS } from "./core/approval";
 
 const claudeDir = `${TEST_HOME}/.claude`;
 const settingsPath = `${claudeDir}/settings.json`;
-const configDir = `${TEST_HOME}/.config/c0`;
+const configDir = `${TEST_HOME}/.config/claude0`;
 const hooksDir = `${configDir}/hooks`;
 const EVENTS = [
   "SessionStart",
@@ -72,8 +72,8 @@ test("setup installs Claude0-owned terminal fragments and imports them idempoten
   const tmux = readFileSync(`${TEST_HOME}/.tmux.conf`, "utf8");
   expect(zshrc).toContain("# user zsh config");
   expect(tmux).toContain("# user tmux config");
-  expect(zshrc.match(/\.config\/c0\/shell\.zsh/g)).toHaveLength(2); // test + source in one import line
-  expect(tmux.match(/\.config\/c0\/tmux\.conf/g)).toHaveLength(2); // test + source in one import line
+  expect(zshrc.match(/\.config\/claude0\/shell\.zsh/g)).toHaveLength(2); // test + source in one import line
+  expect(tmux.match(/\.config\/claude0\/tmux\.conf/g)).toHaveLength(2); // test + source in one import line
 });
 
 test("setup migrates terminal sidecars before retiring them", async () => {
@@ -88,7 +88,7 @@ test("setup migrates terminal sidecars before retiring them", async () => {
   expect(config.terminal).toMatchObject({ defaultTarget: "remote", remoteHost: "vm.example.ts.net" });
   expect(existsSync(`${configDir}/terminal-mode`)).toBe(false);
   expect(existsSync(`${configDir}/remote-host`)).toBe(false);
-  expect(readFileSync(`${configDir}/terminal-launcher`, "utf8")).toContain('config_file="$HOME/.config/c0/config.json"');
+  expect(readFileSync(`${configDir}/terminal-launcher`, "utf8")).toContain('config_file="$HOME/.config/claude0/config.json"');
 });
 
 /** Count Claude0 registrations (command points into the Claude0 hooks dir) for an event. */

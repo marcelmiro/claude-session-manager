@@ -74,8 +74,8 @@ it at login. It binds loopback; `tailscale serve` (step 2) still fronts it.
   <key>WorkingDirectory</key><string>/Users/&lt;you&gt;/dev/claude0</string>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
-  <key>StandardOutPath</key><string>/Users/&lt;you&gt;/.config/c0/bridge.log</string>
-  <key>StandardErrorPath</key><string>/Users/&lt;you&gt;/.config/c0/bridge.log</string>
+  <key>StandardOutPath</key><string>/Users/&lt;you&gt;/.config/claude0/bridge.log</string>
+  <key>StandardErrorPath</key><string>/Users/&lt;you&gt;/.config/claude0/bridge.log</string>
 </dict>
 </plist>
 ```
@@ -85,7 +85,7 @@ chmod 600 ~/Library/LaunchAgents/com.claude0.bridge.plist
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.claude0.bridge.plist  # load + start
 launchctl kickstart -k gui/$(id -u)/com.claude0.bridge                            # restart (after a code edit)
 launchctl bootout gui/$(id -u)/com.claude0.bridge                                 # stop + unload
-tail -f ~/.config/c0/bridge.log                                              # logs
+tail -f ~/.config/claude0/bridge.log                                              # logs
 ```
 
 Editing bridge source still requires a restart — the server loads its modules at launch —

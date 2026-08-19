@@ -1626,7 +1626,7 @@ Promise.all([loadNameCache(), loadConfig(), loadPaneSessions()]).then(([cache, c
   // Seed pane→sessionId cache from disk (persisted by monitor)
   seedPaneSessionCache(paneSessions);
   // Nudge: flash a message if the SessionStart hook is missing or outdated
-  const hookPath = `${homedir()}/.config/c0/hooks/session-start.sh`;
+  const hookPath = `${homedir()}/.config/claude0/hooks/session-start.sh`;
   let needsSetup = !existsSync(hookPath);
   if (!needsSetup) {
     try {

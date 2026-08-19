@@ -7,7 +7,7 @@
 set -euo pipefail
 
 OLD_CFG="$HOME/.config/csm"
-NEW_CFG="$HOME/.config/c0"
+NEW_CFG="$HOME/.config/claude0"
 OLD_REPO="$HOME/dev/csm"
 NEW_REPO="$HOME/dev/claude0"
 UNIT_DIR="$HOME/.config/systemd/user"
@@ -119,7 +119,7 @@ fi
 if [[ -f "$NEW_CFG/inbox.db" ]]; then
   (cd "$NEW_REPO" && bun -e '
     const { Database } = require("bun:sqlite");
-    const db = new Database(process.env.HOME + "/.config/c0/inbox.db");
+    const db = new Database(process.env.HOME + "/.config/claude0/inbox.db");
     const rows = db.query("SELECT session_id, data FROM snapshot").all();
     const upd = db.prepare("UPDATE snapshot SET data = ? WHERE session_id = ?");
     let n = 0;
@@ -147,7 +147,7 @@ for f in "$HOME/.tmux.conf" "$HOME/.zshrc"; do
     -e '/^# CSM integration (managed by csm setup)$/d' "$f"
 done
 # Deregister the pre-rebrand Claude hooks — their scripts rode the state-dir
-# move, and `claude0 setup` registers the ~/.config/c0 set fresh.
+# move, and `claude0 setup` registers the ~/.config/claude0 set fresh.
 SETTINGS="$HOME/.claude/settings.json"
 if [[ -f "$SETTINGS" ]]; then
   # Keep the FIRST run's backup — a resume must not overwrite the true

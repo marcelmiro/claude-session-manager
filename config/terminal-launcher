@@ -5,13 +5,13 @@
 PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$HOME/.bun/bin:/usr/bin:/bin:${PATH:-}"
 export PATH
 
-config_file="$HOME/.config/c0/config.json"
+config_file="$HOME/.config/claude0/config.json"
 
 usage() {
   cat <<'EOF'
 Usage: claude0 terminal [local|remote|status]
 
-With no argument, uses terminal.defaultTarget from ~/.config/c0/config.json.
+With no argument, uses terminal.defaultTarget from ~/.config/claude0/config.json.
 Edit the file shown by: claude0 config
 EOF
 }

@@ -68,10 +68,10 @@ On the Mac (VM reachable as `vm` over Tailscale):
 
 ```sh
 launchctl bootout gui/$UID/com.claude0.daemon                             # stop the inbox daemon first (also teardown, below)
-sqlite3 ~/.config/c0/inbox.db "PRAGMA wal_checkpoint(TRUNCATE);"     # fold WAL into the db file before copying it
+sqlite3 ~/.config/claude0/inbox.db "PRAGMA wal_checkpoint(TRUNCATE);"     # fold WAL into the db file before copying it
 rsync -a --info=progress2 ~/dev/ vm:dev/                              # flat repos; worktrees travel inside each base repo
 rsync -a ~/.claude/projects/ vm:.claude/projects/                     # transcripts resolve as-is
-scp ~/.config/c0/config.json ~/.config/c0/names.json ~/.config/c0/push-vapid.json ~/.config/c0/inbox.db vm:.config/c0/
+scp ~/.config/claude0/config.json ~/.config/claude0/names.json ~/.config/claude0/push-vapid.json ~/.config/claude0/inbox.db vm:.config/claude0/
 ```
 
 `inbox.db` carries the authored inbox state — open snoozes, block notes, the
@@ -113,7 +113,7 @@ clipboard), **7** (phone lists sessions, resume works, push round-trips).
   stop the monitor, and boot out the inbox daemon (`launchctl bootout
   gui/$UID/com.claude0.daemon` + delete `~/Library/LaunchAgents/com.claude0.daemon.plist`
   — two daemons against two tmux servers means two divergent inboxes). Leave
-  `~/.config/c0` and repos in place as the rollback seed.
+  `~/.config/claude0` and repos in place as the rollback seed.
 - Flip CLAUDE.md's "Bridge restarts" section to the systemd procedure
   (`systemctl --user restart claude0-bridge`, log: `journalctl --user -u claude0-bridge`),
   keeping the darwin procedure as a footnote (ADR 16).
@@ -122,7 +122,7 @@ clipboard), **7** (phone lists sessions, resume works, push round-trips).
 
 Stop VM units → restart Mac monitor/bridge (old instructions) → reinstall the PWA
 at the Mac origin → rsync back only `~/.claude/projects/` deltas for sessions
-touched on the VM. The Mac's untouched `~/.config/c0` does the rest. After the
+touched on the VM. The Mac's untouched `~/.config/claude0` does the rest. After the
 window, restore from the VM's EBS snapshots instead (the DLM schedules in
 `aws/dlm-policies.sh`).
 
@@ -139,7 +139,7 @@ deploy/rebrand-cutover.sh
 The script is idempotent — each step checks current state, so a partial failure
 is resumed by re-running it. It: backs up `~/.config/csm` to
 `~/claude0-cutover-backup.tgz` → stops and removes the `csm-*` units → moves the
-state dir to `~/.config/c0` (renaming the `CSM_BRIDGE_*` keys in `bridge.env`) →
+state dir to `~/.config/claude0` (renaming the `CSM_BRIDGE_*` keys in `bridge.env`) →
 renames `~/dev/csm` to `~/dev/claude0` (with `git worktree repair` and the
 remote re-pointed at `claude0`) → rewrites recorded absolute paths
 (resurrect map, pane files, `inbox.db` snapshot rows, `~/.claude/projects` dirs)
@@ -161,10 +161,10 @@ the token once and silently resubscribes to push on its next PWA launch.
 ```sh
 launchctl bootout "gui/$(id -u)/com.csm.daemon" 2>/dev/null || true
 rm -f ~/Library/LaunchAgents/com.csm.daemon.plist
-# A prior c0 run may already have minted ~/.config/c0 — mv would then NEST the
-# old dir inside it as ~/.config/c0/csm and strand all pre-rebrand state.
-[ -e ~/.config/c0 ] && echo 'NOTE: ~/.config/c0 already exists — merge from ~/.config/csm by hand' \
-  || mv ~/.config/csm ~/.config/c0
+# A prior c0 run may already have minted ~/.config/claude0 — mv would then NEST the
+# old dir inside it as ~/.config/claude0/csm and strand all pre-rebrand state.
+[ -e ~/.config/claude0 ] && echo 'NOTE: ~/.config/claude0 already exists — merge from ~/.config/csm by hand' \
+  || mv ~/.config/csm ~/.config/claude0
 rm -f ~/.local/bin/csm ~/.local/bin/csm-terminal
 # Deregister the pre-rebrand hooks — their scripts rode the mv, so every
 # Claude lifecycle event would otherwise fire a nonexistent command forever.

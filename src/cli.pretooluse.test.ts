@@ -17,17 +17,17 @@ import { test, expect, beforeAll } from "bun:test";
 import { mkdirSync, rmSync, writeFileSync, readFileSync, existsSync, chmodSync } from "node:fs";
 import { setup } from "./cli";
 
-const hookPath = `${TEST_HOME}/.config/c0/hooks/pretooluse.sh`;
+const hookPath = `${TEST_HOME}/.config/claude0/hooks/pretooluse.sh`;
 const stubBin = `${TEST_HOME}/stub-bin`;
-const decisionsDir = `${TEST_HOME}/.config/c0/decisions`;
-const pendingDir = `${TEST_HOME}/.config/c0/pending`;
+const decisionsDir = `${TEST_HOME}/.config/claude0/decisions`;
+const pendingDir = `${TEST_HOME}/.config/claude0/pending`;
 
 beforeAll(async () => {
   // TEST_HOME persists between runs and `setup()` only rewrites a script when the
   // installed HOOK_VERSION is older — so without this the suite can assert against a
   // stale script from a previous run and miss an edit to the template.
   rmSync(hookPath, { force: true });
-  await setup(); // writes the real pretooluse.sh under TEST_HOME/.config/c0/hooks
+  await setup(); // writes the real pretooluse.sh under TEST_HOME/.config/claude0/hooks
 
   // Stub `tmux`. Default is a detached session: a session name exists
   // (display-message) but no client is attached (list-clients prints nothing).
@@ -61,7 +61,7 @@ async function runHook(
 ): Promise<HookResult> {
   const sessionId = (payload as any).session_id;
   rmSync(`${pendingDir}/${sessionId}.json`, { force: true });
-  const consumerMarker = `${TEST_HOME}/.config/c0/bridge-consumer`;
+  const consumerMarker = `${TEST_HOME}/.config/claude0/bridge-consumer`;
   if (opts.phoneWatching === false) rmSync(consumerMarker, { force: true });
   else writeFileSync(consumerMarker, "");
   const proc = Bun.spawn(["bash", hookPath], {
@@ -186,7 +186,7 @@ test("the blocked hook stamps its OWN pid on the marker (readers probe it for li
   const sid = "itest-pid";
   rmSync(`${decisionsDir}/${sid}.json`, { force: true });
   rmSync(`${pendingDir}/${sid}.json`, { force: true });
-  writeFileSync(`${TEST_HOME}/.config/c0/bridge-consumer`, ""); // fresh marker — the hold branch needs a watching phone
+  writeFileSync(`${TEST_HOME}/.config/claude0/bridge-consumer`, ""); // fresh marker — the hold branch needs a watching phone
   const payload = base({ tool_name: "Bash", session_id: sid, tool_input: { command: "echo hi" } });
   const proc = Bun.spawn(["bash", hookPath], {
     stdin: Buffer.from(JSON.stringify(payload)),

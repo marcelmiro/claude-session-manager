@@ -23,5 +23,5 @@ export const TEST_HOME = join(tmpdir(), "c0-test-home");
 process.env.CLAUDE0_HOME = TEST_HOME;
 mkdirSync(TEST_HOME, { recursive: true });
 
-/** `~/.config/c0` under the redirected home (matches `PATHS.dir`). */
-export const CONFIG_DIR = join(TEST_HOME, ".config", "c0");
+/** `~/.config/claude0` under the redirected home (matches `PATHS.dir`). */
+export const CONFIG_DIR = join(TEST_HOME, ".config", "claude0");

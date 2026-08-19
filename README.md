@@ -26,9 +26,9 @@ claude0 setup
 Claude0-owned extensions at:
 
 ```text
-~/.config/c0/tmux.conf
-~/.config/c0/shell.zsh
-~/.config/c0/terminal-launcher  # private transport implementation
+~/.config/claude0/tmux.conf
+~/.config/claude0/shell.zsh
+~/.config/claude0/terminal-launcher  # private transport implementation
 ~/.local/bin/c0
 ```
 
@@ -65,7 +65,7 @@ scripts/migrate-dev-layout-wizard.sh prepare
 
 The wizard resumes from `~/dev/claude0` with `finish` after the required macOS
 logout. Each apply phase keeps path-state backups under
-`~/.config/c0/migrations/`. See
+`~/.config/claude0/migrations/`. See
 [ADR 17](docs/adr/0017-user-centric-development-layout.md) for the invariants.
 
 ## One user config
@@ -105,7 +105,7 @@ through to a local login shell:
 ```
 
 Remote mode requires Mosh on both machines. Hostname, mode, and session choices
-are fields in the machine-local `~/.config/c0/config.json`, never committed to dotfiles.
+are fields in the machine-local `~/.config/claude0/config.json`, never committed to dotfiles.
 The remote Mosh server keeps a reconnect window of 30 days so ordinary laptop
 sleep, roaming, and travel do not strand an open terminal.
 

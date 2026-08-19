@@ -487,7 +487,7 @@ SESSION_ID=$(echo "$INPUT" | grep -o '"session_id":"[^"]*"' | head -1 | cut -d'"
 # the active pane, not the pane running this Claude session.
 PANE_ID="$TMUX_PANE"
 if [ -n "$SESSION_ID" ] && [ -n "$PANE_ID" ]; then
-  D=~/.config/c0/panes
+  D=~/.config/claude0/panes
   mkdir -p "$D"
   printf '%s' "$SESSION_ID" > "$D/$PANE_ID.tmp" && mv "$D/$PANE_ID.tmp" "$D/$PANE_ID"
 fi
@@ -505,7 +505,7 @@ const LOG_EVENT_SNIPPET = `INPUT=$(cat)
 # the value either way. session-start.sh keeps its proven compact-only pattern.
 SESSION_ID=$(printf '%s' "$INPUT" | grep -oE '"session_id"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | cut -d'"' -f4)
 if [ -n "$SESSION_ID" ]; then
-  DIR=~/.config/c0/events
+  DIR=~/.config/claude0/events
   mkdir -p "$DIR"
   F="$DIR/$SESSION_ID.jsonl"
   LINE=$(printf '%s' "$INPUT" | tr '\\n' ' ')
@@ -587,7 +587,7 @@ fi
 # portkey is open: hold for it. Stale/absent → nobody can answer a hold; fall
 # through so the desk prompt renders and flips status to waiting, which is what
 # fires the Web Push to the phone (a held call reads as running and never pushes).
-M="\$HOME/.config/c0/bridge-consumer"
+M="\$HOME/.config/claude0/bridge-consumer"
 MT=$(stat -c %Y "\$M" 2>/dev/null || stat -f %m "\$M" 2>/dev/null || echo 0)
 case "\$MT" in ''|*[!0-9]*) MT=0 ;; esac
 if [ "\$MT" = 0 ] || [ \$(( \$(date +%s) - MT )) -ge ${CONSUMER_FRESH_S} ]; then exit 0; fi
@@ -605,8 +605,8 @@ case "\$TOOL" in
 esac
 
 TS=$(( $(date +%s) * 1000 ))
-PDIR=~/.config/c0/pending
-DFILE=~/.config/c0/decisions/"\$SESSION_ID".json
+PDIR=~/.config/claude0/pending
+DFILE=~/.config/claude0/decisions/"\$SESSION_ID".json
 mkdir -p "\$PDIR"
 # \$\$ stamps the poller's pid: readers treat a marker whose process is gone as abandoned
 # (killed hook) and drive the on-screen prompt instead of writing a decision nobody reads.
@@ -660,10 +660,10 @@ SESS=$(tmux display-message -p -t "\$TMUX_PANE" '#{session_name}' 2>/dev/null)
 [ -z "\$SESS" ] && exit 0
 
 # 1. Claude0-tracked pane (rules out an ad-hoc bare-terminal claude).
-[ -f "\$HOME/.config/c0/panes/\$TMUX_PANE" ] || exit 0
+[ -f "\$HOME/.config/claude0/panes/\$TMUX_PANE" ] || exit 0
 # 2. Live bridge consumer: marker mtime <=${CONSUMER_FRESH_S}s (tolerates one missed 15s heartbeat).
 #    Stale/absent → nobody can answer → native widget, no long stall.
-M="\$HOME/.config/c0/bridge-consumer"
+M="\$HOME/.config/claude0/bridge-consumer"
 MT=$(stat -c %Y "\$M" 2>/dev/null || stat -f %m "\$M" 2>/dev/null || echo 0)
 if [ "\$MT" = 0 ] || [ $(( $(date +%s) - MT )) -ge ${CONSUMER_FRESH_S} ]; then exit 0; fi
 # 3. Focus (three-part): active window + attached client (cheap tmux), and only then
@@ -699,7 +699,7 @@ printf '%s' "\$INPUT" | claude0 question-hook
 exit \$?
 `;
 
-/** Hook scripts Claude0 installs under ~/.config/c0/hooks. */
+/** Hook scripts Claude0 installs under ~/.config/claude0/hooks. */
 const HOOK_SCRIPTS = [
   { name: "session-start.sh", content: HOOK_SCRIPT },
   { name: "event.sh", content: EVENT_HOOK_SCRIPT },
@@ -741,8 +741,8 @@ const HOOK_REGISTRATIONS: { event: string; script: string; matcher?: string; tim
   },
 ];
 
-const TMUX_SOURCE_LINE = "if-shell 'test -f ~/.config/c0/tmux.conf' 'source-file ~/.config/c0/tmux.conf' ''";
-const ZSH_SOURCE_LINE = '[[ -r "$HOME/.config/c0/shell.zsh" ]] && source "$HOME/.config/c0/shell.zsh"';
+const TMUX_SOURCE_LINE = "if-shell 'test -f ~/.config/claude0/tmux.conf' 'source-file ~/.config/claude0/tmux.conf' ''";
+const ZSH_SOURCE_LINE = '[[ -r "$HOME/.config/claude0/shell.zsh" ]] && source "$HOME/.config/claude0/shell.zsh"';
 
 /**
  * Install the Claude0-owned terminal profile and add one import to the user's base
@@ -752,9 +752,9 @@ const ZSH_SOURCE_LINE = '[[ -r "$HOME/.config/c0/shell.zsh" ]] && source "$HOME/
 async function installTerminalIntegration(home: string): Promise<string[]> {
   const configDir = `${import.meta.dir}/../config`;
   const files = [
-    { source: `${configDir}/tmux.conf`, target: `${home}/.config/c0/tmux.conf`, executable: false },
-    { source: `${configDir}/shell.zsh`, target: `${home}/.config/c0/shell.zsh`, executable: false },
-    { source: `${configDir}/terminal-launcher`, target: `${home}/.config/c0/terminal-launcher`, executable: true },
+    { source: `${configDir}/tmux.conf`, target: `${home}/.config/claude0/tmux.conf`, executable: false },
+    { source: `${configDir}/shell.zsh`, target: `${home}/.config/claude0/shell.zsh`, executable: false },
+    { source: `${configDir}/terminal-launcher`, target: `${home}/.config/claude0/terminal-launcher`, executable: true },
   ];
   const changed: string[] = [];
 
@@ -804,7 +804,7 @@ async function installTerminalIntegration(home: string): Promise<string[]> {
   // test seam and must never touch the developer's real tmux server.
   if (!process.env.CLAUDE0_HOME && Bun.which("tmux")) {
     await Bun.$`tmux has-session`.quiet().nothrow().then(async (result) => {
-      if (result.exitCode === 0) await Bun.$`tmux source-file ${home}/.config/c0/tmux.conf`.quiet();
+      if (result.exitCode === 0) await Bun.$`tmux source-file ${home}/.config/claude0/tmux.conf`.quiet();
     });
   }
 
@@ -833,7 +833,7 @@ export async function setup(): Promise<void> {
   const { homedir } = await import("os");
   const home = process.env.CLAUDE0_HOME ?? homedir(); // CLAUDE0_HOME: test seam (see config.ts)
   const settingsPath = `${home}/.claude/settings.json`;
-  const hookDir = `${home}/.config/c0/hooks`;
+  const hookDir = `${home}/.config/claude0/hooks`;
   const scriptPath = (name: string) => `${hookDir}/${name}`;
 
   const configCreated = await ensureUserConfig();
@@ -959,9 +959,9 @@ export async function setup(): Promise<void> {
 
   if (integrationChanged.length > 0) {
     console.log("Claude0 terminal integration installed.");
-    console.log(`  Profile: ${home}/.config/c0/{tmux.conf,shell.zsh}`);
+    console.log(`  Profile: ${home}/.config/claude0/{tmux.conf,shell.zsh}`);
     console.log(`  Command: ${home}/.local/bin/c0`);
-    console.log(`  Launcher: ${home}/.config/c0/terminal-launcher`);
+    console.log(`  Launcher: ${home}/.config/claude0/terminal-launcher`);
   }
 
   if (configCreated) console.log(`Claude0 config created: ${PATHS.config}`);
@@ -997,7 +997,7 @@ async function installDaemonAgent(home: string): Promise<"installed" | "updated"
   // versioned Cellar binary, which a brew upgrade deletes — silently killing
   // the daemon that snoozes depend on.
   const bunBin = Bun.which("bun") ?? process.execPath;
-  const logPath = `${home}/.config/c0/daemon.log`;
+  const logPath = `${home}/.config/claude0/daemon.log`;
   const plist = `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">

@@ -175,10 +175,10 @@ if [ -d /run/systemd/system ]; then
   done
 
   # Bridge token: generated once, consumed by claude0-bridge.service via EnvironmentFile.
-  BRIDGE_ENV="$HOME/.config/c0/bridge.env"
+  BRIDGE_ENV="$HOME/.config/claude0/bridge.env"
   if [ ! -f "$BRIDGE_ENV" ]; then
     note "minting bridge token → $BRIDGE_ENV"
-    mkdir -p "$HOME/.config/c0"
+    mkdir -p "$HOME/.config/claude0"
     printf 'CLAUDE0_BRIDGE_TOKEN=%s\n' "$(head -c 32 /dev/urandom | base64 | tr -dc 'a-zA-Z0-9' | head -c 43)" > "$BRIDGE_ENV"
     chmod 600 "$BRIDGE_ENV"
   fi
