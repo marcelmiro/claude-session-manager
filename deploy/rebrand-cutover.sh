@@ -28,8 +28,11 @@ if [[ -d "$OLD_REPO/.git" ]]; then
   git -C "$OLD_REPO" diff --quiet && git -C "$OLD_REPO" diff --cached --quiet \
     || die "uncommitted changes in $OLD_REPO — commit or stash first"
 fi
+# Both paths are ours: setup installs ~/.local/bin/c0, step 6 installs
+# ~/.bun/bin/c0 (the units' ExecStart) — a re-run resuming past step 6 must
+# not die on its own link.
 existing_c0=$(command -v c0 || true)
-if [[ -n "$existing_c0" && "$existing_c0" != "$HOME/.local/bin/c0" ]]; then
+if [[ -n "$existing_c0" && "$existing_c0" != "$HOME/.local/bin/c0" && "$existing_c0" != "$HOME/.bun/bin/c0" ]]; then
   die "a different 'c0' is already on PATH: $existing_c0"
 fi
 # Personal dotfile lines invoking the old command or the @csm_status tmux
