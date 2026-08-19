@@ -36,7 +36,7 @@ import type { Session } from "../types";
 export interface DiscoverySeen {
   status: Session["status"];
   live: boolean;
-  /** Pending approval/question or unread ⚡ — the classic list's reachability safeguard. */
+  /** Pending approval/question or unread ⚡ — files a newborn under Needs You. */
   needsYou: boolean;
   /**
    * Stable age anchor for a newborn row (the session's last turn). Must not

@@ -106,27 +106,8 @@ const filesView = signal(false); // full changed-files list pushed over the deta
 // replaced `sessions`, so on a quiet list a row sat at "2m" for an hour. Ticking a
 // signal re-renders them on their own; paused while hidden and resynced on resume.
 const tick = signal(Date.now());
-// Home view during the inbox rollout: "inbox" (lifecycle sections, ADR 0013) or
-// "classic" (the pre-inbox repo-grouped list). Persisted; toggled from the list header.
-const viewMode = signal(
-  (() => {
-    try {
-      return localStorage.getItem("claude0-view") || "inbox";
-    } catch {
-      return "inbox";
-    }
-  })(),
-);
-function toggleView() {
-  viewMode.value = viewMode.value === "inbox" ? "classic" : "inbox";
-  try {
-    localStorage.setItem("claude0-view", viewMode.value);
-  } catch {
-    /* private mode — the toggle still works for this page's life */
-  }
-}
 // The daemon's inbox snapshot is older than 10s (or absent) — sections render from the
-// last known state with a banner. Server-computed; classic view ignores it.
+// last known state with a banner. Server-computed.
 const inboxStale = signal(false);
 // Recently-done stays collapsed by default (a day of archives is screen bloat, and the
 // section is an archive entry point, not a queue) — tap its header to expand. Not
@@ -1515,11 +1496,9 @@ function modifiedMs(s) {
   return Number.isFinite(t) ? t : 0; // unknown recency → oldest → bottom
 }
 
-// Visual top-to-bottom order shared by the list AND prev/next session nav, so the
-// chevrons/swipes move through sessions exactly as they're stacked. Priority first
-// (blocked, then status rank), then most-recently-used; older sessions sink to the
-// bottom. Repo grouping (List) keys off first appearance, so groups inherit this
-// order via their top session. The current session is kept even if archived-filtered.
+// Order for the attention queue: priority first (blocked, then status rank), then
+// most-recently-used; older sessions sink to the bottom. (The home list itself renders
+// the server's pre-sectioned inbox order.)
 function compareSessions(a, b) {
   return (
     (a.unread ? 0 : 1) - (b.unread ? 0 : 1) ||
@@ -1527,15 +1506,6 @@ function compareSessions(a, b) {
     (RANK[a.status] ?? 9) - (RANK[b.status] ?? 9) ||
     modifiedMs(b) - modifiedMs(a)
   );
-}
-function orderedSessions() {
-  // Live sessions plus safeguard rows only. Archived stays visible when pending/unread
-  // (discovery can mislabel a live blocked session as archived — answering it is what
-  // the phone is for) or when it's the open session. Browsing the archive is History's
-  // job, one tap from the header.
-  return sessions.value
-    .filter((s) => s.status !== "archived" || s.unread || s.pending || s.id === selectedId.value)
-    .sort(compareSessions);
 }
 
 // Unread sessions — the "go read" queue (monitor's ⚡: completed turns + blocks).
@@ -1618,7 +1588,6 @@ let listScrollTop = 0;
 
 function List() {
   const all = sessions.value;
-  const list = orderedSessions();
   // Restore the list's scroll offset on re-mount (back from a session/history/new-session
   // — the list unmounts while a detail screen shows). Offset, not row: the list live-sorts
   // between visits, so an approximate position beats chasing a moved row. Module-level on
@@ -1629,63 +1598,22 @@ function List() {
     const el = scrollRef.current;
     if (el && listScrollTop > 0) el.scrollTop = listScrollTop; // browser clamps a too-large offset
   }, []);
-  // Blocked-ON-YOU sessions surface in a pinned section ABOVE the repo groups — fixed
-  // group order otherwise buries them in a low-priority repo. "Act now" = a real pending
-  // question/approval OR a `waiting` status (a y/n confirm the pending-detector missed);
-  // the softer "go read" (unread) queue stays in the header chip, not this section.
-  const needsYou = list.filter((s) => s.pending || s.status === "waiting");
-  const needsYouIds = new Set(needsYou.map((s) => s.id));
-  // Titles that recur get a short id so duplicates are distinguishable (e.g. two
-  // "restore-session" rows that are otherwise identical).
-  const titleCounts = {};
-  for (const s of list) titleCounts[listTitle(s)] = (titleCounts[listTitle(s)] || 0) + 1;
-  const renderRow = (s) => {
-    const t = listTitle(s);
-    // Duplicate titles (a session and its fork share a name) are otherwise identical —
-    // show the short id, the only thing that distinguishes them, instead of the branch.
-    const sub = titleCounts[t] > 1 ? s.id.slice(0, 8) : subLine(s);
-    return html`
-      <button
-        type="button"
-        class="row"
-        key=${s.id}
-        ...${rowPress(s)}
-        onContextMenu=${(e) => e.preventDefault()}
-      >
-        <span class="dot" style=${dotStyle(s)}></span>
-        <span class="grow">
-          <span class="name"
-            >${s.pendingScripts > 0 &&
-            html`<span class="scriptmark" title="waiting on a background script">⏳</span>`}${t}</span
-          >
-          ${sub && html`<span class="sub">${sub}</span>`}
-        </span>
-        ${s.pending
-          ? html`<span class="pendingbadge ${s.pending === "question" ? "q" : "a"}"
-                >${s.pending === "question" ? "answer" : "approve"}</span
-              ><span class="age">${formatAge(activityAt(s))}</span>`
-          : html`<span class="age">${formatAge(activityAt(s))}</span>`}
-      </button>`;
-  };
-  // Inbox view (ADR 0013): rows arrive pre-ordered and pre-sectioned from the server
+  // Inbox (ADR 0013): rows arrive pre-ordered and pre-sectioned from the server
   // (`inbox.section` per row, payload order = the store's sort) — the client only groups
   // by section tag. Empty sections are omitted; rows without `inbox` (idle panes,
   // History-bound archived) don't show here.
-  const inbox = viewMode.value === "inbox";
   const SECTIONS = [
     ["needs-you", "needs you"],
     ["running", "running"],
     ["parked", "parked"],
     ["done", "recently done"],
   ];
-  const inboxGroups = !inbox
-    ? []
-    : SECTIONS.map(([key, title]) => {
-        // rows arrive pre-ordered from the server: deriveSections owns the
-        // needs-you band sort (question/approval first), shared with the sidebar
-        const rows = all.filter((s) => s.inbox && s.inbox.section === key);
-        return { key, title, rows };
-      }).filter((g) => g.rows.length > 0);
+  const inboxGroups = SECTIONS.map(([key, title]) => {
+    // rows arrive pre-ordered from the server: deriveSections owns the
+    // needs-you band sort (question/approval first), shared with the sidebar
+    const rows = all.filter((s) => s.inbox && s.inbox.section === key);
+    return { key, title, rows };
+  }).filter((g) => g.rows.length > 0);
   const renderInboxRow = (s) => {
     const ib = s.inbox;
     // Sub-line = repo + the parked detail (wake countdown / block note) only. The
@@ -1739,43 +1667,11 @@ function List() {
         <span class="age">${formatTimeAgo(new Date(ib.since).toISOString(), { now: tick.value })}</span>
       </button>`;
   };
-  // Repo groups exclude the "needs you" sessions (shown in the pinned block above).
-  const groups = [];
-  for (const s of list) {
-    if (needsYouIds.has(s.id)) continue;
-    let g = groups.find((x) => x.repo === s.repo);
-    if (!g) groups.push((g = { repo: s.repo, rows: [] }));
-    g.rows.push(s);
-  }
-  // Static group order (pinned repos first, then alphabetical) so the list never
-  // reshuffles when a session's status changes. Rows within a group stay sorted by
-  // status/recency via orderedSessions above.
-  groups.sort((a, b) => repoRank(a.repo) - repoRank(b.repo) || a.repo.localeCompare(b.repo));
-  // Header counts mirror the TUI status-right (⚡ needs-attention, 🔄 running).
-  // Attention = blocked-on-you + unread (unique); loud red when any session is
-  // actually blocked, softer peach when it's only unseen turns. Clicking jumps
-  // to the first needy session (blocked first, else oldest unread).
-  const attnTotal = new Set([...needsYou.map((s) => s.id), ...attentionSessions().map((s) => s.id)]).size;
-  const attnTarget = needsYou[0] || attentionSessions()[0];
-  // A session waiting on a background script is churning without needing you — same
-  // answer the 🔄 chip gives, so it counts there (once; no double count when also running).
-  const runningCount = all.filter((s) => s.status === "running" || s.pendingScripts > 0).length;
   return html`
     <div class="screen">
       <div class="scroll" ref=${scrollRef} onScroll=${(e) => (listScrollTop = e.currentTarget.scrollTop)}>
         <div class="listhead">
-          <h1>
-            portkey
-            ${!inbox &&
-            attnTotal > 0 &&
-            html`<button class="attnchip ${needsYou.length ? "" : "soft"}" onClick=${() => attnTarget && open(attnTarget.id)}>
-              ⚡ ${attnTotal} ›
-            </button>`}
-            ${!inbox && runningCount > 0 && html`<span class="runchip">🔄 ${runningCount}</span>`}
-          </h1>
-          <button class="viewbtn" onClick=${toggleView} aria-label="Switch home view">
-            ${inbox ? "classic" : "inbox"}
-          </button>
+          <h1>portkey</h1>
           ${pushEligible.value &&
           html`<button class="bellbtn" onClick=${enablePush} aria-label="Enable notifications">
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor"
@@ -1795,17 +1691,14 @@ function List() {
         </div>
         ${error.value && error.value !== "bridge unreachable" && html`<div class="err">${error.value}</div>`}
         ${launching.value && html`<div class="sub" style="padding:4px 4px 10px">launching ${launching.value}…</div>`}
-        ${inbox &&
-        inboxStale.value &&
+        ${inboxStale.value &&
         html`<div class="staleband">inbox snapshot is stale — showing last known state</div>`}
         ${listStale.value &&
         html`<div class="staleband">list may be out of date — syncing…</div>`}
-        ${inbox &&
-        inboxAware.value &&
+        ${inboxAware.value &&
         inboxGroups.length === 0 &&
         html`<div class="sub" style="padding:8px">inbox zero — nothing needs you</div>`}
-        ${inbox &&
-        inboxGroups.map(
+        ${inboxGroups.map(
           (g) => html`
             <div class="group inboxsec" key=${g.key}>
               ${g.key === "done"
@@ -1827,21 +1720,6 @@ function List() {
                     ${g.title} · ${g.rows.length}
                   </div>`}
               ${(g.key !== "done" || showDone.value) && g.rows.map(renderInboxRow)}
-            </div>
-          `,
-        )}
-        ${!inbox &&
-        needsYou.length > 0 &&
-        html`<div class="group" key="needs-you">
-          <div class="repo needsyou">needs you</div>
-          ${needsYou.map(renderRow)}
-        </div>`}
-        ${!inbox &&
-        groups.map(
-          (g) => html`
-            <div class="group" key=${g.repo}>
-              <div class="repo">${g.repo === "~" ? "home" : g.repo}</div>
-              ${g.rows.map(renderRow)}
             </div>
           `,
         )}

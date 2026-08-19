@@ -386,7 +386,7 @@ let lastDiscovered: Session[] | null = null;
 
 // Lazy singleton: the daemon writes the snapshot; the bridge is a WAL reader
 // (plus verb writer). A failed open (unwritable dir, corrupt db) degrades to
-// "no inbox" — the payload then carries the classic rows and inboxStale.
+// "no inbox" — the payload then carries only untagged rows, flagged stale.
 let inboxStore: InboxStore | null = null;
 function getInboxStore(): InboxStore | null {
   if (!inboxStore) {
@@ -757,11 +757,11 @@ async function computeSessionsPayload(): Promise<unknown> {
       scriptCounts.get(s.id),
     ),
   );
-  // Inbox view (ADR 0013): the store decides every row's section (composeSessions →
+  // Inbox (ADR 0013): the store decides every row's section (composeSessions →
   // orderInboxRows); the bridge contributes only row detail, joined by id. Inbox rows
-  // come first in section order and carry `inbox` meta; classic-only rows (idle,
-  // 24h-window archived without a store row) follow untagged — the classic view
-  // re-sorts client-side, so their order is irrelevant.
+  // come first in section order and carry `inbox` meta; rows without a store row (idle
+  // panes, 24h-window archived) follow untagged — they never render in the home list,
+  // but still back the client's by-id lookups (open session, attention queue).
   let rows: unknown[] = value;
   let inboxStale = true;
   const store = getInboxStore();
@@ -808,7 +808,7 @@ async function computeSessionsPayload(): Promise<unknown> {
       for (const r of value) if (!seen.has(r.id)) ordered.push(r);
       rows = ordered;
     } catch {
-      // store unreadable this pass — serve the classic rows, flagged stale
+      // store unreadable this pass — serve the untagged discovery rows, flagged stale
     }
   }
   const payload = { sessions: rows, inboxStale };

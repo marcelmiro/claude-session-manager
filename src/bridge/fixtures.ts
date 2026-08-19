@@ -14,7 +14,7 @@ const agoMs = (ms: number) => Date.now() - ms;
 
 // Projected session shape — mirrors projectSession() in server.ts, plus the `inbox`
 // meta computeSessionsPayload attaches (rows arrive pre-ordered by section: needs-you →
-// running → parked → done, classic-only rows last). Covers every status tier and every
+// running → parked → done, untagged rows last). Covers every status tier and every
 // inbox section, incl. a woken snooze and a blocked-with-note row.
 export const FIXTURE_SESSIONS = [
   {
