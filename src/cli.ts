@@ -800,7 +800,9 @@ async function installTerminalIntegration(home: string): Promise<string[]> {
     let sourced = existing.includes(entry.fragment);
     if (!sourced) {
       try {
-        for await (const f of new Bun.Glob("*").scan({ cwd: entry.aux, absolute: true })) {
+        // followSymlinks: a stow-managed aux dir holds only symlinks, which the
+        // scan otherwise skips entirely — the import would be appended twice.
+        for await (const f of new Bun.Glob("*").scan({ cwd: entry.aux, absolute: true, followSymlinks: true })) {
           if ((await Bun.file(f).text()).includes(entry.fragment)) { sourced = true; break; }
         }
       } catch {}
