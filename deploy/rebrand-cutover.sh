@@ -23,6 +23,7 @@ die()  { printf '\033[31m✗ %s\033[0m\n' "$1" >&2; exit 1; }
 step "pre-flight"
 [[ "$(uname)" == Linux ]] || die "this script targets the Linux VM host"
 command -v systemctl >/dev/null || die "no systemd on this host"
+command -v jq >/dev/null || die "jq required (config.json rewrite)"
 if [[ -d "$OLD_REPO/.git" ]]; then
   git -C "$OLD_REPO" diff --quiet && git -C "$OLD_REPO" diff --cached --quiet \
     || die "uncommitted changes in $OLD_REPO — commit or stash first"
@@ -94,9 +95,14 @@ for f in "$NEW_CFG/resurrect-sessions.json" "$NEW_CFG"/panes/*; do
 done
 # The priority list may pin this repo by its old name. Scoped with jq — a
 # blanket sed would rewrite any other string field that happens to be "csm".
-if [[ -f "$NEW_CFG/config.json" ]] && command -v jq >/dev/null; then
-  jq '(.repositories.priority // []) |= map(if . == "csm" then "claude0" else . end)' \
-    "$NEW_CFG/config.json" > "$NEW_CFG/config.json.tmp" && mv "$NEW_CFG/config.json.tmp" "$NEW_CFG/config.json"
+# The if/else form tolerates a config without .repositories.priority (a bare
+# `|=` path expression errors on it); a real jq failure aborts loudly (set -e).
+if [[ -f "$NEW_CFG/config.json" ]]; then
+  jq 'if (.repositories.priority? | type) == "array"
+      then .repositories.priority |= map(if . == "csm" then "claude0" else . end)
+      else . end' \
+    "$NEW_CFG/config.json" > "$NEW_CFG/config.json.tmp"
+  mv "$NEW_CFG/config.json.tmp" "$NEW_CFG/config.json"
 fi
 # inbox.db snapshot rows carry absolute repoPath. Live rows self-heal at the
 # next discovery tick, but pane-less parked/done rows are fact-preserved and

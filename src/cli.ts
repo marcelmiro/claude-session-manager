@@ -875,13 +875,32 @@ export async function setup(): Promise<void> {
   // csm-* units first so nothing writes to the dir mid-move.
   if (process.platform === "darwin") {
     const oldStateDir = `${home}/.config/csm`;
-    const { existsSync, renameSync } = await import("node:fs");
+    const { existsSync, renameSync, readdirSync, rmdirSync, mkdirSync } = await import("node:fs");
     if (existsSync(oldStateDir)) {
-      if (!existsSync(PATHS.dir)) {
-        renameSync(oldStateDir, PATHS.dir);
-        console.log(`Migrated state: ${oldStateDir} → ${PATHS.dir}`);
-      } else {
-        console.log(`NOTE: both ${oldStateDir} and ${PATHS.dir} exist — state may be forked; merge or remove the old dir manually.`);
+      // Stop the pre-rebrand daemon FIRST — it is KeepAlive and writes to the
+      // old dir by absolute path every 3s, so migrating under it would let it
+      // recreate ~/.config/csm moments later.
+      if (!process.env.CLAUDE0_HOME) {
+        const uid = process.getuid?.() ?? 501;
+        await Bun.$`launchctl bootout gui/${uid}/com.csm.daemon`.quiet().nothrow();
+      }
+      // Per-entry, never overwriting: any c0 command run before this setup may
+      // already have minted files in the new dir (saveState's mkdir -p, the
+      // names cache, `c0 config`'s default) — those must not clobber, and must
+      // not block, the real pre-rebrand state.
+      mkdirSync(PATHS.dir, { recursive: true });
+      const skipped: string[] = [];
+      let moved = 0;
+      for (const name of readdirSync(oldStateDir)) {
+        const to = `${PATHS.dir}/${name}`;
+        if (existsSync(to)) { skipped.push(name); continue; }
+        renameSync(`${oldStateDir}/${name}`, to);
+        moved++;
+      }
+      if (skipped.length === 0) rmdirSync(oldStateDir);
+      if (moved > 0) console.log(`Migrated state: ${oldStateDir} → ${PATHS.dir} (${moved} entries)`);
+      if (skipped.length > 0) {
+        console.log(`NOTE: kept newer ${PATHS.dir} copies of: ${skipped.join(", ")} — the pre-rebrand versions remain in ${oldStateDir}; merge or delete it manually.`);
       }
     }
   }
