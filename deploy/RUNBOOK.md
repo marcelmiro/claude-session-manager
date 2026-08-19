@@ -168,11 +168,15 @@ rm -f ~/Library/LaunchAgents/com.csm.daemon.plist
 rm -f ~/.local/bin/csm ~/.local/bin/csm-terminal
 # Deregister the pre-rebrand hooks — their scripts rode the mv, so every
 # Claude lifecycle event would otherwise fire a nonexistent command forever.
-cp ~/.claude/settings.json ~/.claude/settings.json.pre-rebrand.bak
-jq '.hooks |= with_entries(
+[ -f ~/.claude/settings.json.pre-rebrand.bak ] || cp ~/.claude/settings.json ~/.claude/settings.json.pre-rebrand.bak
+jq 'if (.hooks? // null | type) == "object"
+    then .hooks |= with_entries(
       .value |= map(select((.hooks // [] | map(.command // "") | any(contains("/.config/csm/hooks/"))) | not))
-      | select(.value | length > 0))' \
-  ~/.claude/settings.json.pre-rebrand.bak > ~/.claude/settings.json
+      | select(.value | length > 0))
+    else . end' \
+  ~/.claude/settings.json > ~/.claude/settings.json.tmp \
+  && [ -s ~/.claude/settings.json.tmp ] \
+  && mv ~/.claude/settings.json.tmp ~/.claude/settings.json
 ```
 
 Then delete the two old import lines (and their `# CSM integration` comment)
