@@ -10,6 +10,9 @@ CLAUDE0_TMUX_SOURCE="if-shell 'test -f ~/.config/claude0/tmux.conf' 'source-file
 CLAUDE0_ZSH_SOURCE='[[ -r "$HOME/.config/claude0/shell.zsh" ]] && source "$HOME/.config/claude0/shell.zsh"'
 
 failures=0
+
+# Bridge port: default 8473; the bridge EnvironmentFile (sourced below) overrides.
+BRIDGE_PORT="${CLAUDE0_BRIDGE_PORT:-8473}"
 warnings=0
 
 pass() { printf '\033[32m[ok]\033[0m %s\n' "$*"; }
@@ -74,14 +77,28 @@ if tmux has-session -t main 2>/dev/null; then
 
   claude0_status=$(tmux show-options -gqv @claude0_status 2>/dev/null || true)
   if [[ "$claude0_status" == *"claude0 status"* ]]; then pass "Claude0 status segment is active"; else fail "@claude0_status is missing or inactive"; fi
-  claude0_popup=$(tmux list-keys -T prefix a 2>/dev/null || true)
-  if [[ "$claude0_popup" == *"display-popup"* && "$claude0_popup" == *"claude0"* ]]; then pass "Claude0 popup binding is active"; else fail "prefix+a is not bound to the Claude0 popup"; fi
+  # The popup key is configurable (config.json tmux.keys.popup; default "prefix a").
+  popup_spec=$(jq -r '.tmux.keys.popup // "prefix a"' "$HOME/.config/claude0/config.json" 2>/dev/null || echo "prefix a")
+  if [[ "$popup_spec" == prefix\ * ]]; then popup_table=prefix; popup_key=${popup_spec#prefix }; else popup_table=root; popup_key=$popup_spec; fi
+  claude0_popup=$(tmux list-keys -T "$popup_table" "$popup_key" 2>/dev/null || true)
+  if [[ "$claude0_popup" == *"display-popup"* && "$claude0_popup" == *"claude0"* ]]; then pass "Claude0 popup binding is active"; else fail "$popup_spec is not bound to the Claude0 popup"; fi
 
 else
   fail "tmux session main is not alive"
 fi
 
-if cmp -s "$here/../config/tmux.conf" "$HOME/.config/claude0/tmux.conf" 2>/dev/null; then
+# The repo template carries {{BIND_*}} tokens that `claude0 setup` renders from
+# config.json's tmux.keys — normalize the installed file's bind lines back to
+# tokens before comparing, so a custom binding doesn't read as a stale fragment.
+normalize_tmux_fragment() {
+  sed -E \
+    -e "s/^bind-key (-n )?[^ ]+ (run-shell 'tmux set-environment CLAUDE0_FOCUS_PANE)/{{BIND_POPUP}} \\2/" \
+    -e "s/^bind-key (-n )?[^ ]+ (run-shell 'claude0 next')/{{BIND_NEXT}} \\2/" \
+    "$1" 2>/dev/null
+}
+if [ -f "$HOME/.config/claude0/tmux.conf" ] \
+  && ! grep -q '{{BIND_' "$HOME/.config/claude0/tmux.conf" \
+  && cmp -s <(normalize_tmux_fragment "$here/../config/tmux.conf") <(normalize_tmux_fragment "$HOME/.config/claude0/tmux.conf"); then
   pass "current Claude0-owned tmux fragment is installed"
 else
   fail "Claude0-owned tmux fragment is missing or stale: $HOME/.config/claude0/tmux.conf"
@@ -127,11 +144,12 @@ if [ -r "$bridge_env" ]; then
   # shellcheck disable=SC1090
   . "$bridge_env"
   set +a
+  BRIDGE_PORT="${CLAUDE0_BRIDGE_PORT:-8473}"
   if [ -n "${CLAUDE0_BRIDGE_TOKEN:-}" ]; then
     payload=$(jq -cn --arg token "$CLAUDE0_BRIDGE_TOKEN" '{token:$token}')
     code=$(curl -sS -o /dev/null -w '%{http_code}' -X POST \
       -H 'content-type: application/json' --data-binary "$payload" \
-      http://127.0.0.1:8473/auth 2>/dev/null || true)
+      "http://127.0.0.1:${BRIDGE_PORT}/auth" 2>/dev/null || true)
     expect_eq "bridge authentication" "$code" 200
     unset CLAUDE0_BRIDGE_TOKEN payload
   else
@@ -143,10 +161,10 @@ fi
 
 if command -v tailscale >/dev/null 2>&1 && tailscale status >/dev/null 2>&1; then
   pass "Tailscale is connected"
-  if tailscale serve status 2>/dev/null | grep -q '127.0.0.1:8473'; then
+  if tailscale serve status 2>/dev/null | grep -q "127.0.0.1:${BRIDGE_PORT}"; then
     pass "Tailscale Serve proxies the portkey bridge"
   else
-    fail "Tailscale Serve is not proxying 127.0.0.1:8473"
+    fail "Tailscale Serve is not proxying 127.0.0.1:${BRIDGE_PORT}"
   fi
 else
   fail "Tailscale is not connected"

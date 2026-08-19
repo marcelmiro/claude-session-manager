@@ -20,6 +20,13 @@ describe("parseInput", () => {
     expect(parseInput("\x1b[B")).toEqual([{ type: "key", name: "down" }]);
   });
 
+  test("shift+arrows (CSI 1;2) carry the shift flag; other modifiers don't", () => {
+    expect(parseInput("\x1b[1;2A")).toEqual([{ type: "key", name: "up", shift: true }]);
+    expect(parseInput("\x1b[1;2B")).toEqual([{ type: "key", name: "down", shift: true }]);
+    // Alt (1;3) / Ctrl (1;5) arrows stay plain moves rather than section jumps.
+    expect(parseInput("\x1b[1;5A")).toEqual([{ type: "key", name: "up" }]);
+  });
+
   test("SGR mouse: button-0 press = click, release ignored, wheel decodes", () => {
     expect(parseInput("\x1b[<0;12;5M")).toEqual([{ type: "click", x: 12, y: 5 }]);
     expect(parseInput("\x1b[<0;12;5m")).toEqual([]);

@@ -3,9 +3,19 @@ import { dirname } from "node:path";
 import { mkdir, readFile, appendFile } from "node:fs/promises";
 import type { WizardRepo, WizardBranch } from "../types";
 
+/** Repo-local directory managed worktrees live in, relative to the base repo root. */
+export const WORKTREES_DIR = ".claude/worktrees";
+
+/**
+ * Ticket-ID shape (Linear/Jira, e.g. ENG-2687) — the single source for every
+ * ticket regex (label extraction here, branch-prefix trims in names.ts and the
+ * sidebar). Compose with local anchoring; always match case-insensitively.
+ */
+export const TICKET_ID_SOURCE = "[a-zA-Z]{2,6}-\\d{2,}";
+
 /** Extract a Linear/Jira-style ticket ID from a branch name (e.g. ENG-2687). */
 export function extractTicketId(branch: string): string | null {
-  const match = branch.match(/(?:^|\/)([a-zA-Z]{2,6}-\d{2,})(?=-|\/|$)/i);
+  const match = branch.match(new RegExp(`(?:^|\\/)(${TICKET_ID_SOURCE})(?=-|\\/|$)`, "i"));
   return match ? match[1].toUpperCase() : null;
 }
 
@@ -24,10 +34,9 @@ export async function getBaseRepoPath(repoPath: string): Promise<string> {
     baseRepoCache.set(repoPath, basePath);
     return basePath;
   } catch {
-    // git failed — directory may be deleted (orphaned worktree).
-    // Managed worktrees encode their base structurally. Keep the old sibling
-    // inference as a migration fallback for pre-v17 sessions.
-    const basePath = await inferManagedBaseRepo(repoPath) ?? await inferBaseRepoFromSiblings(repoPath);
+    // git failed — directory may be deleted (orphaned worktree). Managed worktrees
+    // encode their base structurally (`<base>/.claude/worktrees/<name>`).
+    const basePath = await inferManagedBaseRepo(repoPath) ?? repoPath;
     baseRepoCache.set(repoPath, basePath);
     return basePath;
   }
@@ -35,7 +44,7 @@ export async function getBaseRepoPath(repoPath: string): Promise<string> {
 
 /** Infer `<base>` from a deleted `<base>/.claude/worktrees/<name>` path. */
 async function inferManagedBaseRepo(repoPath: string): Promise<string | null> {
-  const marker = "/.claude/worktrees/";
+  const marker = `/${WORKTREES_DIR}/`;
   const at = repoPath.indexOf(marker);
   if (at <= 0) return null;
   const candidate = repoPath.slice(0, at);
@@ -52,47 +61,10 @@ export async function ensureWorktreeIgnore(repoPath: string): Promise<void> {
   await mkdir(dirname(exclude), { recursive: true });
   let content = "";
   try { content = await readFile(exclude, "utf8"); } catch {}
-  const pattern = "/.claude/worktrees/";
+  const pattern = `/${WORKTREES_DIR}/`;
   if (content.split(/\r?\n/).some((line) => line.trim() === pattern)) return;
   const prefix = content.length > 0 && !content.endsWith("\n") ? "\n" : "";
   await appendFile(exclude, `${prefix}${pattern}\n`, "utf8");
-}
-
-/**
- * For deleted worktree directories, infer the base repo by scanning sibling
- * directories. Worktrees are named `reponame-branchname`, so we look for
- * existing git repos in the same parent whose name is a prefix of this dir.
- * Picks the longest matching prefix to avoid false positives.
- */
-async function inferBaseRepoFromSiblings(repoPath: string): Promise<string> {
-  try {
-    const parts = repoPath.split("/");
-    const dirName = parts.pop() ?? "";
-    const parentDir = parts.join("/");
-    if (!dirName || !parentDir) return repoPath;
-
-    const glob = new Bun.Glob("*");
-    let bestMatch = "";
-    let bestPath = "";
-
-    for await (const entry of glob.scan({ cwd: parentDir, onlyFiles: false })) {
-      // Skip self and entries that aren't a prefix
-      if (entry === dirName) continue;
-      if (!dirName.startsWith(entry + "-")) continue;
-
-      // Check if this sibling is a git repo
-      const candidatePath = `${parentDir}/${entry}`;
-      const hasGit = await Bun.file(`${candidatePath}/.git/HEAD`).exists();
-      if (hasGit && entry.length > bestMatch.length) {
-        bestMatch = entry;
-        bestPath = candidatePath;
-      }
-    }
-
-    return bestPath || repoPath;
-  } catch {
-    return repoPath;
-  }
 }
 
 /**

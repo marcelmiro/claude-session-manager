@@ -3,7 +3,7 @@
 import "../../test/helpers/home";
 import { test, expect, beforeEach } from "bun:test";
 import { mkdirSync, rmSync, writeFileSync, readFileSync } from "node:fs";
-import { PATHS, ensureUserConfig, loadConfig, parseConfigJson, validateConfig } from "./config";
+import { DEFAULT_CONFIG, PATHS, ensureUserConfig, loadConfig, parseConfigJson, validateConfig } from "./config";
 
 beforeEach(() => {
   rmSync(PATHS.dir, { recursive: true, force: true });
@@ -25,35 +25,9 @@ test("ensureUserConfig materializes complete defaults and the editor schema", as
   expect(readFileSync(PATHS.config, "utf8")).toBe(original);
 });
 
-test("loadConfig migrates flat config and terminal sidecars without losing effective values", async () => {
-  writeFileSync(PATHS.config, JSON.stringify({
-    statusMonitor: false,
-    repoPaths: ["~/Code"],
-    priorityRepos: ["customeros"],
-    ntfyTopic: "retired",
-  }));
-  writeFileSync(`${PATHS.dir}/terminal-mode`, "remote\n");
-  writeFileSync(`${PATHS.dir}/remote-host`, "vm.example.ts.net\n");
-
-  const [config, concurrent] = await Promise.all([loadConfig(), loadConfig()]);
-  expect(concurrent).toEqual(config);
-  expect(config.repositories).toEqual({ roots: ["~/Code"], priority: ["customeros"] });
-  expect(config.ui.statusMonitor).toBe(false);
-  expect(config.terminal).toMatchObject({ defaultTarget: "remote", remoteHost: "vm.example.ts.net" });
-
-  const rewritten = JSON.parse(readFileSync(PATHS.config, "utf8"));
-  expect(rewritten.schemaVersion).toBe(1);
-  expect(rewritten.ntfyTopic).toBeUndefined();
-  // Kept until setup installs the new launcher; `claude0 config` alone must not break
-  // an older installed terminal launcher that still reads these files.
-  expect(readFileSync(`${PATHS.dir}/terminal-mode`, "utf8")).toBe("remote\n");
-  expect(readFileSync(`${PATHS.dir}/remote-host`, "utf8")).toBe("vm.example.ts.net\n");
-});
-
-test("loadConfig preserves the old implicit priority during a legacy empty-object migration", async () => {
+test("loadConfig rejects a schemaVersion-less file instead of guessing", async () => {
   writeFileSync(PATHS.config, "{}");
-  const config = await loadConfig();
-  expect(config.repositories.priority).toEqual(["throxy", "customeros", "~", "claude0"]);
+  await expect(loadConfig()).rejects.toThrow("schemaVersion must be 1");
 });
 
 test("loadConfig leaves a valid v1 file byte-identical", async () => {
@@ -65,7 +39,35 @@ test("loadConfig leaves a valid v1 file byte-identical", async () => {
 
 test("invalid JSON and unknown keys are rejected instead of silently defaulted", async () => {
   expect(() => parseConfigJson("{nope")).toThrow("Invalid JSON");
-  const config = JSON.parse(readFileSync(`${import.meta.dir}/../../config/default.json`, "utf8"));
+  const config: Record<string, unknown> = structuredClone(DEFAULT_CONFIG);
   config.typo = true;
   expect(() => validateConfig(config)).toThrow("unknown key: typo");
+});
+
+test("ensureUserConfig materializes newly shipped keys without overwriting explicit values", async () => {
+  await ensureUserConfig();
+  const config = JSON.parse(readFileSync(PATHS.config, "utf8"));
+  // A file written before terminalBundleId shipped, with a user-chosen sibling value.
+  delete config.notifications.terminalBundleId;
+  config.notifications.native = false;
+  writeFileSync(PATHS.config, JSON.stringify(config, null, 2));
+
+  expect(await ensureUserConfig()).toBe(false); // merged, not created
+  const merged = JSON.parse(readFileSync(PATHS.config, "utf8"));
+  expect(merged.notifications.terminalBundleId).toBe(DEFAULT_CONFIG.notifications.terminalBundleId);
+  expect(merged.notifications.native).toBe(false);
+
+  // An explicit "" is a real value (no -activate) — merge must never replace it.
+  merged.notifications.terminalBundleId = "";
+  writeFileSync(PATHS.config, JSON.stringify(merged, null, 2));
+  await ensureUserConfig();
+  const kept = JSON.parse(readFileSync(PATHS.config, "utf8"));
+  expect(kept.notifications.terminalBundleId).toBe("");
+});
+
+test("ensureUserConfig leaves an invalid file untouched (throws before the back-fill)", async () => {
+  const invalid = JSON.stringify({ statusMonitor: false });
+  writeFileSync(PATHS.config, invalid);
+  await expect(ensureUserConfig()).rejects.toThrow("unknown key: statusMonitor");
+  expect(readFileSync(PATHS.config, "utf8")).toBe(invalid);
 });

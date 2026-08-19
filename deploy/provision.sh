@@ -10,6 +10,7 @@
 set -euo pipefail
 
 TZ_WANTED="Europe/Madrid"
+BRIDGE_PORT="${CLAUDE0_BRIDGE_PORT:-8473}"
 SWAP_GB=16
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -182,6 +183,12 @@ if [ -d /run/systemd/system ]; then
     printf 'CLAUDE0_BRIDGE_TOKEN=%s\n' "$(head -c 32 /dev/urandom | base64 | tr -dc 'a-zA-Z0-9' | head -c 43)" > "$BRIDGE_ENV"
     chmod 600 "$BRIDGE_ENV"
   fi
+  # A non-default port must reach the bridge itself, not just tailscale serve: the
+  # server binds CLAUDE0_BRIDGE_PORT from this EnvironmentFile (default 8473).
+  if [ "$BRIDGE_PORT" != 8473 ] && ! grep -q '^CLAUDE0_BRIDGE_PORT=' "$BRIDGE_ENV"; then
+    note "recording bridge port $BRIDGE_PORT → $BRIDGE_ENV"
+    printf 'CLAUDE0_BRIDGE_PORT=%s\n' "$BRIDGE_PORT" >> "$BRIDGE_ENV"
+  fi
 
   systemctl --user daemon-reload
   # Enable independently: one missing/broken unit must not silently leave tmux
@@ -223,11 +230,11 @@ if [ -d /run/systemd/system ] && have tailscale; then
   if ! tailscale status >/dev/null 2>&1; then
     skip "tailscale not up — join with: sudo tailscale up --ssh --hostname=<name> --authkey=<pre-tagged key>  (tag at JOIN time or key expiry stays on)"
   else
-    if ! tailscale serve status 2>/dev/null | grep -q 8473; then
+    if ! tailscale serve status 2>/dev/null | grep -q "$BRIDGE_PORT"; then
       note "enabling tailscale serve for the bridge"
-      sudo tailscale serve --bg 8473
+      sudo tailscale serve --bg "$BRIDGE_PORT"
     else
-      note "tailscale serve already proxying 8473"
+      note "tailscale serve already proxying $BRIDGE_PORT"
     fi
   fi
 else

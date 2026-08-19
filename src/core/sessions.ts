@@ -7,7 +7,7 @@ import type {
 } from "../types";
 import { listPanes, capturePane } from "./tmux";
 import { findClaudeProcesses } from "./process";
-import { detectStatus, estimateContextPercent, type StatusResult } from "./status";
+import { detectStatus, type StatusResult } from "./status";
 import { getBaseRepoPath } from "./git";
 import { stripAllPrefixes, extractAIName } from "./notifications";
 import { slugify } from "./names";
@@ -49,8 +49,8 @@ export function exportPaneSessionCache(): Record<string, string> {
  * or a brand-new pane before its first event lands): it is the LAUNCH id, so after /clear
  * or /compact (which mint a new id WITHOUT restarting the process) it goes stale and must
  * not win, or the pane stays pinned to the dead old session while the new one is orphaned.
- * `cache` is this process's hook accumulation; `persisted` is pane-sessions.json (kept
- * current by the monitor) — both are pure hook data, so the order between them is moot.
+ * `cache` is this process's hook accumulation; `persisted` is the hook-owned per-pane
+ * file map (`panes/`) — both are pure hook data, so the order between them is moot.
  */
 export function resolvePaneSessionId(
   paneId: string,
@@ -445,12 +445,11 @@ async function enrichUnmatchedSessions(
 function normalizeWindowName(windowName: string | undefined, repoName: string): string | null {
   if (!windowName) return null;
   const stripped = stripAllPrefixes(windowName);
-  // Skip legacy "claude/{repo}" multi-pane format
-  if (stripped.startsWith("claude/")) return null;
-  // Try new format: "{repo}/{ai-name}" → extract AI name
+  // "{repo}/{ai-name}" → extract AI name
   const aiName = extractAIName(windowName);
   if (aiName) return aiName;
-  // Legacy/fallback: bare name after stripping prefixes
+  // Fallback: bare name after stripping prefixes ("claude" = tmux's automatic
+  // rename after the running command — not a name worth caching)
   if (stripped === "claude" || stripped === repoName || stripped === "zsh" || stripped === "bash") return null;
   return stripped;
 }
@@ -471,7 +470,6 @@ async function enrichSession(
     session.messageCount = entry.messageCount;
     session.summary = (entry.summary || entry.firstPrompt || "").replace(/\s+/g, " ").trim();
     session.firstPrompt = entry.firstPrompt || "";
-    session.contextPercent = estimateContextPercent(entry.messageCount);
   } else {
     const prompt = await getFirstUserPrompt(`${projectDir}/${sessionId}.jsonl`);
     session.summary = prompt;
@@ -545,9 +543,6 @@ async function buildActiveSession(
     paneSessionCache.delete(pane.paneId);
   }
 
-  const contextPercent = statusResult.contextPercent
-    ?? (activeInfo ? estimateContextPercent(activeInfo.messageCount) : 0);
-
   // Status resolution order: Claude's native status file › event-sourced hook log
   // › viewport scraper. Native is authoritative for live sessions and de-latches
   // the stuck-running case (revert/interrupt emit no hook). Events are correct
@@ -565,7 +560,6 @@ async function buildActiveSession(
     branch,
     status: resolved.status,
     statusSource: resolved.source,
-    contextPercent,
     messageCount: activeInfo?.messageCount ?? 0,
     summary: activeInfo?.summary ?? "",
     modified: activeInfo?.modified ? new Date(activeInfo.modified) : new Date(),
@@ -742,8 +736,6 @@ async function discoverArchivedSessions(
           }
         }
 
-        const contextPercent = estimateContextPercent(entry.messageCount);
-
         sessions.push({
           id: entry.sessionId,
           repo,
@@ -751,7 +743,6 @@ async function discoverArchivedSessions(
           baseRepoPath,
           branch,
           status: "archived",
-          contextPercent,
           messageCount: entry.messageCount,
           summary,
           modified: new Date(entry.modified),
@@ -796,7 +787,6 @@ async function discoverArchivedSessions(
           try { baseRepoPath = await getBaseRepoPath(metadata.projectPath); } catch {}
           const repo = repoNameFromPath(baseRepoPath);
           const summary = metadata.lastAssistantMessage || metadata.firstPrompt || "";
-          const contextPercent = estimateContextPercent(metadata.messageCount);
 
           sessions.push({
             id: sessionId,
@@ -805,7 +795,6 @@ async function discoverArchivedSessions(
             baseRepoPath,
             branch: metadata.gitBranch,
             status: "archived",
-            contextPercent,
             messageCount: metadata.messageCount,
             summary,
             modified: new Date(stat.mtimeMs),

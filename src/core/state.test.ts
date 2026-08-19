@@ -1,8 +1,8 @@
 /**
- * Hook-owned per-pane session map (v7). Verifies the storage swap that fixed the
+ * Hook-owned per-pane session map. Verifies the storage model that fixed the
  * listed-but-unsendable bug: per-pane files are the source of truth, reads are
- * non-destructive (no consume-once race), change-detection still diffs only id
- * CHANGES, and `claude0 setup` migrates the pre-v7 single-file map forward.
+ * non-destructive (no consume-once race), and change-detection diffs only id
+ * CHANGES.
  *
  * Home helper FIRST so CLAUDE0_HOME is set before config.ts freezes PATHS.dir.
  */
@@ -10,18 +10,14 @@
 import "../../test/helpers/home";
 import { CONFIG_DIR } from "../../test/helpers/home";
 import { test, expect, beforeEach } from "bun:test";
-import { mkdirSync, writeFileSync, rmSync, existsSync, readdirSync } from "node:fs";
+import { mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import { loadPaneSessions, savePaneSessions, processHookEvents, reconcilePaneFiles, migratePaneMap } from "./state";
+import { loadPaneSessions, savePaneSessions, processHookEvents, reconcilePaneFiles } from "./state";
 
 const PANES_DIR = join(CONFIG_DIR, "panes");
-const LEGACY_JSON = join(CONFIG_DIR, "pane-sessions.json");
-const HOOK_EVENTS = join(CONFIG_DIR, "hook-events");
 
 beforeEach(() => {
   rmSync(PANES_DIR, { recursive: true, force: true });
-  rmSync(LEGACY_JSON, { force: true });
-  rmSync(HOOK_EVENTS, { force: true });
   mkdirSync(CONFIG_DIR, { recursive: true });
 });
 
@@ -34,12 +30,6 @@ test("loadPaneSessions ignores in-flight .tmp files", async () => {
   await savePaneSessions({ "%1": "sess-a" });
   writeFileSync(join(PANES_DIR, "%2.tmp"), "half-written");
   expect(await loadPaneSessions()).toEqual({ "%1": "sess-a" });
-});
-
-test("loadPaneSessions falls back to the legacy single-file map when panes/ is absent", async () => {
-  writeFileSync(LEGACY_JSON, JSON.stringify({ "%9": "legacy-id" }));
-  expect(existsSync(PANES_DIR)).toBe(false);
-  expect(await loadPaneSessions()).toEqual({ "%9": "legacy-id" });
 });
 
 test("processHookEvents: a NEW pane updates the map but is NOT a change", async () => {
@@ -71,11 +61,4 @@ test("reconcilePaneFiles drops only files for panes absent from tmux", async () 
   await savePaneSessions({ "%1": "live", "%2": "dead" });
   await reconcilePaneFiles(new Set(["%1"]));
   expect(await loadPaneSessions()).toEqual({ "%1": "live" });
-});
-
-test("migratePaneMap folds legacy json + residual hook-events into per-pane files", async () => {
-  writeFileSync(LEGACY_JSON, JSON.stringify({ "%1": "from-json" }));
-  writeFileSync(HOOK_EVENTS, "%2 from-events\n");
-  await migratePaneMap();
-  expect(await loadPaneSessions()).toEqual({ "%1": "from-json", "%2": "from-events" });
 });

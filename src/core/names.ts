@@ -1,4 +1,5 @@
 import { homedir } from "os";
+import { TICKET_ID_SOURCE } from "./git";
 
 // Config root honors the CLAUDE0_HOME test seam (matches config.ts); unset in prod → real home.
 const CLAUDE0_ROOT = process.env.CLAUDE0_HOME ?? homedir();
@@ -157,15 +158,6 @@ export function slugify(name: string): string {
     .replace(/-+$/, "");
 }
 
-/** Inverse of `slugify` for migration: hyphens→spaces, Title-Case each word. */
-export function deslugify(slug: string): string {
-  return slug
-    .split("-")
-    .filter(Boolean)
-    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
-    .join(" ");
-}
-
 const CACHE_PATH = `${CLAUDE0_ROOT}/.config/claude0/names.json`;
 
 /**
@@ -221,7 +213,7 @@ export async function generateAIName(firstPrompt: string, summary?: string, bran
     }
     if (branch) {
       // Strip ticket prefix (e.g. "ENG-2687-") for naming context
-      const branchContext = branch.replace(/^[a-zA-Z]{2,6}-\d{2,}-?/, "");
+      const branchContext = branch.replace(new RegExp(`^${TICKET_ID_SOURCE}-?`, "i"), "");
       if (branchContext) contextParts.push(`Branch: "${branchContext}"`);
     }
 
@@ -264,23 +256,7 @@ export async function loadNameCache(): Promise<NameCache> {
     const raw = await Bun.file(CACHE_PATH).text();
     const parsed = JSON.parse(raw);
     if (parsed.version === 5 && parsed.names) return { pinned: {}, ...parsed };
-    // Migrate v4→v5: discard kebab names+sources (regenerate as normalized on the
-    // next monitor/bridge cycle) but de-slugify pins so the user's names survive.
-    if (parsed.version === 4 && parsed.pinned) {
-      const pinned: Record<string, string> = {};
-      for (const [id, slug] of Object.entries(parsed.pinned as Record<string, string>)) {
-        pinned[id] = deslugify(slug);
-      }
-      return { version: 5, names: {}, sources: {}, pinned };
-    }
-    // Migrate v3: discard kebab names/sources, no pins existed yet.
-    if (parsed.version === 3 && parsed.names) {
-      return { version: 5, names: {}, sources: {}, pinned: {} };
-    }
-    // Migrate from v1/v2: all empty.
-    if ((parsed.version === 1 || parsed.version === 2) && parsed.names) {
-      return { version: 5, names: {}, sources: {}, pinned: {} };
-    }
+    // Any other version: start fresh (names regenerate on the next monitor/bridge cycle).
   } catch {
     // No cache or malformed
   }

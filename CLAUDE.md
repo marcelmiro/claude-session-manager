@@ -15,6 +15,7 @@ bun run start             # Run TUI
 bun run dev               # Watch mode (--watch)
 bun run status            # Lightweight tmux status-right monitor
 bun test                  # Run tests (bun:test)
+bun run typecheck         # tsc --noEmit (bun runs no type checks itself)
 ```
 
 Entry: `bin/claude0.ts` (CLI router) → `src/index.ts` (TUI) or `src/cli.ts` (subcommands)
@@ -27,15 +28,6 @@ The mobile bridge (`claude0 bridge`) runs as a systemd user unit on the Linux VM
 - **When it is NOT needed:** changes to `src/bridge/public/*` (`app.js`, `index.html`/CSS). Those are served fresh (`cache-control: no-cache`); the user just refreshes/reopens the page on the phone.
 - **How to restart:** `systemctl --user restart claude0-bridge`; logs via `journalctl --user -u claude0-bridge` ([ADR 16](docs/adr/0016-systemd-units-replace-launchd.md), `deploy/`). The token lives in a 0600 `EnvironmentFile` (`~/.config/claude0/bridge.env`), so a plain restart preserves it. Then verify: `POST /auth` → 200 and the changed route behaves.
 
-> Darwin-hosted fallback (rollback window only): recover the token from the running process, kill it, and relaunch detached —
-> ```sh
-> PID=$(pgrep -f "claude0 bridge" | head -1)
-> TOK=$(ps eww -p "$PID" | tr ' ' '\n' | grep '^CLAUDE0_BRIDGE_TOKEN=' | cut -d= -f2)
-> kill "$PID"; sleep 1
-> CLAUDE0_BRIDGE_TOKEN="$TOK" nohup claude0 bridge > "$HOME/.config/claude0/bridge.log" 2>&1 & disown
-> ```
-> Host/port default to `127.0.0.1:8473` when unset. The benign `Failed to start server. Is port 8473 in use?` log line is a second `caffeinate`-wrapped instance losing the bind race — ignore it.
-
 ## CLI subcommands
 
 `bin/claude0.ts` routes based on `process.argv[2]`. All subcommands except `status` live in `src/cli.ts`. `claude0` is the canonical command; `c0` is an installed alias (both symlinks to the same entry) — docs, units, and fragments use `claude0`, `c0` is for typing.
@@ -46,7 +38,7 @@ The mobile bridge (`claude0 bridge`) runs as a systemd user unit on the Linux VM
 | `claude0 next` | Switch to next attention session (oldest first) | tmux display-message |
 | `claude0 reset` | Reset all window names to "claude", clear ⚡ and attention state | tmux display-message |
 | `claude0 status` | Tmux status-right monitor (`⚡3 🔄2`) | stdout |
-| `claude0 list` | Text-only session list with status/repo/context% | stdout |
+| `claude0 list` | Text-only session list with status/repo (+context% when Claude's statusline reports it) | stdout |
 | `claude0 switch <name>` | Fuzzy-match session by name and switch to it | tmux display-message |
 | `claude0 setup` | Install Claude hooks plus Claude0-owned tmux/zsh/terminal integration | stdout |
 | `claude0 save-sessions` | Snapshot pane→session map for tmux-resurrect | stdout (silent in hook) |
@@ -86,7 +78,7 @@ src/
 │   ├── resurrect.ts      # Which cwd save-sessions records and which directory restore-sessions resumes in
 │   └── notifications.ts  # Transition detection, prefix management (⚡/🔄), dispatch
 └── ui/
-    ├── layout.ts          # blessed screen + 3-region layout (list 70%, preview 30%, status bar)
+    ├── layout.ts          # blessed screen + 3-region layout (list 50%, preview 50%, status bar)
     ├── session-list.ts    # Build display rows, ticket ID extraction, render with blessed tags, navigation
     ├── preview-pane.ts    # ANSI→blessed conversion, chrome stripping, bottom-aligned preview
     ├── wizard.ts          # New Session wizard: inline step-through UI (repo → branch → worktree → launch)
@@ -99,11 +91,11 @@ src/
 
 `discoverSessions()` → scan index files + `listPanes()` + `findClaudeProcesses()` in parallel → correlate by TTY → `capturePane()` for status detection → `getBaseRepoPath()` for worktree resolution → `groupSessions()` → `buildDisplayRows()` → `renderSessionList()`
 
-Two-phase discovery: Phase A = active tmux panes (fast), Phase B = archived from index files (last 24h, no active pane). Session UUIDs resolved via Claude Code's `SessionStart` hook (writes paneId→sessionId to `~/.config/claude0/hook-events`). Run `claude0 setup` to install the hook.
+Two-phase discovery: Phase A = active tmux panes (fast), Phase B = archived from index files (last 24h, no active pane). Session UUIDs resolved via Claude Code's `SessionStart` hook (writes paneId→sessionId as per-pane files under `~/.config/claude0/panes/`). Run `claude0 setup` to install the hook.
 
 ### Worktree-aware repo grouping
 
-Sessions in git worktrees group under their base repo via `getBaseRepoPath()` (uses `git rev-parse --git-common-dir`, cached). `baseRepoPath` on `Session` type drives repo naming, group paths, and wizard preselection. Worktrees sort after non-worktrees within the same status tier. Orphaned worktree directories (deleted) are resolved by scanning sibling dirs for git repos whose name is a prefix.
+Sessions in git worktrees group under their base repo via `getBaseRepoPath()` (uses `git rev-parse --git-common-dir`, cached). `baseRepoPath` on `Session` type drives repo naming, group paths, and wizard preselection. Worktrees sort after non-worktrees within the same status tier. Orphaned worktree directories (deleted) are resolved structurally from the managed path (`<base>/.claude/worktrees/<name>` → `<base>`).
 
 ### Multi-pane window support
 
@@ -125,7 +117,7 @@ Archived: resumes via `claude -r {id}` (or `--fork` with `f` key) in new tmux wi
 | Key | Action |
 |-----|--------|
 | `j`/`k` | Move up/down (skips headers) |
-| `J`/`K` | Jump to next/prev repo group |
+| `J`/`K` (or `Shift`+arrows) | Jump to next/prev repo group |
 | `Enter` | Switch (active) or resume (archived) |
 | `Space` | Open action menu (approve, send, copy, rename, kill, fork) |
 | `n` | New session wizard (repo → branch → worktree → launch) |
@@ -177,16 +169,16 @@ Session rows display "TICKET · name" labels extracted from branch names (Linear
 4-tier system on status transitions (running→waiting = "blocked", running→ready = "turnComplete"):
 1. Status monitor update (tmux status-right)
 2. Window prefix: ⚡ added to tmux window name
-3. macOS native notification (terminal-notifier/osascript; sound-only while Ghostty is frontmost; darwin-only by decision — [ADR 14](docs/adr/0014-presence-is-client-activity.md))
+3. macOS native notification (terminal-notifier/osascript; sound-only while the user is present; click target from `notifications.terminalBundleId`, Ghostty default; darwin-only by decision — [ADR 14](docs/adr/0014-presence-is-client-activity.md))
 4. Web Push to the portkey device that drove the turn (see below)
 
-**Presence** ("is the user at the terminal?") feeds tiers 2–4's suppression, the monitor's takeover (`clearSource`), the question hold's release, and the hook gates. On macOS it's frontmost-app probes (osascript/lsappinfo); on other hosts it's tmux `#{client_activity}` within a 60s window (`core/presence.ts`, tri-state — each site maps probe failure per its own polarity). Attached-but-idle counts as away off-macOS, because a remote tmux attach is permanent. Model and rejected alternatives: [ADR 14](docs/adr/0014-presence-is-client-activity.md).
+**Presence** ("is the user at the terminal?") feeds tiers 2–4's suppression, the monitor's takeover (`clearSource`), the question hold's release, and the hook gates. On every platform it's tmux `#{client_activity}` within a 60s window (`core/presence.ts`, tri-state — each site maps probe failure per its own polarity). Attached-but-idle counts as away, because a remote tmux attach is permanent and looking-without-typing is indistinguishable from it. Model: [ADR 14](docs/adr/0014-presence-is-client-activity.md); unification on all platforms (no frontmost probes, no hardcoded terminal): [ADR 19](docs/adr/0019-presence-is-client-activity-everywhere.md).
 
 Window prefix priority: ⚡ (needs attention) > 🔄 (running) > ⏳ (waiting on background script) > none. Monitor syncs prefixes on each cycle. `stripAllPrefixes()` and `desiredPrefix()` in `notifications.ts` centralize prefix logic.
 
 Auto-clears when user focuses the attention pane. Config in `~/.config/claude0/config.json`.
 
-**Tier 4 — per-device Web Push** (`core/web-push.ts`, no dependency — VAPID + RFC 8291 aes128gcm on Bun WebCrypto, pinned by the RFC's own test vector). Each portkey client mints a `deviceId` (localStorage), sends it as `x-claude0-device` on every request (`?device=` on SSE), and registers a push subscription via `sw.js` — installed-PWA only; the navbar bell appears once (permission grant needs a gesture on iOS), after which a lost/pruned subscription silently resubscribes on launch. The source marker (`source/<id>.json`) records which device drove the turn; the monitor pushes only to that device, and only when its SSE liveness marker (`consumers/<deviceId>`, touched on connect/heartbeat, unlinked by the `sendBeacon` goodbye on backgrounding — the client closes its EventSource first so the heartbeat can't re-touch) is stale. Focusing the session's pane at the Mac clears the marker entirely (takeover). Pushes carry only the non-sensitive label + tool category; `tag = sessionId` keeps one notification per session (latest state wins). Prune on 401/403/404/410. Decision record: [ADR 6](docs/adr/0006-web-push-replaces-ntfy.md).
+**Tier 4 — per-device Web Push** (`core/web-push.ts`, no dependency — VAPID + RFC 8291 aes128gcm on Bun WebCrypto, pinned by the RFC's own test vector). Each portkey client mints a `deviceId` (localStorage), sends it as `x-claude0-device` on every request (`?device=` on SSE), and registers a push subscription via `sw.js` — installed-PWA only; the navbar bell appears once (permission grant needs a gesture on iOS), after which a lost/pruned subscription silently resubscribes on launch. The source marker (`source/<id>.json`) records which device drove the turn; the monitor pushes only to that device, and only when its SSE liveness marker (`consumers/<deviceId>`, touched on connect/heartbeat, unlinked by the `sendBeacon` goodbye on backgrounding — the client closes its EventSource first so the heartbeat can't re-touch) is stale. Focusing the session's pane at the Mac clears the marker entirely (takeover). Pushes carry only the non-sensitive label + tool category; `tag = sessionId` keeps one notification per session (latest state wins). Prune on 401/403/404/410. The VAPID `sub` contact identifying the install's operator to push services is config `notifications.pushContact`, deriving from `git config user.email` when empty (omitted entirely if neither exists). Decision record: [ADR 6](docs/adr/0006-web-push-replaces-ntfy.md).
 
 **Notification taps → the session.** iOS dispatches `notificationclick` **only on a cold launch** — with the PWA already running a tap just activates it and the worker never wakes, so the stash/`postMessage`/`?s=` paths all die together. Warm taps are therefore attributed by the page from two signals it can actually get: *what was pushed* (`GET /push/recent?device=`, delete-on-read, fed by the per-device ledger `sendWebPush` writes to `pushed/<deviceId>.json` — the worker can't hand this over, since a warm-resumed page reads a stale CacheStorage snapshot) and *what was tapped* (the shade — iOS removes a tapped notification and leaves an ignored one). A recorded push whose notification has vanished is the tap (`tapTarget` in `shared/tap-target.js`); exactly one vanished → open it, none or several → stay put. `followNotificationTap()` reads the shade **before** clearing it — the old order dismissed first and destroyed the evidence. `initPush` calls `registration.update()` each launch so a stale worker can't linger. Why server-side, and what was rejected: [ADR 10](docs/adr/0010-notification-taps-attributed-server-side.md).
 
@@ -221,7 +213,7 @@ Priority: cache → summary → plan title → first prompt + branch context. AI
 ### Window naming format
 
 Tmux windows use the format `[⚡|🔄|⏳]{repo}[/{ai-name}][+]`:
-- `{repo}` = base repo name from pane cwd (worktrees resolved via `getBaseRepoPath`)
+- `{repo}` = base repo name from pane cwd (worktrees resolved via `getBaseRepoPath`), shortened per config `ui.repoAbbreviations` (e.g. `{"claude0": "c0"}`) on window names and the sidebar only — lists, grouping, and push labels keep the real name
 - `/{ai-name}` = AI-generated compact name (1-3 words, kebab-case)
 - `+` = fork indicator (transitional, until fork gets its own AI name)
 - `⚡`/`🔄`/`⏳` = status prefixes (attention > running > script-wait > none)
@@ -317,7 +309,7 @@ Home is the inbox (ADR 0013 addendum 6): the same lifecycle sections as the Mac 
 Sessions carry a lifecycle (Needs you → Running → Parked → Recently done); a per-window tmux sidebar is the surface, `claude0 daemon` is the engine. Decision record: [ADR 13](docs/adr/0013-inbox-lifecycle-model.md) + its addenda (the second is the settled interaction grammar; the sixth is the portkey inbox).
 
 - **`claude0 daemon`** — launchd-kept-alive (`com.claude0.daemon`, installed idempotently by `claude0 setup`; plist pins the PATH bun symlink, bootstrap verifies+retries around launchd's bootout race). On a Linux VM host it's the `claude0-daemon.service` user unit instead, installed by `deploy/provision.sh` (`claude0 setup` skips launchd off-darwin); the wake alert there is a Web Push — targeted at the setter device when the snooze was set from portkey (the disposition records its `device_id`), broadcast to every device otherwise, since a headless host has no banner tier; a darwin-hosted daemon adds the same targeted push beside its banner. At cutover, `inbox.db` rides the state copy and the Mac agent is booted out — one host owns the inbox (`deploy/RUNBOOK.md`). Owns three duties: the **snooze wake pass** (`core/inbox-wake.ts`, every 15s: due snooze + no live pane → detached `claude -r` with an in-pane wake banner, attention stamped into state.json only after detected status `ready` — boot spinner reads as running and the monitor's carry-over would eat an early stamp — then the macOS banner tier; `markAutoResumed` is an atomic claim so overlapping wakers can't double-spawn); **discovery snapshot production** (`core/inbox-discovery.ts`, every 3s in a fresh child process — in-process discovery leaks — the snapshot table's owner; the bridge's `seedSnapshotRow` is the only other writer, insert-if-absent only); and the **sidebar renderer**.
-- **Single renderer** (`src/sidebar/renderer.ts`): ONE process paints every window's sidebar pane by writing ANSI to the pane tty (a pty-slave write IS pane output). Panes are dumb shell stubs (`: sidebar-pane; stty raw -echo; … | nc -U sidebar.sock`) that relay stdin bytes back; DECSET 1004/1006 written to the tty route focus + SGR mouse through the same relay. Per-line diff painting; a vanished tty (pane respawn allocates a new pty) re-resolves and repaints. The renderer self-installs tmux wiring (M-s focus, M-S visibility toggle, after-select-window bounce hook, after-copy-mode eject hook — copy mode on a stub is always accidental and gets cancelled instantly) on stand-up and every 30s — a tmux server restart is rewired within a tick, no tmux.conf hook.
+- **Single renderer** (`src/sidebar/renderer.ts`): ONE process paints every window's sidebar pane by writing ANSI to the pane tty (a pty-slave write IS pane output). Panes are dumb shell stubs (`: sidebar-pane; stty raw -echo; … | nc -U sidebar.sock`) that relay stdin bytes back; DECSET 1004/1006 written to the tty route focus + SGR mouse through the same relay. Per-line diff painting; a vanished tty (pane respawn allocates a new pty) re-resolves and repaints. The renderer self-installs tmux wiring (sidebar focus/toggle keys from config `tmux.keys` — defaults M-s/M-S; last-installed keys remembered in `sidebar-keys.json` so a change unbinds the old ones — plus after-select-window bounce hook and after-copy-mode eject hook: copy mode on a stub is always accidental and gets cancelled instantly) on stand-up and every 30s — a tmux server restart is rewired within a tick, no tmux.conf hook. The popup/next bindings come from the same `tmux.keys` config, rendered into the tmux fragment by `claude0 setup` (tmux notation: `"prefix a"` = prefix table, bare `"M-s"` = root table, modifier required). Propagation: popup/next changes apply on the next `claude0 setup` run; sidebar key changes need a daemon restart (the daemon loads config once at startup).
 - **Model** (`core/inbox-model.ts`, pure): wake math (Mac digits-then-unit snoozes are exact relative offsets on both units, 1d = 24h; phone presets via `presetWakeAt` — hours exact, day presets at 8AM local on the target calendar day), section derivation (`sectionOf`/`effectiveSince`/`deriveSections`), snapshot+overlay composition. **Every live prompt-sitter files under Needs You** — the aim is to clear it by actioning (reply, snooze, block, done). A transition-gated admission with a neutral OPEN bucket shipped first and was retired after living with it (it hid rows that still wanted a decision); observed running→ready/waiting transitions are still written as `transition` events for the scoreboard. status-right carries the Claude0 scoreboard: `⚡N 🔄N ✓N` where ✓ = distinct sessions archived since local midnight. View building is pure too (`src/sidebar/rows.ts`) and input decoding (`src/sidebar/input.ts`) — both tested without tmux. A snapshot row preserved without a live pane (parked/done/restored) gets its stale `real`/`running`/`script` stripped by discovery, so Enter resumes instead of chasing the killed pane.
 - **Store** (`core/inbox-store.ts`, bun:sqlite WAL at `~/.config/claude0/inbox.db`): authored facts (dispositions/archived/events/links) in their own tables; the activity snapshot is opaque JSON replaced by discovery each tick — `saveSnapshot` keeps fact-holding rows the new set doesn't cover, so a bridge verb that seeds a row mid-tick (`seedSnapshotRow`, the one non-discovery snapshot writer) can't be wiped before the preserve rule sees it; `PRAGMA data_version` is the cross-process change poll.
 - **tmux gotchas paid for in blood**: tmux sanitizes control chars to `_` in `-F` output for clients running OUTSIDE tmux (the daemon, always) — never use `\t` separators, use a printable one with free-text fields last; Bun's `setInterval` waits for an async callback's promise, so the render loop is a self-scheduling loop with a 10s watchdog. From the tty-less daemon: a non-detached `new-window` NEVER returns (always `-d`, then `select-window`); a multi-argument window command is direct-exec'd with NO shell (daemon PATH has no `claude` → instant silent exit) — pass ONE string so `$SHELL -c` runs it and zshenv restores PATH; `display-message -p -t %dead` exits 0 against a fallback pane (tmux 3.7b) — probe pane liveness with `list-panes -t %id` (`paneLocation` in the renderer). Selecting a window in an UNATTACHED tmux session is invisible — `switchTo` follows up with `switch-client` for any client looking elsewhere. A stub that outlives a renderer restart holds a dead relay (`cat` blocks on tty read, notices the vanished socket only by eating a keystroke) — the renderer respawns all stubs at stand-up.
@@ -340,7 +332,7 @@ bg=#101010  fg=#FFFFFF  muted=#A0A0A0  dim=#505050
 surface=#1C1C1C  peach=#FFC799  mint=#99FFE4  red=#FF8080
 ```
 
-Status: waiting/ready=peach, running=mint, idle=dim. Context %: <50=mint, 50-79=peach, 80+=red.
+Status: waiting/ready=peach, running=mint, idle=dim.
 
 ## Safety
 
@@ -352,7 +344,7 @@ Claude0 can save and restore Claude Code sessions across tmux server crashes whe
 
 ### How it works
 
-1. **On save** (`claude0 save-sessions`): Snapshots a mapping of stable tmux coordinates (`session:window.pane_index`) to Claude session UUIDs **and each session's cwd**, written to `~/.config/claude0/resurrect-sessions.json`. This uses data already tracked by Claude0's SessionStart hook in `pane-sessions.json`. A pane reporting `$HOME` never overwrites a real repo path already recorded for that session (`pickSavedCwd` in `core/resurrect.ts`) — a restored pane that hasn't got its directory back yet would otherwise poison the entry permanently.
+1. **On save** (`claude0 save-sessions`): Snapshots a mapping of stable tmux coordinates (`session:window.pane_index`) to Claude session UUIDs **and each session's cwd**, written to `~/.config/claude0/resurrect-sessions.json`. This uses data already tracked by Claude0's SessionStart hook in the per-pane files under `panes/`. A pane reporting `$HOME` never overwrites a real repo path already recorded for that session (`pickSavedCwd` in `core/resurrect.ts`) — a restored pane that hasn't got its directory back yet would otherwise poison the entry permanently.
 
 2. **On restore** (`claude0 restore-sessions`): After tmux-resurrect restores panes (as empty shells), reads the saved mapping, matches coordinates to the newly created panes, and sends `cd <dir>; claude --resume=<sessionId>` in each via `tmux send-keys`. Skips panes that already have a foreground process, and skips a coordinate whose session id was already resumed this pass (one id can sit at two coordinates; resuming it twice leaves two processes fighting over one transcript).
 
@@ -380,7 +372,7 @@ If using tmux-continuum for auto-save, the save hook runs automatically on each 
 
 ### Data flow
 
-Save: `pane-sessions.json` (paneId→sessionId) + `tmux list-panes` (paneId→coordinate+cwd) + the previous map (for `pickSavedCwd`) → `resurrect-sessions.json` (coordinate→{sessionId, cwd})
+Save: `panes/` per-pane files (paneId→sessionId) + `tmux list-panes` (paneId→coordinate+cwd) + the previous map (for `pickSavedCwd`) → `resurrect-sessions.json` (coordinate→{sessionId, cwd})
 
 Restore: `resurrect-sessions.json` (coordinate→{sessionId, cwd}) + `tmux list-panes` (coordinate→new paneId) → `resolveRestoreTarget` (cwd→directory to resume in) → `tmux send-keys` (`cd <dir>; claude --resume` in each pane)
 
@@ -398,7 +390,7 @@ Restore: `resurrect-sessions.json` (coordinate→{sessionId, cwd}) + `tmux list-
 - Session data: `~/.claude/projects/*/sessions-index.json`
 - Session logs: `~/.claude/projects/*/{sessionId}.jsonl`
 - Config/state: `~/.config/claude0/{config,state,names}.json`
-- Hook events: `~/.config/claude0/hook-events` (SessionStart hook writes pane→session mappings)
+- Pane→session map: `~/.config/claude0/panes/` (one file per pane, written by the SessionStart hook)
 - Hook script: `~/.config/claude0/hooks/session-start.sh` (installed by `claude0 setup`)
 - Resurrect map: `~/.config/claude0/resurrect-sessions.json` (coordinate→sessionId, written by save-sessions)
 - Web Push state: `~/.config/claude0/push-vapid.json` (VAPID keypair), `push-subscriptions.json` (deviceId→subscription), `consumers/<deviceId>` (per-device SSE liveness), `source/<sessionId>.json` (which device drove the turn), `pushed/<deviceId>.json` (recent-push ledger for notification-tap attribution, delete-on-read)

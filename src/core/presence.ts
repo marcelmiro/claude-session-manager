@@ -1,15 +1,13 @@
 /**
- * "Is the user at the terminal?" — the Linux answer, shared by every process that
- * asks (monitor, TUI, bridge, and — inlined as bash — the hook scripts).
+ * "Is the user at the terminal?" — the answer on every platform, shared by every
+ * process that asks (monitor, TUI, bridge, and — inlined as bash — the hook scripts).
  *
- * On macOS the question is answered by frontmost-app probes (osascript in the
- * monitor, lsappinfo in the hooks — two variants on purpose: lsappinfo avoids a TCC
- * prompt). Those have no Linux analogue, and on a remote host "a tmux client is
- * attached" stops implying presence too — a persistent SSH attach is the steady
- * state even when the user is out with their phone. What tmux does know is
- * `client_activity`: the epoch of each client's last keyboard input, untouched by
- * pane output (lab-verified on tmux 3.4). Presence = any attached client with input
- * inside PRESENCE_WINDOW_MS.
+ * Frontmost-app probes would need a per-terminal app name, and on a remote host
+ * "a tmux client is attached" stops implying presence — a persistent SSH attach is
+ * the steady state even when the user is out with their phone. What tmux does know,
+ * terminal- and OS-agnostically, is `client_activity`: the epoch of each client's
+ * last keyboard input, untouched by pane output (lab-verified on tmux 3.4).
+ * Presence = any attached client with input inside PRESENCE_WINDOW_MS.
  *
  * Tri-state on purpose: the call sites have hand-tuned, opposite failure polarities
  * (the monitor treats a failed probe as present; the question-hold release treats it

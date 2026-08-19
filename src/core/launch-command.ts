@@ -1,7 +1,7 @@
 import { resolve } from "path";
 import { createHash } from "node:crypto";
 import type { WorktreeMode } from "../types";
-import { cleanBranchToDir } from "./git";
+import { cleanBranchToDir, WORKTREES_DIR } from "./git";
 
 /**
  * Shell for launched windows: `$SHELL`'s basename when set, else zsh. Launch sites
@@ -26,7 +26,7 @@ export function worktreeDirName(name: string): string {
     .replace(/[^a-zA-Z0-9._-]+/g, "-")
     .replace(/^-+|-+$/g, "") || "worktree";
   const suffix = slug === name ? "" : `-${createHash("sha256").update(name).digest("hex").slice(0, 8)}`;
-  return `.claude/worktrees/${slug}${suffix}`;
+  return `${WORKTREES_DIR}/${slug}${suffix}`;
 }
 
 interface LaunchRepo {

@@ -8,17 +8,14 @@ import type { AggregateStatus, State, Session, SessionNotificationState } from "
 // (TUI, monitor, bridge) sees the same state — fixing the old bug where a session was
 // listed but unsendable because only the monitor persisted the truncate-once event log.
 const PANES_DIR = `${PATHS.dir}/panes`;
-const PANE_SESSIONS_PATH = `${PATHS.dir}/pane-sessions.json`; // legacy (pre-v7); read-only fallback
-const HOOK_EVENTS_PATH = `${PATHS.dir}/hook-events`; // legacy (pre-v7); drained by migratePaneMap
 
-/** Read the hook-owned per-pane map. Falls back to the legacy single-file map only when the
- *  `panes/` dir doesn't exist yet (a pre-v7 machine before `claude0 setup` runs the migration). */
+/** Read the hook-owned per-pane map. Empty when the `panes/` dir doesn't exist yet. */
 export async function loadPaneSessions(): Promise<Record<string, string>> {
   let files: string[];
   try {
     files = await readdir(PANES_DIR);
   } catch {
-    return loadLegacyPaneSessions();
+    return {};
   }
   const map: Record<string, string> = {};
   await Promise.all(files.map(async (f) => {
@@ -29,15 +26,6 @@ export async function loadPaneSessions(): Promise<Record<string, string>> {
     } catch {}
   }));
   return map;
-}
-
-async function loadLegacyPaneSessions(): Promise<Record<string, string>> {
-  try {
-    const parsed = JSON.parse(await Bun.file(PANE_SESSIONS_PATH).text());
-    // Guard against corrupted data (e.g. arrays) — must be a plain object
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
-    return parsed;
-  } catch { return {}; }
 }
 
 /** Persist resolved pane→session entries as per-pane files (atomic temp+rename, one file per
@@ -68,21 +56,6 @@ export async function reconcilePaneFiles(livePaneIds: Set<string>): Promise<void
       try { await unlink(`${PANES_DIR}/${f}`); } catch {}
     }));
   } catch {}
-}
-
-/** One-time pre-v7 migration (idempotent; run on every `claude0 setup`): fold the legacy single-file
- *  map plus any residual hook-events append log into per-pane files, so sessions already running
- *  at upgrade time stay resolvable without waiting for their next SessionStart. */
-export async function migratePaneMap(): Promise<void> {
-  const map = await loadLegacyPaneSessions();
-  try {
-    const raw = await Bun.file(HOOK_EVENTS_PATH).text();
-    for (const line of raw.trim().split("\n")) {
-      const [paneId, sessionId] = line.trim().split(" ");
-      if (paneId && sessionId) map[paneId] = sessionId;
-    }
-  } catch {}
-  if (Object.keys(map).length) await savePaneSessions(map);
 }
 
 const EMPTY_STATE: State = {

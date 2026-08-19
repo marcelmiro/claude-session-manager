@@ -11,6 +11,7 @@
     "dev": "bun --watch src/index.ts",
     "status": "bun run src/monitor.ts",
     "test": "bun test",
+    "typecheck": "tsc --noEmit",
     "shoot": "bun run scripts/shoot.ts"
   },
   "dependencies": {
@@ -18,6 +19,7 @@
   },
   "devDependencies": {
     "@types/blessed": "^0.1.25",
-    "bun-types": "latest"
+    "bun-types": "latest",
+    "typescript": "5.9.2"
   }
 }

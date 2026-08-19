@@ -12,7 +12,6 @@ export interface Session {
   baseRepoPath: string;
   branch: string;
   status: "running" | "waiting" | "ready" | "idle" | "archived";
-  contextPercent: number;
   messageCount: number;
   summary: string;
   modified: Date;
@@ -104,6 +103,8 @@ export interface NotificationConfig {
   windowPrefix: boolean;
   /** Enable macOS native notifications (Tier 3) */
   nativeNotification: boolean;
+  /** Notification-click `-activate` bundle id; absent ⇒ Ghostty default, "" ⇒ no -activate */
+  terminalBundleId?: string;
 }
 
 export interface SessionNotificationState {
@@ -236,6 +237,14 @@ export interface GlobalSearchState {
 // Forward ref — actual type lives in core/search.ts to avoid circular deps
 export type SearchEntryRef = import("./core/search").SearchEntry;
 
+/** The four configurable tmux bindings, resolved (defaults filled) by `tmuxKeys()`. */
+export interface TmuxKeys {
+  popup: string;
+  next: string;
+  sidebarFocus: string;
+  sidebarToggle: string;
+}
+
 export interface Config {
   $schema?: string;
   schemaVersion: 1;
@@ -252,9 +261,19 @@ export interface Config {
   ui: {
     statusMonitor: boolean;
     windowPrefix: boolean;
+    /** Repo-name → short display name on tmux windows/sidebar (e.g. {"claude0":"c0"}) */
+    repoAbbreviations?: Record<string, string>;
   };
   notifications: {
     native: boolean;
+    /** Bundle id the notification click raises; absent ⇒ Ghostty default, "" ⇒ no -activate */
+    terminalBundleId?: string;
+    /** VAPID contact sent to push services; absent ⇒ derived from `git config user.email` */
+    pushContact?: string;
+  };
+  tmux?: {
+    /** tmux key bindings in tmux notation: "prefix X" ⇒ bind-key X, bare "M-x" ⇒ bind-key -n M-x */
+    keys?: Partial<TmuxKeys>;
   };
 }
 

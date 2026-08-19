@@ -59,13 +59,11 @@ import { PATHS } from "./config";
 import { fixture } from "../../test/helpers/fixture";
 import type { PendingToolCall } from "./jsonl-reader";
 
-const PANE_SESSIONS = join(PATHS.dir, "pane-sessions.json");
-
 beforeEach(() => {
   rmSync(EVENTS_DIR, { recursive: true, force: true });
   mkdirSync(EVENTS_DIR, { recursive: true });
   mkdirSync(PATHS.dir, { recursive: true });
-  rmSync(PANE_SESSIONS, { force: true });
+  rmSync(join(PATHS.dir, "panes"), { recursive: true, force: true });
   rmSync(PENDING_DIR, { recursive: true, force: true });
   rmSync(DECISIONS_DIR, { recursive: true, force: true });
 });

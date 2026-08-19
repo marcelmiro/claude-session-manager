@@ -31,7 +31,7 @@ export function createLayout() {
     },
   });
 
-  // Session list — left region (70%)
+  // Session list — left region (50%)
   const listBox = blessed.box({
     parent: container,
     top: 0,
@@ -48,7 +48,7 @@ export function createLayout() {
     },
   });
 
-  // Preview pane — right sidebar (30%)
+  // Preview pane — right sidebar (50%)
   const previewBox = blessed.box({
     parent: container,
     top: 0,

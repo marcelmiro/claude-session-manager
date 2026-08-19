@@ -128,7 +128,6 @@ async function quickDiscoverActive(
         branch: "",
         status: resolved.status,
         statusSource: resolved.source,
-        contextPercent: scraper.contextPercent ?? 0,
         messageCount: 0,
         summary: "",
         modified: new Date(),
@@ -164,8 +163,8 @@ async function main(): Promise<void> {
   ]);
 
   // Auto-clear: sync prefix on the window the user is currently viewing,
-  // but ONLY when the terminal is actually focused (Ghostty frontmost).
-  // When the terminal is in the background, the user isn't looking — keep
+  // but ONLY when the user is actually at the terminal (a client keystroke
+  // inside the presence window). Otherwise the user isn't looking — keep
   // attention flags and ⚡ prefix so notifications still fire.
   let activePaneId: string | undefined;
   let activeWindow: string | undefined;
@@ -195,21 +194,9 @@ async function main(): Promise<void> {
       activeSession = info.slice(colonIdx2 + 1, colonIdx3);
       const activeWindowName = info.slice(colonIdx3 + 1);
 
-      if (process.platform === "darwin") {
-        // Check if the terminal is actually focused (Ghostty frontmost)
-        try {
-          const frontApp = (await Bun.$`osascript -e 'tell application "System Events" to return name of first application process whose frontmost is true'`.quiet().text()).trim().toLowerCase();
-          terminalFocused = frontApp === "ghostty";
-        } catch {
-          // Can't determine — assume focused to preserve existing behavior
-          terminalFocused = true;
-        }
-      } else {
-        // No frontmost probe off-macOS; presence = this client's last keystroke inside
-        // the window. "unknown" maps to focused — same failure direction as the darwin
-        // catch above (a broken probe must not spray attention/pushes at the active pane).
-        terminalFocused = classifyActivity([Number(clientActivity)], Date.now()) !== "absent";
-      }
+      // Presence = this client's last keystroke inside the window. "unknown" maps to
+      // focused — a broken probe must not spray attention/pushes at the active pane.
+      terminalFocused = classifyActivity([Number(clientActivity)], Date.now()) !== "absent";
 
       // Only auto-clear ⚡ when the user is actually looking at the terminal
       if (terminalFocused && activeWindowName?.startsWith(ATTENTION_PREFIX)) {
@@ -334,6 +321,7 @@ async function main(): Promise<void> {
       statusMonitor: config.ui.statusMonitor,
       windowPrefix: config.ui.windowPrefix,
       nativeNotification: config.notifications.native,
+      terminalBundleId: config.notifications.terminalBundleId,
     });
   }
 

@@ -188,14 +188,6 @@ function parseContextPercent(capturedOutput: string): number | undefined {
   return undefined;
 }
 
-/**
- * Estimates context usage as a percentage.
- * Assumes ~800 tokens per message against a 200k context window.
- */
-export function estimateContextPercent(messageCount: number): number {
-  return Math.min(100, Math.round(((messageCount * 800) / 200000) * 100));
-}
-
 // Relative-time formatting is shared with the phone UI — see `shared/time-ago.js`.
 export { formatTimeAgo } from "../shared/time-ago.js";
 

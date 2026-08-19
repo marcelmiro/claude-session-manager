@@ -54,8 +54,8 @@ test("resolvePaneSessionId: hook cache wins over the command-line --resume id (t
   expect(resolvePaneSessionId("%651", "old", cache({ "%651": "new" }), {})).toBe("new");
 });
 
-test("resolvePaneSessionId: persisted hook map (pane-sessions.json) wins over the command-line id", () => {
-  // The cache lost the truncate-once hook-events race; the monitor-maintained disk map still has it.
+test("resolvePaneSessionId: persisted hook map (panes/ files) wins over the command-line id", () => {
+  // The in-process cache missed the event; the monitor-maintained disk map still has it.
   expect(resolvePaneSessionId("%651", "old", cache(), { "%651": "new" })).toBe("new");
 });
 
@@ -128,7 +128,6 @@ function makeSession(over: Partial<Session> & { id: string }): Session {
     baseRepoPath: "/repo",
     branch: "main",
     status: "ready",
-    contextPercent: 0,
     messageCount: 0,
     summary: "",
     modified: new Date("2026-01-01T00:00:00Z"),

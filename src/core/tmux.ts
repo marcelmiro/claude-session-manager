@@ -4,6 +4,11 @@ import { retryOnDeadline } from "./deadline";
 import { USER_SHELL } from "./launch-command";
 import { clientActivityPresence } from "./presence";
 
+/** Plain shells, as `pane_current_command`/window names — the shared answer to
+ *  "is this pane just sitting at a shell?" (reset keep-list, restore-sessions
+ *  safety check, sidebar corpse detection). */
+export const SHELL_NAMES = ["zsh", "bash", "fish", "sh"];
+
 /**
  * Get the "main" tmux session name (i.e. not the popup session).
  *
@@ -397,14 +402,15 @@ export async function isQuestionPickerOpen(paneId: string): Promise<boolean> {
 }
 
 /**
- * Whether the user is demonstrably AT the Mac looking at this pane: active tmux
- * window + attached client + Ghostty frontmost. TS port of the three probes in
- * `question-pretooluse.sh`'s focus gate (cli.ts) — keep the two in sync. Polarity is
- * the OPPOSITE of the gate's: this feeds the hold's release check, so any probe
- * error/ambiguity returns false (keep holding), whereas the gate fails toward the
- * native widget (don't intercept). Only a positively-confirmed presence releases.
+ * Whether the user is demonstrably at the desk looking at this pane: active tmux
+ * window + attached client + a client keystroke inside the presence window. TS port
+ * of the three probes in `question-pretooluse.sh`'s focus gate (cli.ts) — keep the
+ * two in sync. Polarity is the OPPOSITE of the gate's: this feeds the hold's release
+ * check, so any probe error/ambiguity returns false (keep holding), whereas the gate
+ * fails toward the native widget (don't intercept). Only a positively-confirmed
+ * presence releases.
  */
-export async function atMacFocus(paneId: string): Promise<boolean> {
+export async function atDeskFocus(paneId: string): Promise<boolean> {
   try {
     const wa = (await Bun.$`tmux display-message -p -t ${paneId} '#{window_active}'`.quiet().text()).trim();
     if (wa !== "1") return false;
@@ -412,15 +418,9 @@ export async function atMacFocus(paneId: string): Promise<boolean> {
     if (!session) return false;
     const clients = (await Bun.$`tmux list-clients -t ${session}`.quiet().text()).trim();
     if (!clients) return false;
-    if (process.platform !== "darwin") {
-      // No frontmost probe off-macOS: presence = a client of this session typed within
-      // the window. Only a positive "present" releases — "unknown" keeps holding.
-      return (await clientActivityPresence(session)) === "present";
-    }
-    const front = (await Bun.$`lsappinfo front`.quiet().text()).trim();
-    if (!front) return false;
-    const name = (await Bun.$`lsappinfo info -only name ${front}`.quiet().text()).trim();
-    return name.includes('"Ghostty"');
+    // Presence = a client of this session typed within the window. Only a positive
+    // "present" releases — "unknown" keeps holding.
+    return (await clientActivityPresence(session)) === "present";
   } catch {
     return false;
   }

@@ -28,8 +28,10 @@ export function parseInput(data: string): InputEvent[] {
         i = j + 1;
         if (final === "I") events.push({ type: "focus", in: true });
         else if (final === "O") events.push({ type: "focus", in: false });
-        else if (final === "A") events.push({ type: "key", name: "up" });
-        else if (final === "B") events.push({ type: "key", name: "down" });
+        // Modified arrows arrive as CSI 1;<mod>A — mod 2 is Shift (xterm encoding),
+        // which the renderer maps to section jump (parity with the TUI's S-j/S-k).
+        else if (final === "A") events.push({ type: "key", name: "up", ...(body === "1;2" ? { shift: true } : {}) });
+        else if (final === "B") events.push({ type: "key", name: "down", ...(body === "1;2" ? { shift: true } : {}) });
         else if ((final === "M" || final === "m") && body.startsWith("<")) {
           const [b, x, y] = body.slice(1).split(";").map(Number);
           if (b !== undefined && x !== undefined && y !== undefined) {

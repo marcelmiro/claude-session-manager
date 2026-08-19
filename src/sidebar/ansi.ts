@@ -5,6 +5,8 @@
  * survive its inner fg changes).
  */
 
+import { TICKET_ID_SOURCE } from "../core/git";
+
 // Vesper palette (CLAUDE.md)
 export const C = {
   fg: "#FFFFFF",
@@ -97,7 +99,8 @@ export function fmtWakeAbs(until: number, now: number): string {
 
 // Branch names bury the ticket ID mid-string; the prefix before it is the
 // useless half ("marcelmiro-ENG-2687-pass-…" → "ENG-2687-pass-…").
+const TICKET_ID_RE = new RegExp(TICKET_ID_SOURCE, "i");
 export function displayName(name: string): string {
-  const m = name.match(/[A-Z][A-Z0-9]+-\d+/);
+  const m = name.match(TICKET_ID_RE);
   return m && m.index! > 0 ? name.slice(m.index!) : name;
 }

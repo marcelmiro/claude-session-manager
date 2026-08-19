@@ -8,11 +8,11 @@ import { discoverSessions, groupSessions, seedPaneSessionCache } from "./core/se
 import { readPreviewMessages, type PendingToolCall, type PendingQuestion } from "./core/jsonl-reader";
 import { switchToPane, getMainSession, killPane, sendKeys, sendKeysSequential, sendTextAndEnter, answerQuestion } from "./core/tmux";
 import { loadNameCache, getSessionName, generateAIName, saveNameCache, normalizeName, slugify, type NameCache } from "./core/names";
-import { loadConfig } from "./core/config";
+import { loadConfig, DEFAULT_CONFIG } from "./core/config";
 import { loadState, saveState, loadPaneSessions } from "./core/state";
 import { listPendingApprovals, decideApproval, decideQuestion, buildAnswersMap } from "./core/approval";
 import { syncWindowPrefix, buildBaseName, abbreviateRepo } from "./core/notifications";
-import { discoverRepos, listBranches, fetchRepo, getDefaultBranch, branchCheckedOutPath, ensureWorktreeIgnore } from "./core/git";
+import { discoverRepos, listBranches, fetchRepo, getDefaultBranch, branchCheckedOutPath, ensureWorktreeIgnore, WORKTREES_DIR } from "./core/git";
 import { buildLaunchCommand, USER_SHELL } from "./core/launch-command";
 import { copyToClipboard } from "./core/clipboard";
 import { initWizard, renderWizard, renderWizardPreview, renderWizardStatusBar, handleWizardKey, setWizardBranches } from "./ui/wizard";
@@ -51,13 +51,9 @@ let isRefreshing = false;
 let previewGeneration = 0;
 let showArchived = false;
 let nameCache: NameCache = { version: 5, names: {}, sources: {}, pinned: {} };
-let notifConfig: Config = {
-  schemaVersion: 1,
-  repositories: { roots: [], priority: [] },
-  terminal: { defaultTarget: "local", remoteHost: null, localSession: "main", remoteSession: "main" },
-  ui: { statusMonitor: true, windowPrefix: true },
-  notifications: { native: true },
-};
+// Placeholder until loadConfig() resolves at startup; derived from the shipped
+// defaults so this can't drift into a fourth hand-written copy of the shape.
+let notifConfig: Config = structuredClone(DEFAULT_CONFIG);
 
 // Wizard state (null = not in wizard mode)
 let wizardState: WizardState | null = null;
@@ -1003,8 +999,8 @@ screen.on("keypress", async (_ch: string, key: any) => {
 // Key bindings (guarded: no-op when wizard, search, or space menu is active)
 screen.key(["j", "down"], () => { if (wizardState || globalSearch || spaceMenu || customInputState || multiQuestionPicker) return; handleSelect(1); });
 screen.key(["k", "up"], () => { if (wizardState || globalSearch || spaceMenu || customInputState || multiQuestionPicker) return; handleSelect(-1); });
-screen.key(["S-j"], () => { if (wizardState || globalSearch || spaceMenu || customInputState || multiQuestionPicker) return; handleGroupSelect(1); });
-screen.key(["S-k"], () => { if (wizardState || globalSearch || spaceMenu || customInputState || multiQuestionPicker) return; handleGroupSelect(-1); });
+screen.key(["S-j", "S-down"], () => { if (wizardState || globalSearch || spaceMenu || customInputState || multiQuestionPicker) return; handleGroupSelect(1); });
+screen.key(["S-k", "S-up"], () => { if (wizardState || globalSearch || spaceMenu || customInputState || multiQuestionPicker) return; handleGroupSelect(-1); });
 screen.key(["enter"], () => { if (wizardState || wizardHandledKey || globalSearch || spaceMenu || spaceMenuHandledKey || customInputState || multiQuestionPicker) return; handleEnterContextual(); });
 screen.key(["x"], () => { if (wizardState || globalSearch || spaceMenu || spaceMenuHandledKey || customInputState || multiQuestionPicker) return; handleKill(); });
 screen.key(["f"], () => { if (wizardState || globalSearch || spaceMenu || spaceMenuHandledKey || customInputState || multiQuestionPicker) return; handleFork(); });
@@ -1575,7 +1571,7 @@ async function handleWizardLaunch(
     try {
       await ensureWorktreeIgnore(repo.path);
     } catch (error) {
-      return `Could not prepare .claude/worktrees: ${error instanceof Error ? error.message : String(error)}`;
+      return `Could not prepare ${WORKTREES_DIR}: ${error instanceof Error ? error.message : String(error)}`;
     }
   }
 

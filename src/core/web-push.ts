@@ -18,7 +18,7 @@
  */
 
 import { readFileSync, mkdirSync, rmSync } from "node:fs";
-import { PATHS, writeAtomic } from "./config";
+import { configCache, PATHS, writeAtomic } from "./config";
 import type { StoredSubscription, PushPayload, EncryptSeams } from "../types";
 
 const VAPID_PATH = `${PATHS.dir}/push-vapid.json`;
@@ -203,7 +203,7 @@ async function loadOrCreateVapid(): Promise<VapidFile> {
 /** `Authorization: vapid t=<ES256 JWT>, k=<public key>` for the endpoint's origin. */
 export async function vapidAuthHeader(
   endpointOrigin: string,
-  contact: string,
+  contact: string | null,
   nowMs: number = Date.now(),
 ): Promise<string> {
   const vapid = await loadOrCreateVapid();
@@ -218,7 +218,8 @@ export async function vapidAuthHeader(
   const signing = `${enc({ typ: "JWT", alg: "ES256" })}.${enc({
     aud: endpointOrigin,
     exp: Math.floor(nowMs / 1000) + 12 * 3600,
-    sub: contact,
+    // RFC 8292: sub is a SHOULD — omitted when no contact is known.
+    ...(contact === null ? {} : { sub: contact }),
   })}`;
   // WebCrypto ECDSA emits raw r||s (64 bytes) — exactly the JWS ES256 format.
   const sig = new Uint8Array(
@@ -329,8 +330,26 @@ export async function encryptPayload(
 // Send
 // ---------------------------------------------------------------------------
 
-/** VAPID `sub` contact — push services require one; it goes nowhere. */
-const VAPID_CONTACT = "mailto:vibes.claudio3@throxy.us";
+/**
+ * VAPID `sub` contact — identifies this install's operator (the user, who runs the
+ * push-sending bridge) to the push services. notifications.pushContact when set,
+ * else the user's git email; a bare address gets `mailto:` prepended. Memoized per
+ * process (the monitor is fresh per tick, so at most one git call per tick).
+ */
+let vapidContact: string | null | undefined;
+async function resolveVapidContact(): Promise<string | null> {
+  if (vapidContact !== undefined) return vapidContact;
+  const configured = configCache().notifications.pushContact?.trim();
+  if (configured) {
+    return (vapidContact = /^(mailto:|https:)/i.test(configured) ? configured : `mailto:${configured}`);
+  }
+  try {
+    const email = (await Bun.$`git config user.email`.quiet().text()).trim();
+    return (vapidContact = email ? `mailto:${email}` : null);
+  } catch {
+    return (vapidContact = null);
+  }
+}
 
 /**
  * POST an encrypted push to `deviceId`'s subscription. No subscription ⇒ no-op.
@@ -348,7 +367,7 @@ export async function sendWebPush(deviceId: string, payload: PushPayload): Promi
       fromB64url(sub.keys.p256dh),
       fromB64url(sub.keys.auth),
     );
-    const auth = await vapidAuthHeader(new URL(sub.endpoint).origin, VAPID_CONTACT);
+    const auth = await vapidAuthHeader(new URL(sub.endpoint).origin, await resolveVapidContact());
 
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 3000);

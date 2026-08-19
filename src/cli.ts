@@ -10,15 +10,15 @@
  */
 
 import { homedir } from "os";
-import { loadState, saveState, loadPaneSessions, migratePaneMap } from "./core/state";
-import { switchToPane, listPanes, renameWindow, capturePane, displayMessage, atMacFocus } from "./core/tmux";
+import { loadState, saveState, loadPaneSessions } from "./core/state";
+import { switchToPane, listPanes, renameWindow, capturePane, displayMessage, atDeskFocus, SHELL_NAMES } from "./core/tmux";
 import { syncWindowPrefix, stripAllPrefixes, abbreviateRepo, ATTENTION_PREFIX } from "./core/notifications";
 import { findClaudeProcesses } from "./core/process";
 import { detectStatus } from "./core/status";
 import { eventSourcedStatus } from "./core/hook-events";
 import { nativeStatus, resolveStatus } from "./core/session-state";
 import { loadNameCache, slugify } from "./core/names";
-import { PATHS, ensureUserConfig, removeLegacyConfigSidecars } from "./core/config";
+import { PATHS, loadConfig, ensureUserConfig, parseTmuxKey, tmuxKeys } from "./core/config";
 import { PRESENCE_WINDOW_S } from "./core/presence";
 import { pickSavedCwd, resolveRestoreTarget } from "./core/resurrect";
 import { pickRepoPath } from "./core/sessions";
@@ -192,7 +192,7 @@ export async function next(): Promise<void> {
 // ---------------------------------------------------------------------------
 
 /** Standard shell/tool names that shouldn't be renamed. */
-const KEEP_NAMES = new Set(["zsh", "bash", "dev", "fish", "sh"]);
+const KEEP_NAMES = new Set([...SHELL_NAMES, "dev"]);
 
 /**
  * Reset all tmux window names back to repo name.
@@ -200,6 +200,8 @@ const KEEP_NAMES = new Set(["zsh", "bash", "dev", "fish", "sh"]);
  */
 export async function reset(): Promise<void> {
   try {
+    // Populate the config cache so abbreviateRepo sees ui.repoAbbreviations.
+    await loadConfig().catch(() => null);
     // Get all panes to map windows to repo paths
     const panes = await listPanes();
     const windowRepos = new Map<string, string>();
@@ -237,7 +239,7 @@ export async function reset(): Promise<void> {
           count++;
         }
       } else if (cleanName !== repoName) {
-        // AI-generated, legacy "claude", or prefixed name → reset to repo name
+        // AI-generated, tmux-auto "claude", or prefixed name → reset to repo name
         await renameWindow(sessionName, parseInt(windowIndex, 10), repoName);
         count++;
       } else if (name !== cleanName) {
@@ -467,7 +469,7 @@ function isSubsequence(sub: string, str: string): boolean {
 // claude0 setup
 // ---------------------------------------------------------------------------
 
-export const HOOK_VERSION = 19;
+export const HOOK_VERSION = 20;
 
 // A bridge-consumer marker older than this is a dead phone connection: the bridge
 // touches it on SSE connect and every 15s heartbeat, so 40s tolerates one missed
@@ -516,6 +518,19 @@ if [ -n "$SESSION_ID" ]; then
   fi
 fi`;
 
+// Shared presence probe for both PreToolUse gates (LOG_EVENT_SNIPPET precedent):
+// newest client keystroke within the window ⇒ exit 0, each gate's safe direction
+// (desk prompt / native widget). One fragment interpolated into both scripts so the
+// probe can't drift between them; each site's surrounding comment explains why
+// ambiguity fails toward exit 0 there.
+const PRESENCE_CHECK_SNIPPET = `ACT=$(tmux list-clients -t "$SESS" -F '#{client_activity}' 2>/dev/null | sort -rn | head -1)
+  # Empty OR non-numeric activity is unreadable, not stale — arithmetic on a
+  # non-number would read as a huge age and flip the polarity to "away".
+  case "$ACT" in ''|*[!0-9]*) exit 0 ;; esac
+  if [ $(( $(date +%s) - ACT )) -le ${PRESENCE_WINDOW_S} ]; then
+    exit 0
+  fi`;
+
 // Non-blocking events (UserPromptSubmit/PostToolUse/Notification/Stop/SubagentStop).
 const EVENT_HOOK_SCRIPT = `#!/bin/bash
 # HOOK_VERSION=${HOOK_VERSION}
@@ -560,25 +575,15 @@ AGENT_ID=$(printf '%s' "\$INPUT" | grep -oE '"agent_id"[[:space:]]*:[[:space:]]*
 # which is the event line portkey mirrors, written exactly once.
 [ "\$TOOL" = "AskUserQuestion" ] && exit 0
 
-# Presence → fall through to the instant desk TUI prompt (no lag). On macOS an
-# attached client IS presence (local tmux). Elsewhere (remote host) a persistent
-# SSH attach is the steady state even with the user away, so presence = a client
-# keystroke within the window; attached-but-idle falls through to the phone hold.
-# Unreadable activity fails toward the desk prompt — a wrong "away" strands every
-# tool call in the block-poll below.
+# Presence → fall through to the instant desk TUI prompt (no lag). An attached
+# client alone is NOT presence — on a remote host a persistent SSH attach is the
+# steady state even with the user away — so presence = a client keystroke within
+# the window; attached-but-idle falls through to the phone hold. Unreadable
+# activity fails toward the desk prompt — a wrong "away" strands every tool call
+# in the block-poll below.
 CL=$(tmux list-clients -t "\$SESS" 2>/dev/null)
 if [ -n "\$CL" ]; then
-  if [ "$(uname)" = "Darwin" ]; then
-    exit 0
-  else
-    ACT=$(tmux list-clients -t "\$SESS" -F '#{client_activity}' 2>/dev/null | sort -rn | head -1)
-    # Empty OR non-numeric activity is unreadable, not stale — arithmetic on a
-    # non-number would read as a huge age and flip the polarity to "away".
-    case "\$ACT" in ''|*[!0-9]*) exit 0 ;; esac
-    if [ \$(( \$(date +%s) - ACT )) -le ${PRESENCE_WINDOW_S} ]; then
-      exit 0
-    fi
-  fi
+  ${PRESENCE_CHECK_SNIPPET}
 fi
 
 # Away from the desk — but a hold only helps if a phone is actually watching.
@@ -667,32 +672,16 @@ M="\$HOME/.config/claude0/bridge-consumer"
 MT=$(stat -c %Y "\$M" 2>/dev/null || stat -f %m "\$M" 2>/dev/null || echo 0)
 if [ "\$MT" = 0 ] || [ $(( $(date +%s) - MT )) -ge ${CONSUMER_FRESH_S} ]; then exit 0; fi
 # 3. Focus (three-part): active window + attached client (cheap tmux), and only then
-#    the presence probe. Same probes as atMacFocus() in core/tmux.ts (the hold's
+#    the presence probe. Same probes as atDeskFocus() in core/tmux.ts (the hold's
 #    release check) — keep the two in sync, but note the OPPOSITE failure polarity:
-#    here ambiguity means "don't intercept". macOS asks the frontmost app (lsappinfo —
-#    no TCC prompt, unlike osascript); elsewhere frontmost doesn't exist and an
-#    attached client is the steady state, so presence = a client keystroke within the
-#    window (attached-but-idle ⇒ user away ⇒ intercept for the phone).
+#    here ambiguity means "don't intercept". An attached client alone is not presence
+#    (a remote host's persistent attach is the steady state), so presence = a client
+#    keystroke within the window (attached-but-idle ⇒ user away ⇒ intercept for the
+#    phone).
 WA=$(tmux display-message -p -t "\$TMUX_PANE" '#{window_active}' 2>/dev/null)
 CL=$(tmux list-clients -t "\$SESS" 2>/dev/null)
 if [ "\$WA" = "1" ] && [ -n "\$CL" ]; then
-  if [ "$(uname)" = "Darwin" ]; then
-    FRONT=$(lsappinfo info -only name "$(lsappinfo front)" 2>/dev/null)
-    # Fail toward native: unreadable/empty frontmost ⇒ treat as focused (exit 0). Only a
-    # positively-identified OTHER app frontmost (you're on your phone) is NOT focused.
-    case "\$FRONT" in
-      ''|*'"Ghostty"'*) exit 0 ;;
-    esac
-  else
-    ACT=$(tmux list-clients -t "\$SESS" -F '#{client_activity}' 2>/dev/null | sort -rn | head -1)
-    # Fail toward native: unreadable activity ⇒ treat as focused (exit 0). Only
-    # confirmed-stale input (user demonstrably away) lets the intercept proceed.
-    # Non-numeric is unreadable, not stale — arithmetic on it reads as a huge age.
-    case "\$ACT" in ''|*[!0-9]*) exit 0 ;; esac
-    if [ \$(( \$(date +%s) - ACT )) -le ${PRESENCE_WINDOW_S} ]; then
-      exit 0
-    fi
-  fi
+  ${PRESENCE_CHECK_SNIPPET}
 fi
 # All gates passed → hold and answer via the file channel (releases early on refocus).
 printf '%s' "\$INPUT" | claude0 question-hook
@@ -708,11 +697,6 @@ const HOOK_SCRIPTS = [
 ] as const;
 
 const FILE_HOOK_SCRIPTS = [] as const;
-const RETIRED_WORKTREE_HOOK_SCRIPTS = [
-  "subagent-worktree-cleanup.sh",
-  "worktree-create.sh",
-  "worktree-remove.sh",
-] as const;
 
 /** Which hook script handles each Claude Code event. PreToolUse blocks (Inc6). */
 const HOOK_REGISTRATIONS: { event: string; script: string; matcher?: string; timeout?: number }[] = [
@@ -758,10 +742,32 @@ async function installTerminalIntegration(home: string): Promise<string[]> {
   ];
   const changed: string[] = [];
 
+  // Render tmux.keys into the fragment's {{BIND_*}} tokens. A key change lands on
+  // the next setup run (the fragment is re-sourced below when it differs).
+  const keys = tmuxKeys(await loadConfig().catch(() => null));
+  const bindFor = (spec: string) => {
+    const parsed = parseTmuxKey(spec);
+    return parsed.table === "prefix" ? `bind-key ${parsed.key}` : `bind-key -n ${parsed.key}`;
+  };
+  const staleBinds: string[][] = [];
+
   for (const file of files) {
-    const wanted = await Bun.file(file.source).text();
+    let wanted = await Bun.file(file.source).text();
+    if (file.source.endsWith("tmux.conf")) {
+      wanted = wanted.replace("{{BIND_POPUP}}", bindFor(keys.popup)).replace("{{BIND_NEXT}}", bindFor(keys.next));
+    }
     let existing = "";
     try { existing = await Bun.file(file.target).text(); } catch {}
+    if (file.source.endsWith("tmux.conf") && existing && existing !== wanted) {
+      // A re-source binds the new keys but never unbinds the old — collect the
+      // previously installed binds so the live server can drop any that changed.
+      // (sidebarFocus/sidebarToggle stale binds are handled by the renderer's
+      // sidebar-keys.json marker instead — those binds have no template to diff.)
+      for (const marker of ["tmux set-environment CLAUDE0_FOCUS_PANE", "claude0 next"]) {
+        const old = existing.match(new RegExp(`^bind-key (?:(-n) )?(\\S+) run-shell '${marker.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`, "m"));
+        if (old && !wanted.includes(old[0])) staleBinds.push(old[1] ? ["-n", old[2]!] : [old[2]!]);
+      }
+    }
     if (existing !== wanted) {
       const slash = file.target.lastIndexOf("/");
       await Bun.$`mkdir -p ${file.target.slice(0, slash)}`.quiet();
@@ -818,7 +824,9 @@ async function installTerminalIntegration(home: string): Promise<string[]> {
   // test seam and must never touch the developer's real tmux server.
   if (!process.env.CLAUDE0_HOME && Bun.which("tmux")) {
     await Bun.$`tmux has-session`.quiet().nothrow().then(async (result) => {
-      if (result.exitCode === 0) await Bun.$`tmux source-file ${home}/.config/claude0/tmux.conf`.quiet();
+      if (result.exitCode !== 0) return;
+      for (const args of staleBinds) await Bun.$`tmux unbind-key ${args}`.quiet().nothrow();
+      await Bun.$`tmux source-file ${home}/.config/claude0/tmux.conf`.quiet();
     });
   }
 
@@ -853,9 +861,6 @@ export async function setup(): Promise<void> {
   const configCreated = await ensureUserConfig();
 
   const integrationChanged = await installTerminalIntegration(home);
-  // The replacement launcher now reads config.json, so the migrated sidecars can
-  // no longer serve a compatibility purpose or mislead a future editor.
-  removeLegacyConfigSidecars();
 
   // Load existing settings (or start fresh)
   let settings: Record<string, any> = {};
@@ -865,32 +870,7 @@ export async function setup(): Promise<void> {
     // No settings file or malformed — start fresh
   }
   if (!settings.hooks) settings.hooks = {};
-
-  // v17 returns worktree lifecycle ownership to Claude Code. Remove only Claude0's
-  // retired commands; user-authored hooks on the same events remain untouched.
   let settingsChanged = false;
-  for (const event of Object.keys(settings.hooks)) {
-    if (!Array.isArray(settings.hooks[event])) continue;
-    const keptEntries: any[] = [];
-    for (const entry of settings.hooks[event]) {
-      if (!Array.isArray(entry?.hooks)) {
-        keptEntries.push(entry);
-        continue;
-      }
-      const hooks = entry.hooks.filter((hook: any) => {
-        if (typeof hook?.command !== "string") return true;
-        return !RETIRED_WORKTREE_HOOK_SCRIPTS.some((script) => hook.command.includes(`${hookDir}/${script}`));
-      });
-      if (hooks.length !== entry.hooks.length) settingsChanged = true;
-      if (hooks.length > 0) keptEntries.push({ ...entry, hooks });
-    }
-    settings.hooks[event] = keptEntries;
-  }
-  for (const script of RETIRED_WORKTREE_HOOK_SCRIPTS) rmSync(scriptPath(script), { force: true });
-
-  // Fold the pre-v7 single-file map (+ residual hook-events) into per-pane files so sessions
-  // already running at upgrade time stay resolvable. Idempotent — a no-op once migrated.
-  await migratePaneMap();
 
   // Rewrite any missing/outdated script (version gate is per-script).
   await Bun.$`mkdir -p ${hookDir}`.quiet();
@@ -1259,7 +1239,7 @@ export async function restoreSessions(): Promise<void> {
     // Check if there's a foreground process other than the shell.
     try {
       const cmd = (await Bun.$`tmux display-message -t ${paneId} -p '#{pane_current_command}'`.quiet().text()).trim();
-      if (cmd && !["zsh", "bash", "fish", "sh"].includes(cmd)) {
+      if (cmd && !SHELL_NAMES.includes(cmd)) {
         skipped++;
         continue;
       }
@@ -1363,11 +1343,11 @@ export async function questionHook(): Promise<void> {
     // Focus-release: the moment the user is back at the Mac, stop holding and exit
     // neutral so the native picker renders in front of them (~1s). Checked AFTER the
     // decision read below on the previous iteration, so an answer that raced the
-    // user's return has already won. Throttled to ~1s — atMacFocus shells out to
-    // tmux + lsappinfo. Probe ambiguity keeps holding (see atMacFocus polarity).
+    // user's return has already won. Throttled to ~1s — atDeskFocus shells out to
+    // tmux. Probe ambiguity keeps holding (see atDeskFocus polarity).
     if (paneId && Date.now() - lastFocusCheck >= 1_000) {
       lastFocusCheck = Date.now();
-      if (await atMacFocus(paneId)) {
+      if (await atDeskFocus(paneId)) {
         rmSync(pendingFile, { force: true });
         process.exit(0);
       }
@@ -1446,6 +1426,10 @@ export async function daemon(): Promise<void> {
   }
 
   const { wakePass } = await import("./core/inbox-wake");
+
+  // Populate the config cache once for the daemon's lifetime: the sidebar
+  // renderer's rows read ui.repoAbbreviations and its tmux wiring reads tmux.keys.
+  await loadConfig().catch(() => null);
 
   // `--once`: a single wake pass (debugging / manual catch-up).
   if (process.argv.includes("--once")) {
@@ -1541,6 +1525,8 @@ export async function notify(message: string): Promise<void> {
     console.error("usage: claude0 notify <message>");
     process.exit(2);
   }
+  // Populate the config cache so resolveVapidContact sees notifications.pushContact.
+  await loadConfig().catch(() => null);
   const { listDeviceIds, sendWebPush } = await import("./core/web-push");
   const ids = listDeviceIds();
   if (ids.length === 0) {

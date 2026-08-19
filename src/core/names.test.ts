@@ -3,7 +3,7 @@ import { CONFIG_DIR } from "../../test/helpers/home";
 import { test, expect } from "bun:test";
 import { mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import { getSessionName, loadNameCache, normalizeName, sanitizePinnedName, slugify, deslugify, looksLikeRefusal, type NameCache } from "./names";
+import { getSessionName, loadNameCache, normalizeName, sanitizePinnedName, slugify, looksLikeRefusal, type NameCache } from "./names";
 
 const CACHE_FILE = join(CONFIG_DIR, "names.json");
 function writeCache(obj: unknown) {
@@ -109,32 +109,8 @@ test("slugify: strips symbols, empty stays empty", () => {
   expect(slugify("")).toBe("");
 });
 
-test("deslugify: hyphens to spaces, Title-Case each word", () => {
-  expect(deslugify("payments-hotfix")).toBe("Payments Hotfix");
-  expect(deslugify("v2-api")).toBe("V2 Api");
-});
-
-test("loadNameCache: migrates v4→v5 discarding names, de-slugifying pinned", async () => {
-  writeCache({ version: 4, names: { s1: "fix-auth" }, sources: { s1: "x" }, pinned: { s2: "payments-hotfix" } });
-  const c = await loadNameCache();
-  expect(c.version).toBe(5);
-  expect(c.names).toEqual({});
-  expect(c.sources).toEqual({});
-  expect(c.pinned).toEqual({ s2: "Payments Hotfix" });
-  rmSync(CACHE_FILE, { force: true });
-});
-
-test("loadNameCache: migrates v3 discarding names, empty pinned", async () => {
-  writeCache({ version: 3, names: { s1: "fix-auth" }, sources: { s1: "fix the auth" } });
-  const c = await loadNameCache();
-  expect(c.version).toBe(5);
-  expect(c.names).toEqual({});
-  expect(c.pinned).toEqual({});
-  rmSync(CACHE_FILE, { force: true });
-});
-
-test("loadNameCache: v1/v2 still discards names", async () => {
-  writeCache({ version: 2, names: { s1: "old-name" }, sources: {} });
+test("loadNameCache: any non-v5 cache starts fresh", async () => {
+  writeCache({ version: 4, names: { s1: "old-name" }, sources: {}, pinned: { s2: "payments-hotfix" } });
   const c = await loadNameCache();
   expect(c.version).toBe(5);
   expect(c.names).toEqual({});

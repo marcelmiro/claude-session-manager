@@ -1,7 +1,7 @@
 # 14. Off-macOS presence is tmux client activity; the desk notification tier stays darwin-only
 
 Date: 2026-08-09
-Status: accepted
+Status: accepted; the "macOS keeps frontmost byte-for-byte" clause is superseded by ADR 19
 
 ## Context
 

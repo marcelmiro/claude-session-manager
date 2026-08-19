@@ -2,7 +2,7 @@
  * Session handoff surface (Impl 2.5) — the `core/` functions the Impl #3 bridge
  * consumes so it stays a thin transport/presentation layer with no new
  * Claude-wrapping logic. All additive, read-only over existing on-disk artifacts
- * (`pane-sessions.json`, `events/<id>.jsonl`, transcript JSONL); the senders reuse
+ * (per-pane files under `panes/`, `events/<id>.jsonl`, transcript JSONL); the senders reuse
  * the existing `send-keys` path. Headless: no blessed/ui imports (boundary.test.ts).
  *
  * `SessionTranscript`/`SendResult` are co-located here (not in `types.ts`) because
@@ -1085,7 +1085,7 @@ export function paneFromCommandLine(
 
 /**
  * Resolve a session's live tmux pane. Primary source is the SessionStart-hook map
- * (`pane-sessions.json`), reverse-looked-up against live panes. Fallback is the live
+ * (per-pane files under `panes/`), reverse-looked-up against live panes. Fallback is the live
  * `claude --resume <id>` process command line — the SAME authoritative path
  * `discoverSessions` uses — for sessions the hook never recorded (e.g. resumed before
  * `claude0 setup`, or whose hook event was consumed without persisting). Without the

@@ -289,7 +289,6 @@ function projectSession(
     // Unread = the monitor's ⚡ (needsAttention from state.json): a turn that completed
     // or a block that you haven't seen on Mac OR phone yet. Drives the glow + header.
     unread,
-    contextPercent: s.contextPercent,
     messageCount: s.messageCount,
     summary: s.summary,
     statusSource: s.statusSource,
@@ -453,7 +452,6 @@ async function projectSnapshotOnly(
     label: s.name,
     pending: null,
     unread: false,
-    contextPercent: 0,
     messageCount: 0,
     summary: "",
     statusSource: "inbox-snapshot",
@@ -1705,6 +1703,10 @@ export function startBridge(): ReturnType<typeof Bun.serve> {
     );
   }
   tokenDigest = createHash("sha256").update(rawToken).digest();
+
+  // Warm the config cache so sync paths (abbreviateRepo in fork window naming)
+  // see user config before the first route-level loadConfig() refreshes it.
+  void loadConfig().catch(() => {});
 
   if (!existsSync(EVENTS_DIR)) {
     console.error("EVENTS_DIR not found: live push disabled; restart bridge after claude0 setup");

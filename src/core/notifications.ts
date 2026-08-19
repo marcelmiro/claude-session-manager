@@ -3,6 +3,8 @@ import type { NotificationConfig, Session, TransitionEvent } from "../types";
 import type { SessionStatus } from "./status";
 import { getAbovePrompt } from "./status";
 import { renameWindow, getWindowName } from "./tmux";
+import { clientActivityPresence } from "./presence";
+import { configCache, DEFAULT_CONFIG } from "./config";
 import { sourceForSession } from "./input-source";
 import { pendingToolCall } from "./hook-events";
 import { listPendingApprovals, PENDING_DIR } from "./approval";
@@ -35,16 +37,12 @@ export function desiredPrefix(hasAttention: boolean, isRunning: boolean, hasScri
   return "";
 }
 
-/** Display abbreviations for long repo names on tmux windows. Window names only —
- *  the TUI list, grouping, and push labels keep the real repo name. */
-const REPO_ABBREVIATIONS: Record<string, string> = {
-  claude0: "c0",
-  customeros: "cos",
-  throxy: "thr",
-};
-
+/** Display abbreviations for long repo names on tmux windows (ui.repoAbbreviations).
+ *  Window names/sidebar only — the TUI list, grouping, and push labels keep the real
+ *  repo name. Reads the config cache: callers rename windows on hot sync paths, so
+ *  the entry point's startup loadConfig() populates what this consumes. */
 export function abbreviateRepo(repo: string): string {
-  return REPO_ABBREVIATIONS[repo] ?? repo;
+  return configCache().ui.repoAbbreviations?.[repo] ?? repo;
 }
 
 /** Build the base window name: {repo}[·{ai-name}][+] */
@@ -153,45 +151,54 @@ function hasTerminalNotifier(): boolean {
 }
 
 /** Send a macOS native notification (fire-and-forget).
- *  Uses terminal-notifier when available for clickable notifications that focus
- *  Ghostty and switch to the correct tmux window/pane.
+ *  Uses terminal-notifier when available for clickable notifications that raise the
+ *  terminal app (`terminalBundleId`) and switch to the correct tmux window/pane.
  *  Falls back to osascript (no click action).
- *  When Ghostty is frontmost, plays sound only (no visual notification). */
+ *  When the user is present (a tmux client keystroke inside the presence window),
+ *  plays sound only (no visual notification). */
 export function sendNativeNotification(
   title: string,
   body: string,
   pane?: { sessionName: string; windowIndex: number; paneId: string },
+  terminalBundleId?: string,
 ): void {
   // macOS-only by decision (ADR 14): on other hosts the desk surfaces are tmux-side
   // (⚡ prefix, status-right) and the phone has web push — a VM-local notifier would
   // notify the VM, not the human. Without this gate the spawns below no-op silently.
   if (process.platform !== "darwin") return;
-  try {
-    // If Ghostty is frontmost: play sound only, skip visual notification.
-    // Otherwise: full notification with sound (terminal-notifier or osascript).
-    const soundOnly = `afplay /System/Library/Sounds/Ping.aiff >/dev/null 2>&1 &`;
-    const frontCheck = `front=$(osascript -e 'tell application "System Events" to return name of first application process whose frontmost is true' 2>/dev/null); if [ "$front" = "ghostty" ]; then ${soundOnly} exit 0; fi`;
+  // Fire-and-forget stays: the presence probe forces an async hop, and its rejections
+  // never reach a sync caller — the chain carries its own catch.
+  (async () => {
+    // Present ⇒ the user is at the terminal: play sound only, skip the visual
+    // notification. absent/unknown ⇒ full notification — a broken probe must not
+    // silence a real alert.
+    if ((await clientActivityPresence(pane?.sessionName)) === "present") {
+      Bun.spawn(["afplay", "/System/Library/Sounds/Ping.aiff"], { stdout: "ignore", stderr: "ignore" });
+      return;
+    }
 
     if (hasTerminalNotifier() && pane) {
+      // Absent key ⇒ the shipped default; an explicit "" means "no -activate" — the
+      // click still runs the tmux switch, but the terminal app isn't raised.
+      const bundleId = terminalBundleId ?? DEFAULT_CONFIG.notifications.terminalBundleId;
       const switchCmd = `tmux select-window -t '${pane.sessionName}:${pane.windowIndex}' && tmux select-pane -t '${pane.paneId}'`;
-      Bun.spawn(["bash", "-c", [
-        frontCheck,
-        `terminal-notifier -title "$CLAUDE0_TITLE" -message "$CLAUDE0_BODY" -sound Ping -activate com.mitchellh.ghostty -execute "$CLAUDE0_SWITCH"`,
-      ].join("; ")], {
+      const activate = bundleId ? ` -activate "$CLAUDE0_BUNDLE"` : "";
+      Bun.spawn(["bash", "-c",
+        `terminal-notifier -title "$CLAUDE0_TITLE" -message "$CLAUDE0_BODY" -sound Ping${activate} -execute "$CLAUDE0_SWITCH"`,
+      ], {
         stdout: "ignore",
         stderr: "ignore",
-        env: { ...process.env, CLAUDE0_TITLE: title, CLAUDE0_BODY: body, CLAUDE0_SWITCH: switchCmd },
+        env: { ...process.env, CLAUDE0_TITLE: title, CLAUDE0_BODY: body, CLAUDE0_SWITCH: switchCmd, CLAUDE0_BUNDLE: bundleId },
       });
     } else {
       const escaped = (s: string) => s.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
-      Bun.spawn(["bash", "-c", [
-        frontCheck,
+      Bun.spawn(["bash", "-c",
         `osascript -e 'display notification "${escaped(body)}" with title "${escaped(title)}" sound name "Ping"'`,
-      ].join("; ")], { stdout: "ignore", stderr: "ignore" });
+      ], { stdout: "ignore", stderr: "ignore" });
     }
-  } catch {
+  })().catch(() => {
     // Non-fatal
-  }
+  });
 }
 
 /**
@@ -234,11 +241,11 @@ export async function dispatchNotifications(
       if (event.classification === "blocked") {
         const title = `⚡ Blocked — ${name}`;
         const body = extractBlockedBody(session.lastCapture);
-        sendNativeNotification(title, body, pane);
+        sendNativeNotification(title, body, pane, config.terminalBundleId);
       } else if (event.classification === "turnComplete") {
         const title = `✅ Done — ${name}`;
         const body = extractDoneBody(session.lastCapture);
-        sendNativeNotification(title, body, pane);
+        sendNativeNotification(title, body, pane, config.terminalBundleId);
       }
     }
 

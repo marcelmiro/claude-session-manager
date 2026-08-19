@@ -22,9 +22,12 @@ import { InboxStore } from "../core/inbox-store";
 import { composeSessions, peekEngaged, peekVerdict, sectionOf, wakeAt, type InboxSession } from "../core/inbox-model";
 import { readLastPromptAt, resolveTranscriptPath } from "../core/last-turn";
 import { resolveRestoreTarget } from "../core/resurrect";
-import { PATHS } from "../core/config";
+import { PATHS, configCache, parseTmuxKey, tmuxKeys } from "../core/config";
+import { SHELL_NAMES } from "../core/tmux";
 import { parseInput, type InputEvent } from "./input";
 import { renderView, type ViewState, type VisibleRow } from "./rows";
+
+const SHELL_RE = new RegExp(`^(${SHELL_NAMES.join("|")})$`);
 
 const COLS = Number(process.env.CLAUDE0_SIDEBAR_COLS ?? 30);
 export const SIDEBAR_SOCK = `${PATHS.dir}/sidebar.sock`;
@@ -962,7 +965,7 @@ export function runSidebarRenderer(): void {
         p.left === 0 &&
         p.width <= 60 &&
         !p.startCmd &&
-        /^(zsh|bash|fish|sh)$/.test(p.currentCmd) &&
+        SHELL_RE.test(p.currentCmd) &&
         panes.filter((q) => q.windowId === p.windowId).length > 1,
     );
     if (!suspects.length) return;
@@ -1276,9 +1279,28 @@ export function runSidebarRenderer(): void {
   async function installTmuxWiring(): Promise<void> {
     const ctl = (cmd: string) =>
       `${process.execPath} ${process.argv[1]} sidebar-ctl ${cmd} '#{pane_id}'`;
+    // Keys from config (tmux.keys.sidebarFocus/sidebarToggle; defaults M-s/M-S).
+    // The previous binds are remembered on disk so a config change unbinds them —
+    // rebinding alone would leave the old key live until the tmux server restarts.
+    // (popup/next stale binds are handled differently: cli.ts's setup diffs the
+    // rendered tmux.conf fragment instead, since those binds live in a template.)
+    const keys = tmuxKeys(configCache());
+    const bindArgs = (spec: string) => {
+      const parsed = parseTmuxKey(spec);
+      return parsed.table === "root" ? ["-n", parsed.key] : [parsed.key];
+    };
+    const marker = `${PATHS.dir}/sidebar-keys.json`;
     try {
-      await Bun.$`tmux bind-key -n M-s run-shell ${ctl("focus")}`.quiet();
-      await Bun.$`tmux bind-key -n M-S run-shell ${ctl("toggle")}`.quiet();
+      let previous: { focus?: string; toggle?: string } = {};
+      try { previous = JSON.parse(await Bun.file(marker).text()); } catch {}
+      for (const [prev, current] of [[previous.focus, keys.sidebarFocus], [previous.toggle, keys.sidebarToggle]] as const) {
+        if (prev && prev !== current) await Bun.$`tmux unbind-key ${bindArgs(prev)}`.quiet().nothrow();
+      }
+      await Bun.$`tmux bind-key ${bindArgs(keys.sidebarFocus)} run-shell ${ctl("focus")}`.quiet();
+      await Bun.$`tmux bind-key ${bindArgs(keys.sidebarToggle)} run-shell ${ctl("toggle")}`.quiet();
+      if (previous.focus !== keys.sidebarFocus || previous.toggle !== keys.sidebarToggle) {
+        await Bun.write(marker, JSON.stringify({ focus: keys.sidebarFocus, toggle: keys.sidebarToggle }));
+      }
       // cycling windows never lands you inside a sidebar — bounce to the pane
       // right of it (pure tmux, alt+[ / ] untouched)
       await Bun.$`tmux set-hook -g after-select-window ${`if -F "#{&&:#{m:*${STUB_MARK}*,#{pane_start_command}},#{e|>:#{window_panes},1}}" "select-pane -t '{right-of}'"`}`.quiet();

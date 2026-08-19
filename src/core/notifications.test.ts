@@ -32,7 +32,6 @@ function mkSession(over: Partial<Session> = {}): Session {
     baseRepoPath: "/x",
     branch: "",
     status: "waiting",
-    contextPercent: 0,
     messageCount: 0,
     summary: "",
     modified: new Date(0),

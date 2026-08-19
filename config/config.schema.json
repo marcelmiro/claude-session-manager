@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/marcelmiro/claude-session-manager/blob/main/config/config.schema.json",
+  "$id": "https://github.com/marcelmiro/claude0/blob/main/config/config.schema.json",
   "title": "Claude0 configuration",
   "type": "object",
   "additionalProperties": false,
@@ -43,7 +43,12 @@
       "required": ["statusMonitor", "windowPrefix"],
       "properties": {
         "statusMonitor": { "type": "boolean" },
-        "windowPrefix": { "type": "boolean" }
+        "windowPrefix": { "type": "boolean" },
+        "repoAbbreviations": {
+          "type": "object",
+          "additionalProperties": { "type": "string", "minLength": 1 },
+          "description": "Repo name → short display name on tmux window names and the sidebar (e.g. {\"claude0\": \"c0\"}). Lists, grouping, and push labels keep the real name."
+        }
       }
     },
     "notifications": {
@@ -51,7 +56,31 @@
       "additionalProperties": false,
       "required": ["native"],
       "properties": {
-        "native": { "type": "boolean" }
+        "native": { "type": "boolean" },
+        "terminalBundleId": {
+          "type": "string",
+          "description": "macOS bundle id a notification click raises (terminal-notifier -activate). Omit for the Ghostty default; empty string disables -activate."
+        },
+        "pushContact": {
+          "type": "string",
+          "description": "VAPID contact (mailto: or https:) identifying you to Web Push services. Empty or omitted: derived from `git config user.email`."
+        }
+      }
+    },
+    "tmux": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "keys": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "popup": { "type": "string", "pattern": "^(prefix ([MCS]-)*[A-Za-z0-9]+|([MCS]-)+[A-Za-z0-9]+|[Ff][0-9]{1,2})$", "description": "Opens the Claude0 popup. tmux notation: \"prefix a\" = prefix table; bare \"M-x\" = no-prefix (root) table, modifier required. Key tokens are letters/digits only (named keys like Up/BSpace/F5 included). Changes apply on the next `claude0 setup` run." },
+            "next": { "type": "string", "pattern": "^(prefix ([MCS]-)*[A-Za-z0-9]+|([MCS]-)+[A-Za-z0-9]+|[Ff][0-9]{1,2})$", "description": "Switches to the next attention session (claude0 next). Changes apply on the next `claude0 setup` run." },
+            "sidebarFocus": { "type": "string", "pattern": "^(prefix ([MCS]-)*[A-Za-z0-9]+|([MCS]-)+[A-Za-z0-9]+|[Ff][0-9]{1,2})$", "description": "Focuses the inbox sidebar pane. Changes apply after a `claude0 daemon` restart." },
+            "sidebarToggle": { "type": "string", "pattern": "^(prefix ([MCS]-)*[A-Za-z0-9]+|([MCS]-)+[A-Za-z0-9]+|[Ff][0-9]{1,2})$", "description": "Shows/hides the inbox sidebar. Changes apply after a `claude0 daemon` restart." }
+          }
+        }
       }
     }
   }

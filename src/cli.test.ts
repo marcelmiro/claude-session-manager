@@ -77,18 +77,8 @@ test("setup installs Claude0-owned terminal fragments and imports them idempoten
   expect(tmux.match(/\.config\/claude0\/tmux\.conf/g)).toHaveLength(2); // test + source in one import line
 });
 
-test("setup migrates terminal sidecars before retiring them", async () => {
-  mkdirSync(configDir, { recursive: true });
-  writeFileSync(`${configDir}/config.json`, "{}");
-  writeFileSync(`${configDir}/terminal-mode`, "remote\n");
-  writeFileSync(`${configDir}/remote-host`, "vm.example.ts.net\n");
-
+test("setup installs the config.json-reading terminal launcher", async () => {
   await setup();
-
-  const config = JSON.parse(readFileSync(`${configDir}/config.json`, "utf8"));
-  expect(config.terminal).toMatchObject({ defaultTarget: "remote", remoteHost: "vm.example.ts.net" });
-  expect(existsSync(`${configDir}/terminal-mode`)).toBe(false);
-  expect(existsSync(`${configDir}/remote-host`)).toBe(false);
   expect(readFileSync(`${configDir}/terminal-launcher`, "utf8")).toContain('config_file="$HOME/.config/claude0/config.json"');
 });
 
@@ -236,46 +226,18 @@ test("setup() writes every hook script stamped with the current HOOK_VERSION", a
   }
 });
 
-test("setup removes retired Claude0 worktree hooks and scripts but preserves user hooks", async () => {
-  mkdirSync(hooksDir, { recursive: true });
-  for (const script of ["worktree-create.sh", "worktree-remove.sh", "subagent-worktree-cleanup.sh"]) {
-    writeFileSync(`${hooksDir}/${script}`, "#!/bin/bash\n# old Claude0 hook\n");
-  }
-  writeFileSync(settingsPath, JSON.stringify({
-    hooks: {
-      WorktreeCreate: [{ hooks: [
-        { type: "command", command: `bash "${hooksDir}/worktree-create.sh"` },
-        { type: "command", command: "/usr/local/bin/user-worktree-hook" },
-      ] }],
-      WorktreeRemove: [{ hooks: [{ type: "command", command: `bash "${hooksDir}/worktree-remove.sh"` }] }],
-      SubagentStop: [{ hooks: [{ type: "command", command: `bash "${hooksDir}/subagent-worktree-cleanup.sh"` }] }],
-    },
-  }));
-
-  await setup();
-  const settings = JSON.parse(readFileSync(settingsPath, "utf8"));
-  expect(settings.hooks.WorktreeCreate[0].hooks).toEqual([
-    { type: "command", command: "/usr/local/bin/user-worktree-hook" },
-  ]);
-  expect(settings.hooks.WorktreeRemove).toEqual([]);
-  expect(hookEntries(settings, "SubagentStop")).toHaveLength(1); // event logger only
-  for (const script of ["worktree-create.sh", "worktree-remove.sh", "subagent-worktree-cleanup.sh"]) {
-    expect(existsSync(`${hooksDir}/${script}`)).toBe(false);
-  }
-});
-
-test("hook gates branch on uname: darwin keeps frontmost/attached probes, elsewhere reads client_activity", async () => {
-  // On a remote host a persistent SSH attach is the steady state, so "client
-  // attached" stops implying presence — both gates must consult keystroke recency
-  // there while leaving the macOS behavior byte-for-byte intact.
+test("hook gates read client_activity on every platform — no uname branch, no frontmost probe", async () => {
+  // Presence is keystroke recency everywhere: an attached client alone is not
+  // presence (a remote host's persistent SSH attach is the steady state), and
+  // frontmost-app probes would hardcode a terminal app name.
   await setup();
   const pre = readFileSync(`${hooksDir}/pretooluse.sh`, "utf8");
-  expect(pre).toContain('[ "$(uname)" = "Darwin" ]');
   expect(pre).toContain("#{client_activity}");
+  expect(pre).not.toContain("uname");
   const q = readFileSync(`${hooksDir}/question-pretooluse.sh`, "utf8");
-  expect(q).toContain('[ "$(uname)" = "Darwin" ]');
   expect(q).toContain("#{client_activity}");
-  expect(q).toContain("lsappinfo"); // darwin branch intact
+  expect(q).not.toContain("uname");
+  expect(q).not.toContain("lsappinfo");
   // The window constant is interpolated from core/presence.ts, not hand-copied.
   expect(q).toMatch(/-le 60\b/);
   expect(pre).toMatch(/-le 60\b/);
@@ -329,7 +291,7 @@ test("AskUserQuestion is delegated: pretooluse.sh exits for it, question-pretool
   expect(q).toContain("claude0 question-hook");
   expect(q).toContain("bridge-consumer");
   expect(q).toContain("panes/$TMUX_PANE");
-  expect(q).toContain("lsappinfo");
+  expect(q).toContain("#{client_activity}");
   // No claude-version gate (dropped 2026-07-18) — updatedInput is assumed forward-compatible.
   expect(q).not.toContain("claude --version");
 });

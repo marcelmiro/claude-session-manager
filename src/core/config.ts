@@ -1,7 +1,6 @@
 import { homedir } from "os";
-import { mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import defaultConfigJson from "../../config/default.json";
-import type { Config } from "../types";
+import { mkdirSync, renameSync, writeFileSync } from "node:fs";
+import type { Config, TmuxKeys } from "../types";
 
 // CLAUDE0_HOME overrides the home root (tests point it at a temp dir; bun's
 // os.homedir() ignores a runtime-set $HOME, so an env seam is the reliable hook).
@@ -15,12 +14,45 @@ export const PATHS = {
   uploads: `${CONFIG_DIR}/uploads`, // images uploaded from the mobile bridge, pasted into a pane
 } as const;
 
-const DEFAULT_CONFIG = defaultConfigJson as Config;
-const LEGACY_DEFAULT_PRIORITY = ["throxy", "customeros", "~", "claude0"];
-const RETIRED_KEYS = new Set(["ntfyTopic", "bridgeUrl"]);
-const LEGACY_TERMINAL_FILES = ["terminal-mode", "remote-host", "local-session", "remote-session"];
-const CONFIG_MIGRATION_LOCK = `${CONFIG_DIR}/config-migration.lock`;
-
+/**
+ * Complete defaults — the single source for fresh-config generation, per-key
+ * fallbacks at points of use, and the missing-key merge in `ensureUserConfig`.
+ * Lives in code (not a shipped JSON file) so a code fallback and the written
+ * template can never drift apart.
+ */
+export const DEFAULT_CONFIG = {
+  $schema: "./config.schema.json",
+  schemaVersion: 1,
+  repositories: {
+    roots: ["~/dev"],
+    priority: [],
+  },
+  terminal: {
+    defaultTarget: "local",
+    remoteHost: null,
+    localSession: "main",
+    remoteSession: "main",
+  },
+  ui: {
+    statusMonitor: true,
+    windowPrefix: true,
+    repoAbbreviations: {},
+  },
+  notifications: {
+    native: true,
+    terminalBundleId: "com.mitchellh.ghostty",
+    // "" ⇒ derive from `git config user.email` at point of use
+    pushContact: "",
+  },
+  tmux: {
+    keys: {
+      popup: "prefix a",
+      next: "prefix C-a",
+      sidebarFocus: "M-s",
+      sidebarToggle: "M-S",
+    },
+  },
+} satisfies Config;
 /**
  * Write `text` to `path` atomically (tmp→rename) so a concurrent reader never
  * sees a half-written file. Shared by every state-file writer under PATHS.dir.
@@ -65,7 +97,7 @@ function onlyKeys(value: Record<string, unknown>, allowed: string[], path: strin
 /** Validate the complete v1 file. Config mistakes are surfaced, never silently defaulted. */
 export function validateConfig(value: unknown): Config {
   if (!isObject(value)) throw new Error("config must be a JSON object");
-  onlyKeys(value, ["$schema", "schemaVersion", "repositories", "terminal", "ui", "notifications"], "config");
+  onlyKeys(value, ["$schema", "schemaVersion", "repositories", "terminal", "ui", "notifications", "tmux"], "config");
   if (value.schemaVersion !== 1) throw new Error(`schemaVersion must be 1 (received ${String(value.schemaVersion)})`);
   if (value.$schema !== undefined && typeof value.$schema !== "string") throw new Error("$schema must be a string");
 
@@ -85,9 +117,62 @@ export function validateConfig(value: unknown): Config {
   }
 
   if (!isObject(value.ui)) throw new Error("ui must be an object");
-  onlyKeys(value.ui, ["statusMonitor", "windowPrefix"], "ui");
+  onlyKeys(value.ui, ["statusMonitor", "windowPrefix", "repoAbbreviations"], "ui");
+  const repoAbbreviations = value.ui.repoAbbreviations;
+  if (repoAbbreviations !== undefined) {
+    if (!isObject(repoAbbreviations)) throw new Error("ui.repoAbbreviations must be an object");
+    for (const [repo, short] of Object.entries(repoAbbreviations)) {
+      if (typeof short !== "string" || short.length === 0) {
+        throw new Error(`ui.repoAbbreviations.${repo} must be a non-empty string`);
+      }
+    }
+  }
   if (!isObject(value.notifications)) throw new Error("notifications must be an object");
-  onlyKeys(value.notifications, ["native"], "notifications");
+  onlyKeys(value.notifications, ["native", "terminalBundleId", "pushContact"], "notifications");
+  // Optional on purpose ($schema precedent): absent falls back to the Ghostty default
+  // at the point of use; "" is a real value meaning "no -activate on click".
+  if (value.notifications.terminalBundleId !== undefined && typeof value.notifications.terminalBundleId !== "string") {
+    throw new Error("notifications.terminalBundleId must be a string");
+  }
+  // Absent or "" ⇒ derive from `git config user.email` at point of use.
+  if (value.notifications.pushContact !== undefined && typeof value.notifications.pushContact !== "string") {
+    throw new Error("notifications.pushContact must be a string");
+  }
+  let tmux: Config["tmux"];
+  if (value.tmux !== undefined) {
+    if (!isObject(value.tmux)) throw new Error("tmux must be an object");
+    onlyKeys(value.tmux, ["keys"], "tmux");
+    if (value.tmux.keys !== undefined) {
+      if (!isObject(value.tmux.keys)) throw new Error("tmux.keys must be an object");
+      const names = ["popup", "next", "sidebarFocus", "sidebarToggle"];
+      onlyKeys(value.tmux.keys, names, "tmux.keys");
+      for (const name of names) {
+        const spec = value.tmux.keys[name];
+        if (spec === undefined) continue;
+        if (typeof spec !== "string") throw new Error(`tmux.keys.${name} must be a string`);
+        const problem = tmuxKeyProblem(spec);
+        if (problem) throw new Error(`tmux.keys.${name}: ${problem}`);
+      }
+      tmux = { keys: value.tmux.keys as NonNullable<Config["tmux"]>["keys"] };
+    } else {
+      tmux = {};
+    }
+  }
+  if (tmux?.keys) {
+    // Collisions are checked on the RESOLVED set: a user key can also collide with
+    // another binding's default (e.g. popup "M-s" vs sidebarFocus's default "M-s").
+    // tmux keeps only the last bind for a table+key, so a collision would silently
+    // disable one of the two actions.
+    const resolved = tmuxKeys({ ...DEFAULT_CONFIG, tmux });
+    const byBind = new Map<string, string>();
+    for (const [name, spec] of Object.entries(resolved)) {
+      const parsed = parseTmuxKey(spec);
+      const bind = `${parsed.table} ${parsed.key}`;
+      const other = byBind.get(bind);
+      if (other) throw new Error(`tmux.keys: ${other} and ${name} both bind "${spec}"`);
+      byBind.set(bind, name);
+    }
+  }
 
   return {
     ...(value.$schema === undefined ? {} : { $schema: value.$schema }),
@@ -102,8 +187,65 @@ export function validateConfig(value: unknown): Config {
     ui: {
       statusMonitor: booleanAt(value.ui.statusMonitor, "ui.statusMonitor"),
       windowPrefix: booleanAt(value.ui.windowPrefix, "ui.windowPrefix"),
+      ...(repoAbbreviations === undefined ? {} : { repoAbbreviations: repoAbbreviations as Record<string, string> }),
     },
-    notifications: { native: booleanAt(value.notifications.native, "notifications.native") },
+    notifications: {
+      native: booleanAt(value.notifications.native, "notifications.native"),
+      ...(value.notifications.terminalBundleId === undefined
+        ? {}
+        : { terminalBundleId: value.notifications.terminalBundleId }),
+      ...(value.notifications.pushContact === undefined ? {} : { pushContact: value.notifications.pushContact }),
+    },
+    ...(tmux === undefined ? {} : { tmux }),
+  };
+}
+
+/**
+ * Validate a tmux key spec ("prefix a" ⇒ prefix table, bare "M-s" ⇒ root table).
+ * Returns a problem description, or null when valid. A bare unmodified key in the
+ * root table is rejected: `bind-key -n a` would swallow every literal `a` typed
+ * into any pane. Key tokens are limited to letters/digits — which covers named keys
+ * (Up, Space, BSpace, F5, …) — because quotes, `;` and `\` re-tokenize the rendered
+ * `bind-key` line when tmux sources the fragment (a bare `;` key even turns the
+ * bound command into one that runs immediately at source time).
+ */
+const KEY_TOKEN = /^[A-Za-z0-9]+$/;
+/** Modifiers stripped, is the remaining key name letters/digits only? */
+function safeKeyToken(key: string): boolean {
+  return KEY_TOKEN.test(key.replace(/^(?:[MCS]-)+/, ""));
+}
+export function tmuxKeyProblem(spec: string): string | null {
+  const parts = spec.trim().split(/\s+/);
+  if (parts.length === 2 && parts[0] === "prefix") {
+    if (!parts[1]) return 'missing key after "prefix"';
+    return safeKeyToken(parts[1]) ? null : `key "${parts[1]}" may only use modifiers plus letters/digits (named keys like Up/BSpace/F5 included)`;
+  }
+  if (parts.length !== 1 || !parts[0]) return 'must be "prefix <key>" or a modified root-table key like "M-s"';
+  const key = parts[0];
+  if (/^F\d{1,2}$/i.test(key)) return null;
+  if (/^(?:[MCS]-)+/.test(key)) {
+    return safeKeyToken(key) ? null : `key "${key}" may only use modifiers plus letters/digits (named keys like Up/BSpace/F5 included)`;
+  }
+  return `root-table binding "${key}" needs a modifier (e.g. "M-${key}") — an unmodified key would swallow that character in every pane; use "prefix ${key}" for a prefixed binding`;
+}
+
+/** Parse a validated tmux key spec into its bind table + key. */
+export function parseTmuxKey(spec: string): { table: "prefix" | "root"; key: string } {
+  const problem = tmuxKeyProblem(spec);
+  if (problem) throw new Error(`invalid tmux key "${spec}": ${problem}`);
+  const parts = spec.trim().split(/\s+/);
+  return parts.length === 2 ? { table: "prefix", key: parts[1]! } : { table: "root", key: parts[0]! };
+}
+
+/** Resolved tmux.keys with defaults filled per key. */
+export function tmuxKeys(config: Config | null): TmuxKeys {
+  const defaults = DEFAULT_CONFIG.tmux.keys;
+  const user = config?.tmux?.keys ?? {};
+  return {
+    popup: user.popup ?? defaults.popup,
+    next: user.next ?? defaults.next,
+    sidebarFocus: user.sidebarFocus ?? defaults.sidebarFocus,
+    sidebarToggle: user.sidebarToggle ?? defaults.sidebarToggle,
   };
 }
 
@@ -116,82 +258,14 @@ export function parseConfigJson(text: string): unknown {
   }
 }
 
-async function legacySetting(name: string, fallback: string | null): Promise<string | null> {
-  try {
-    const text = (await Bun.file(`${PATHS.dir}/${name}`).text()).trim();
-    return text || fallback;
-  } catch {
-    return fallback;
-  }
-}
+// Last successfully loaded config. Sync hot paths that can't await (e.g.
+// abbreviateRepo inside window-name building) read it via configCache();
+// entry points populate it with their startup loadConfig().
+let cachedConfig: Config | null = null;
 
-/** Convert the pre-v1 flat shape and terminal sidecar files into the single v1 file. */
-async function migrateLegacyConfig(raw: Record<string, unknown>): Promise<Config> {
-  const known = new Set(["statusMonitor", "windowPrefix", "nativeNotification", "repoPaths", "priorityRepos"]);
-  const unknown = Object.keys(raw).filter((key) => !known.has(key) && !RETIRED_KEYS.has(key));
-  if (unknown.length) throw new Error(`legacy config contains unknown ${unknown.length === 1 ? "key" : "keys"}: ${unknown.join(", ")}`);
-
-  const target = await legacySetting("terminal-mode", "local");
-  const remoteHost = await legacySetting("remote-host", null);
-  return {
-    $schema: "./config.schema.json",
-    schemaVersion: 1,
-    repositories: {
-      roots: raw.repoPaths === undefined ? ["~/Documents"] : stringsAt(raw.repoPaths, "repoPaths", { nonEmpty: true }),
-      priority: raw.priorityRepos === undefined
-        ? [...LEGACY_DEFAULT_PRIORITY]
-        : stringsAt(raw.priorityRepos, "priorityRepos", { nonEmpty: true }),
-    },
-    terminal: {
-      defaultTarget: target === "remote" ? "remote" : "local",
-      remoteHost,
-      localSession: (await legacySetting("local-session", "main"))!,
-      remoteSession: (await legacySetting("remote-session", "main"))!,
-    },
-    ui: {
-      statusMonitor: raw.statusMonitor === undefined ? true : booleanAt(raw.statusMonitor, "statusMonitor"),
-      windowPrefix: raw.windowPrefix === undefined ? true : booleanAt(raw.windowPrefix, "windowPrefix"),
-    },
-    notifications: {
-      native: raw.nativeNotification === undefined ? true : booleanAt(raw.nativeNotification, "nativeNotification"),
-    },
-  };
-}
-
-/** Serialize the one-time migration across TUI/monitor/bridge startup. */
-async function migrateLegacyConfigOnce(): Promise<Config> {
-  let ownsLock = false;
-  for (let attempt = 0; attempt < 100; attempt++) {
-    try {
-      mkdirSync(CONFIG_MIGRATION_LOCK);
-      ownsLock = true;
-      break;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-      // Another process owns the migration. Once its atomic config write lands,
-      // consume that result rather than racing its sidecar reads/removals.
-      await Bun.sleep(50);
-      try {
-        const current = parseConfigJson(await Bun.file(PATHS.config).text());
-        if (isObject(current) && current.schemaVersion !== undefined) return validateConfig(current);
-      } catch {
-        // Writer has not committed yet; keep waiting for the bounded interval.
-      }
-    }
-  }
-  if (!ownsLock) throw new Error(`timed out waiting for ${CONFIG_MIGRATION_LOCK}; remove it only if no Claude0 process is migrating config`);
-
-  try {
-    // The config may have been migrated between our initial read and lock acquisition.
-    const current = parseConfigJson(await Bun.file(PATHS.config).text());
-    if (isObject(current) && current.schemaVersion !== undefined) return validateConfig(current);
-    if (!isObject(current)) throw new Error("legacy config must be a JSON object");
-    const migrated = await migrateLegacyConfig(current);
-    writeAtomic(PATHS.config, `${JSON.stringify(migrated, null, 2)}\n`);
-    return migrated;
-  } finally {
-    rmSync(CONFIG_MIGRATION_LOCK, { recursive: true, force: true });
-  }
+/** The last loadConfig() result, falling back to defaults if none loaded yet. */
+export function configCache(): Config {
+  return cachedConfig ?? cloneDefault();
 }
 
 export async function loadConfig(): Promise<Config> {
@@ -199,7 +273,7 @@ export async function loadConfig(): Promise<Config> {
   try {
     text = await Bun.file(PATHS.config).text();
   } catch {
-    return cloneDefault();
+    return (cachedConfig = cloneDefault());
   }
 
   let raw: unknown;
@@ -211,16 +285,35 @@ export async function loadConfig(): Promise<Config> {
   }
 
   try {
-    if (isObject(raw) && raw.schemaVersion === undefined) {
-      return await migrateLegacyConfigOnce();
-    }
-    return validateConfig(raw);
+    return (cachedConfig = validateConfig(raw));
   } catch (error) {
     throw new Error(`Invalid Claude0 config at ${PATHS.config}: ${error instanceof Error ? error.message : String(error)}`);
   }
 }
 
-/** Install discoverable defaults/schema without ever overwriting a user's config. */
+/**
+ * Add keys the defaults have and the user's file lacks — never overwrite a present
+ * value (an explicit "" included). Keeps the materialized file complete (every knob
+ * visible) as new keys ship, while `validateConfig` keeps new keys optional so a
+ * not-yet-merged file still loads between an upgrade and the next `claude0 setup`.
+ * Runs after validation in `ensureUserConfig`, so the input is a valid v1 shape.
+ */
+function mergeMissingKeys(user: Record<string, unknown>, defaults: Record<string, unknown>): boolean {
+  let changed = false;
+  for (const [key, def] of Object.entries(defaults)) {
+    const current = user[key];
+    if (current === undefined) {
+      user[key] = structuredClone(def);
+      changed = true;
+    } else if (isObject(current) && isObject(def)) {
+      changed = mergeMissingKeys(current, def) || changed;
+    }
+  }
+  return changed;
+}
+
+/** Install discoverable defaults/schema; back-fills keys shipped since the user's
+ *  file was written, never replacing a present value. */
 export async function ensureUserConfig(): Promise<boolean> {
   mkdirSync(PATHS.dir, { recursive: true });
   let created = false;
@@ -233,18 +326,15 @@ export async function ensureUserConfig(): Promise<boolean> {
   if (!(await Bun.file(PATHS.configSchema).exists()) || (await Bun.file(PATHS.configSchema).text()) !== schema) {
     writeAtomic(PATHS.configSchema, schema);
   }
-  // Validate (and migrate) after the schema is present so editor diagnostics work immediately.
+  // Validate after the schema is present so editor diagnostics work immediately.
   await loadConfig();
+  // Back-fill AFTER validation: an invalid file has already thrown above, untouched.
+  // Merged keys come from DEFAULT_CONFIG, so the result stays valid by construction.
+  const raw = parseConfigJson(await Bun.file(PATHS.config).text());
+  if (isObject(raw) && mergeMissingKeys(raw, DEFAULT_CONFIG)) {
+    writeAtomic(PATHS.config, `${JSON.stringify(raw, null, 2)}\n`);
+  }
   return created;
-}
-
-/**
- * Retire terminal sidecars only after setup has installed the config.json-aware
- * launcher. `claude0 config` may migrate JSON while an older launcher is still live;
- * deleting its inputs there would silently reset terminal attachment behavior.
- */
-export function removeLegacyConfigSidecars(): void {
-  for (const name of LEGACY_TERMINAL_FILES) rmSync(`${PATHS.dir}/${name}`, { force: true });
 }
 
 export async function saveConfig(config: Config): Promise<void> {

@@ -66,11 +66,11 @@ test("a home saved cwd with no usable transcript resolves to null (bare resume)"
   expect(await resolveRestoreTarget(SID, root, root, projectsDir)).toBeNull();
 });
 
-test("a deleted worktree resolves to its base repo", async () => {
+test("a deleted managed worktree resolves to its base repo", async () => {
   const base = `${root}/repo`;
   await mkdir(`${base}/.git`, { recursive: true });
   await writeFile(`${base}/.git/HEAD`, "ref: refs/heads/main\n");
-  const worktree = `${root}/repo-feature`; // never created — stands for a deleted worktree
+  const worktree = `${base}/.claude/worktrees/feature`; // never created — stands for a deleted worktree
   expect(await resolveRestoreTarget(SID, worktree, root, projectsDir)).toBe(base);
 });
 

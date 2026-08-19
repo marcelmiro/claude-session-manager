@@ -6,7 +6,7 @@ import { githubSlug, compareUrl, branchPullRequest } from "./pull-request";
 // --- githubSlug ---
 
 test("githubSlug parses ssh, https and .git-less remotes", () => {
-  expect(githubSlug("git@github.com:marcelmiro/claude-session-manager.git")).toBe("marcelmiro/claude-session-manager");
+  expect(githubSlug("git@github.com:marcelmiro/claude0.git")).toBe("marcelmiro/claude0");
   expect(githubSlug("https://github.com/throxy-ai/throxy.git")).toBe("throxy-ai/throxy");
   expect(githubSlug("https://github.com/throxy-ai/throxy")).toBe("throxy-ai/throxy");
   expect(githubSlug("ssh://git@github.com/owner/repo.git")).toBe("owner/repo");
