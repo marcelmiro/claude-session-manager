@@ -63,7 +63,7 @@ The mobile bridge (`claude0 bridge`) runs as a systemd user unit on the Linux VM
 
 **Focus pane pre-selection**: Set `CLAUDE0_FOCUS_PANE=%42` (tmux pane ID) to pre-select that session on launch. Requires `run-shell` to expand the format string: `bind a run-shell 'tmux set-environment CLAUDE0_FOCUS_PANE "#{pane_id}"' \; display-popup -E -w 90% -h 85% claude0`. Falls back to first session if pane not found.
 
-**`claude0 setup` details**: Installs Claude0's Claude lifecycle hooks under `~/.config/c0/hooks`, preserving existing hooks and settings. It also updates narrowly scoped Claude0 tmux/zsh fragments under `~/.config/c0/`, installs the `~/.local/bin/c0` command plus a private terminal launcher under `~/.config/c0/`, and adds one import to the user's `.tmux.conf` and `.zshrc`. Safe to run multiple times (idempotent); personal dotfiles, prompts, tmux presentation, and TPM-managed plugins are never replaced or installed.
+**`claude0 setup` details**: Installs Claude0's Claude lifecycle hooks under `~/.config/c0/hooks`, preserving existing hooks and settings. It also updates narrowly scoped Claude0 tmux/zsh fragments under `~/.config/c0/`, installs the `~/.local/bin/claude0` and `~/.local/bin/c0` commands plus a private terminal launcher under `~/.config/c0/`, and adds one import to the user's `.tmux.conf` and `.zshrc`. Safe to run multiple times (idempotent); personal dotfiles, prompts, tmux presentation, and TPM-managed plugins are never replaced or installed.
 
 ## Architecture
 

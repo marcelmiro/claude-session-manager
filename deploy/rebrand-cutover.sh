@@ -33,7 +33,7 @@ fi
 # step 6 must not die on its own links.
 for cmd in claude0 c0; do
   existing=$(command -v "$cmd" || true)
-  if [[ -n "$existing" && "$existing" != "$HOME/.local/bin/$cmd" && "$existing" != "$HOME/.bun/bin/claude0" ]]; then
+  if [[ -n "$existing" && "$existing" != "$HOME/.local/bin/$cmd" && "$existing" != "$HOME/.bun/bin/$cmd" ]]; then
     die "a different '$cmd' is already on PATH: $existing"
   fi
 done

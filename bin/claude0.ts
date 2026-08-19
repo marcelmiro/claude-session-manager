@@ -32,13 +32,13 @@ function help() {
 
 function terminalHelp() {
   console.log(`
-  \x1b[1mc0 terminal\x1b[0m — Manage terminal attachment
+  \x1b[1mclaude0 terminal\x1b[0m — Manage terminal attachment
 
   \x1b[1mUsage:\x1b[0m
-    \x1b[36mc0 terminal\x1b[0m                   Attach using config.json's defaultTarget
-    \x1b[36mc0 terminal local\x1b[0m             Attach to local tmux for this invocation
-    \x1b[36mc0 terminal remote\x1b[0m            Attach to the configured remote host
-    \x1b[36mc0 terminal status\x1b[0m            Show the effective terminal configuration
+    \x1b[36mclaude0 terminal\x1b[0m                   Attach using config.json's defaultTarget
+    \x1b[36mclaude0 terminal local\x1b[0m             Attach to local tmux for this invocation
+    \x1b[36mclaude0 terminal remote\x1b[0m            Attach to the configured remote host
+    \x1b[36mclaude0 terminal status\x1b[0m            Show the effective terminal configuration
 
   \x1b[1mOptions:\x1b[0m
     \x1b[36m-h, --help\x1b[0m                     Show this help message

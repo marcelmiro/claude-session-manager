@@ -12,7 +12,7 @@ StartLimitIntervalSec=300
 StartLimitBurst=5
 
 [Service]
-# c0's shebang resolves bun via env — the unit must carry the PATH itself (see
+# claude0's shebang resolves bun via env — the unit must carry the PATH itself (see
 # tmux.service for why environment.d can't be trusted here).
 Environment=PATH=%h/.bun/bin:%h/.local/bin:/usr/local/bin:/usr/bin:/bin
 ExecStart=%h/.bun/bin/claude0 bridge

@@ -771,7 +771,7 @@ async function installTerminalIntegration(home: string): Promise<string[]> {
     if (file.executable) await Bun.$`chmod +x ${file.target}`.quiet();
   }
 
-  // `claude0` is the canonical command; `claude0` is the typing shorthand. Both are
+  // `claude0` is the canonical command; `c0` is the typing shorthand. Both are
   // symlinks (not shell aliases) so tmux run-shell, units, and scripts resolve them.
   const commandSource = `${import.meta.dir}/../bin/claude0.ts`;
   for (const name of ["claude0", "c0"]) {

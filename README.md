@@ -18,7 +18,7 @@ git clone https://github.com/marcelmiro/claude0 ~/dev/claude0
 cd ~/dev/claude0
 bun install
 mkdir -p ~/.local/bin
-ln -sf "$PWD/bin/claude0.ts" ~/.local/bin/c0
+ln -sf "$PWD/bin/claude0.ts" ~/.local/bin/claude0
 claude0 setup
 ```
 
