@@ -81,7 +81,9 @@ fi
 # ── 3. Swap ────────────────────────────────────────────────────────────────────
 # Cloud images ship swapless; a swapless box livelocks under memory pressure instead
 # of degrading. Claude Code leaks — swap is the buffer earlyoom needs to act sanely.
-if ! swapon --show | grep -q '^/swapfile'; then
+# /proc/swaps, not `swapon --show`: swapon lives in /usr/sbin, often off the user
+# PATH — a silent lookup failure here would re-run fallocate on live swap.
+if ! grep -q '^/swapfile ' /proc/swaps 2>/dev/null; then
   if [ -d /run/systemd/system ]; then
     note "creating ${SWAP_GB}G swapfile"
     sudo fallocate -l "${SWAP_GB}G" /swapfile

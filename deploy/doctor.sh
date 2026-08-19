@@ -179,7 +179,8 @@ watchers=$(sysctl -n fs.inotify.max_user_watches 2>/dev/null || cat /proc/sys/fs
 instances=$(sysctl -n fs.inotify.max_user_instances 2>/dev/null || cat /proc/sys/fs/inotify/max_user_instances 2>/dev/null || true)
 if [ "${watchers:-0}" -ge 1048576 ] 2>/dev/null; then pass "inotify watches = $watchers"; else fail "inotify watches = ${watchers:-unknown}"; fi
 if [ "${instances:-0}" -ge 16384 ] 2>/dev/null; then pass "inotify instances = $instances"; else fail "inotify instances = ${instances:-unknown}"; fi
-if swapon --show 2>/dev/null | grep -q '^/swapfile'; then pass "swapfile is active"; else fail "swapfile is not active"; fi
+# swapon lives in /usr/sbin (often off the user PATH) — /proc/swaps is always readable.
+if grep -q '^/swapfile ' /proc/swaps 2>/dev/null; then pass "swapfile is active"; else fail "swapfile is not active"; fi
 
 printf '\nDoctor finished: %d failure(s), %d warning(s).\n' "$failures" "$warnings"
 [ "$failures" -eq 0 ]
