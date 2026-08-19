@@ -1734,9 +1734,9 @@ function List() {
 // indented under their base repo (the list arrives base-then-worktrees, in order).
 function NewSession() {
   const list = repos.value;
-  const { rootRef, onTouchStart, onTouchEnd } = useSwipeBack(() => (showNewSession.value = false));
+  const { rootRef } = useSwipeBack(() => (showNewSession.value = false));
   return html`
-    <div class="screen" ref=${rootRef} onTouchStart=${onTouchStart} onTouchEnd=${onTouchEnd}>
+    <div class="screen" ref=${rootRef}>
       <div class="listhead">
         <button class="iconbtn" onClick=${() => (showNewSession.value = false)} aria-label="Back">‹</button>
         <h1 style="margin:0">new session</h1>
@@ -1801,7 +1801,7 @@ function highlightSnippet(snippet, query) {
 function History() {
   const h = history.value;
   const q = historyQuery.value.trim();
-  const { rootRef, onTouchStart, onTouchEnd } = useSwipeBack(() => (showHistory.value = false));
+  const { rootRef } = useSwipeBack(() => (showHistory.value = false));
   const rows = h ? h.rows : [];
 
   // Chips: pinned repos first (same order the list uses), then by match count. The
@@ -1856,7 +1856,7 @@ function History() {
   }
 
   return html`
-    <div class="screen" ref=${rootRef} onTouchStart=${onTouchStart} onTouchEnd=${onTouchEnd}>
+    <div class="screen" ref=${rootRef}>
       <div class="listhead">
         <button class="iconbtn" onClick=${() => (showHistory.value = false)} aria-label="Back">‹</button>
         <h1 style="margin:0">history</h1>
@@ -2914,49 +2914,51 @@ function hScrollerAt(node) {
   return null;
 }
 
-// Interactive swipe-right-to-go-back (iOS-style). Spread the returned handlers onto a
+// Interactive swipe-right-to-go-back (iOS-style). Set the returned `rootRef` on a
 // `.screen` root: the screen tracks the finger, then on release either commits `onBack`
 // (past threshold, sliding the rest of the way off first so it reads as one motion) or
 // springs home. Only a clearly horizontal-right drag engages, so it never steals vertical
 // scroll; it defers to an inner horizontal scroller (e.g. a code block) until that's at
 // its left edge. The touchmove listener is non-passive so it can preventDefault and own
-// the gesture. `deps` re-binds the listener when the root node is (re)created.
+// the gesture. `deps` re-binds the listeners when the root node is (re)created.
+//
+// Listeners live on `document`, not the root: the #app shell is a centered max-width
+// column, so on a wide viewport (iPad) the side gutters are OUTSIDE it — a touch that
+// starts on <body> delivers its entire event stream to <body>, which element handlers
+// can never see. Screens layer (detail → files → diff), each mounting above the last,
+// so a mount-ordered stack decides which instance owns the gesture: the topmost only.
+const swipeScreens = [];
+// The gesture only arms when the touch STARTS in an edge zone: a strip just inside
+// either edge of the app column, plus the whole gutters outside it when the viewport
+// is wider than the column (iPad landscape). A touch starting mid-content never
+// engages — so dragging text-selection handles can't move the screen.
+const SWIPE_EDGE_PX = 28;
+const CONTENT_MAX_PX = 680; // #app column max-width (index.html)
+function inSwipeEdgeZone(x) {
+  const colLeft = Math.max(0, (innerWidth - CONTENT_MAX_PX) / 2);
+  return x < colLeft + SWIPE_EDGE_PX || x > innerWidth - colLeft - SWIPE_EDGE_PX;
+}
 function useSwipeBack(onBack, deps = []) {
   const rootRef = useRef(null);
-  const drag = useRef({ x: 0, y: 0, active: false, dx: 0, decided: false });
-
-  function onTouchStart(e) {
-    const p = e.changedTouches[0];
-    drag.current = { x: p.clientX, y: p.clientY, active: false, dx: 0, decided: false, hScroller: hScrollerAt(e.target) };
-    if (rootRef.current) rootRef.current.style.transition = "none";
-  }
-  function onTouchEnd() {
-    const el = rootRef.current;
-    if (!el || !drag.current.active) return;
-    drag.current.active = false;
-    if (drag.current.dx > Math.min(innerWidth * 0.32, 140)) {
-      el.style.transition = "transform 0.2s ease-out, opacity 0.2s ease-out";
-      el.style.transform = `translateX(${innerWidth}px)`;
-      el.style.opacity = "0";
-      let done = false;
-      const finish = () => {
-        if (done) return;
-        done = true;
-        onBack();
-      };
-      el.addEventListener("transitionend", finish, { once: true });
-      setTimeout(finish, 240); // fallback if transitionend is dropped
-      return;
-    }
-    el.style.transition = "transform 0.2s ease-out, opacity 0.2s ease-out"; // spring home
-    el.style.transform = "";
-    el.style.opacity = "";
-  }
+  const drag = useRef({ x: 0, y: 0, active: false, dx: 0, decided: true });
 
   useEffect(() => {
-    const el = rootRef.current;
-    if (!el) return;
+    const token = {};
+    swipeScreens.push(token);
+
+    function onStart(e) {
+      if (swipeScreens[swipeScreens.length - 1] !== token) return; // not the visible screen
+      const p = e.changedTouches[0];
+      if (!inSwipeEdgeZone(p.clientX)) {
+        drag.current = { x: p.clientX, y: p.clientY, active: false, dx: 0, decided: true };
+        return;
+      }
+      drag.current = { x: p.clientX, y: p.clientY, active: false, dx: 0, decided: false, hScroller: hScrollerAt(e.target) };
+      if (rootRef.current) rootRef.current.style.transition = "none";
+    }
     function onMove(e) {
+      const el = rootRef.current;
+      if (!el) return;
       const p = e.changedTouches[0];
       const dx = p.clientX - drag.current.x;
       const dy = p.clientY - drag.current.y;
@@ -2974,11 +2976,43 @@ function useSwipeBack(onBack, deps = []) {
       el.style.transform = `translateX(${tx}px)`;
       el.style.opacity = String(1 - Math.min(tx / innerWidth, 1) * 0.35);
     }
-    el.addEventListener("touchmove", onMove, { passive: false });
-    return () => el.removeEventListener("touchmove", onMove);
+    function onEnd() {
+      const el = rootRef.current;
+      if (!el || !drag.current.active) return;
+      drag.current.active = false;
+      if (drag.current.dx > Math.min(innerWidth * 0.32, 140)) {
+        el.style.transition = "transform 0.2s ease-out, opacity 0.2s ease-out";
+        el.style.transform = `translateX(${innerWidth}px)`;
+        el.style.opacity = "0";
+        let done = false;
+        const finish = () => {
+          if (done) return;
+          done = true;
+          onBack();
+        };
+        el.addEventListener("transitionend", finish, { once: true });
+        setTimeout(finish, 240); // fallback if transitionend is dropped
+        return;
+      }
+      el.style.transition = "transform 0.2s ease-out, opacity 0.2s ease-out"; // spring home
+      el.style.transform = "";
+      el.style.opacity = "";
+    }
+
+    document.addEventListener("touchstart", onStart, { passive: true });
+    document.addEventListener("touchmove", onMove, { passive: false });
+    document.addEventListener("touchend", onEnd, { passive: true });
+    document.addEventListener("touchcancel", onEnd, { passive: true });
+    return () => {
+      swipeScreens.splice(swipeScreens.indexOf(token), 1);
+      document.removeEventListener("touchstart", onStart);
+      document.removeEventListener("touchmove", onMove);
+      document.removeEventListener("touchend", onEnd);
+      document.removeEventListener("touchcancel", onEnd);
+    };
   }, deps);
 
-  return { rootRef, onTouchStart, onTouchEnd };
+  return { rootRef };
 }
 
 function Detail() {
@@ -3037,7 +3071,7 @@ function Detail() {
   const archived = status === "archived" && !blocked;
 
   // Swipe-right-to-go-back translates the whole Detail screen (rootRef) back to the list.
-  const { rootRef, onTouchStart, onTouchEnd } = useSwipeBack(back);
+  const { rootRef } = useSwipeBack(back);
   const scrollRef = useRef(null); // the thread is the ONLY scroll region (app-shell layout)
   const follow = useRef(true); // auto-scroll only while the user is near the bottom
   const [showJump, setShowJump] = useState(false); // floating "jump to latest" button
@@ -3176,8 +3210,6 @@ function Detail() {
     <div
       class="screen detail"
       ref=${rootRef}
-      onTouchStart=${onTouchStart}
-      onTouchEnd=${onTouchEnd}
     >
       <div class="scroll thread" ref=${scrollRef} onScroll=${syncFloat}>
         ${!t && html`<div class="sub" style="padding:8px">loading…</div>`}
@@ -3668,7 +3700,7 @@ function SubagentView() {
   const [showBrief, setShowBrief] = useState(false);
   // Swipe-right-to-go-back closes the drill-in. Re-binds when a drill-in opens (dep on
   // agentId): the root node only exists while `o` is set.
-  const { rootRef, onTouchStart, onTouchEnd } = useSwipeBack(closeSubagent, [o ? o.agentId : null]);
+  const { rootRef } = useSwipeBack(closeSubagent, [o ? o.agentId : null]);
 
   if (!o) return null;
   const data = subTranscript.value;
@@ -3681,7 +3713,7 @@ function SubagentView() {
   const prev = idx > 0 ? sibs[idx - 1] : null;
   const next = idx >= 0 && idx < sibs.length - 1 ? sibs[idx + 1] : null;
   return html`
-    <div class="screen subagent-view" ref=${rootRef} onTouchStart=${onTouchStart} onTouchEnd=${onTouchEnd}>
+    <div class="screen subagent-view" ref=${rootRef}>
       <div class="subagent-head">
         <button class="iconbtn" onClick=${closeSubagent} aria-label="Back to session">‹</button>
         <span class="grow">
@@ -3874,7 +3906,7 @@ function DiffView() {
   const [data, setData] = useState(null);
   const [wrap, setWrap] = useState(false);
   const [full, setFull] = useState(false);
-  const { rootRef, onTouchStart, onTouchEnd } = useSwipeBack(() => (diffView.value = null), [v ? v.path : null]);
+  const { rootRef } = useSwipeBack(() => (diffView.value = null), [v ? v.path : null]);
   const sid = selectedId.value;
   const path = v ? v.path : null;
   const orig = v ? v.orig : null; // old path of a rename → the route diffs both endpoints
@@ -3928,7 +3960,7 @@ function DiffView() {
   const dir = slash >= 0 ? path.slice(0, slash + 1) : "";
   const base = slash >= 0 ? path.slice(slash + 1) : path;
   return html`
-    <div class="screen files-view diff-view" ref=${rootRef} onTouchStart=${onTouchStart} onTouchEnd=${onTouchEnd}>
+    <div class="screen files-view diff-view" ref=${rootRef}>
       <div class="subagent-head">
         <button class="iconbtn" onClick=${() => (diffView.value = null)} aria-label="Back to session">‹</button>
         <span class="grow"
@@ -4042,7 +4074,7 @@ function FilesView() {
   const rev = transcript.value && transcript.value.rev;
   const [data, setData] = useState(null);
   const online = connected.value;
-  const { rootRef, onTouchStart, onTouchEnd } = useSwipeBack(() => (filesView.value = false), [open]);
+  const { rootRef } = useSwipeBack(() => (filesView.value = false), [open]);
   const sid = selectedId.value;
   // Never carry one session's file list into another — reset to the new session's
   // cached list (shared with ChangesCard). Declared before the fetch effect so it
@@ -4081,7 +4113,7 @@ function FilesView() {
     ${fileLine(f)}
   </div>`;
   return html`
-    <div class="screen files-view" ref=${rootRef} onTouchStart=${onTouchStart} onTouchEnd=${onTouchEnd}>
+    <div class="screen files-view" ref=${rootRef}>
       <div class="subagent-head">
         <button class="iconbtn" onClick=${() => (filesView.value = false)} aria-label="Back to session">‹</button>
         <!-- Grouped: the baseline alone. Summing the tiers would DOUBLE-COUNT a file that was
