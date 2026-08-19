@@ -35,6 +35,7 @@ beforeEach(() => {
   rmSync(`${TEST_HOME}/.local/bin/c0`, { force: true });
   rmSync(`${TEST_HOME}/.zshrc`, { force: true });
   rmSync(`${TEST_HOME}/.tmux.conf`, { force: true });
+  rmSync(`${TEST_HOME}/.config/zsh`, { recursive: true, force: true });
   mkdirSync(claudeDir, { recursive: true });
   // Pre-existing user content that setup() must NOT clobber.
   writeFileSync(
@@ -107,6 +108,46 @@ function hookEntry(settings: any, event: string, script: string): any {
     e.hooks.some((h: any) => typeof h.command === "string" && h.command.includes(script)),
   );
 }
+
+test("a $HOME-portable registration is recognized, kept verbatim, and not duplicated", async () => {
+  // A dotfiles-managed settings.json registers hooks as $HOME/... so the same
+  // file works on machines with different homes. Setup must treat that as the
+  // registration — not append this machine's absolute form beside it.
+  writeFileSync(
+    settingsPath,
+    JSON.stringify({
+      hooks: {
+        SessionStart: [
+          { hooks: [{ type: "command", command: 'bash "$HOME/.config/claude0/hooks/session-start.sh"' }] },
+        ],
+      },
+    }),
+  );
+
+  await setup();
+
+  const settings = JSON.parse(readFileSync(settingsPath, "utf8"));
+  const commands = settings.hooks.SessionStart.flatMap((e: any) => e.hooks.map((h: any) => h.command));
+  expect(commands.filter((c: string) => c.includes("session-start.sh"))).toEqual([
+    'bash "$HOME/.config/claude0/hooks/session-start.sh"',
+  ]);
+});
+
+test("zsh import is skipped when a dotfiles layer already sources the fragment", async () => {
+  writeFileSync(`${TEST_HOME}/.zshrc`, "# user zsh config\n");
+  mkdirSync(`${TEST_HOME}/.config/zsh`, { recursive: true });
+  writeFileSync(
+    `${TEST_HOME}/.config/zsh/common.zsh`,
+    '[[ -r "$HOME/.config/claude0/shell.zsh" ]] && source "$HOME/.config/claude0/shell.zsh"\n',
+  );
+
+  await setup();
+
+  const zshrc = readFileSync(`${TEST_HOME}/.zshrc`, "utf8");
+  expect(zshrc).not.toContain("shell.zsh"); // sourced via common.zsh already
+  // the tmux side has no aux import, so it still gets the entry-point line
+  expect(readFileSync(`${TEST_HOME}/.tmux.conf`, "utf8")).toContain(".config/claude0/tmux.conf");
+});
 
 test("running setup() twice leaves exactly one Claude0 entry per event and preserves user content", async () => {
   await setup();

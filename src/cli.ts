@@ -786,14 +786,26 @@ async function installTerminalIntegration(home: string): Promise<string[]> {
     }
   }
 
+  // A dotfiles layer may already source the fragment from a file the entry
+  // point includes (e.g. ~/.config/zsh/common.zsh) — appending the import to
+  // the entry point too would source it twice. Detect by fragment path, not
+  // exact line, and look in the aux config dirs as well as the entry file.
   const imports = [
-    { path: `${home}/.tmux.conf`, line: TMUX_SOURCE_LINE, label: "tmux import" },
-    { path: `${home}/.zshrc`, line: ZSH_SOURCE_LINE, label: "zsh import" },
+    { path: `${home}/.tmux.conf`, line: TMUX_SOURCE_LINE, fragment: ".config/claude0/tmux.conf", aux: `${home}/.config/tmux`, label: "tmux import" },
+    { path: `${home}/.zshrc`, line: ZSH_SOURCE_LINE, fragment: ".config/claude0/shell.zsh", aux: `${home}/.config/zsh`, label: "zsh import" },
   ];
   for (const entry of imports) {
     let existing = "";
     try { existing = await Bun.file(entry.path).text(); } catch {}
-    if (!existing.split("\n").includes(entry.line)) {
+    let sourced = existing.includes(entry.fragment);
+    if (!sourced) {
+      try {
+        for await (const f of new Bun.Glob("*").scan({ cwd: entry.aux, absolute: true })) {
+          if ((await Bun.file(f).text()).includes(entry.fragment)) { sourced = true; break; }
+        }
+      } catch {}
+    }
+    if (!sourced) {
       const prefix = existing.length === 0 ? "" : existing.endsWith("\n") ? "\n" : "\n\n";
       await Bun.write(entry.path, `${existing}${prefix}# Claude0 integration (managed by claude0 setup)\n${entry.line}\n`);
       changed.push(entry.label);
@@ -898,18 +910,26 @@ export async function setup(): Promise<void> {
     }
   }
 
-  // Ensure each event has exactly one Claude0 registration. Match on the full script
-  // path (a stable idempotency key) so a re-run never duplicates an entry.
+  // Ensure each event has exactly one Claude0 registration. Match on the
+  // home-independent suffix of the script path, not the absolute path: a
+  // dotfiles-managed settings.json registers hooks as `$HOME/...`, and the
+  // same file travels between machines whose homes differ — an absolute-path
+  // match misses those and appends a duplicate that fires every hook twice.
   for (const { event, script, matcher, timeout } of HOOK_REGISTRATIONS) {
     const path = scriptPath(script);
+    const pathSuffix = `/.config/claude0/hooks/${script}`;
     if (!Array.isArray(settings.hooks[event])) settings.hooks[event] = [];
     const existing = settings.hooks[event]
       .flatMap((entry: any) => (Array.isArray(entry.hooks) ? entry.hooks : []))
-      .find((h: any) => typeof h.command === "string" && h.command.includes(path));
+      .find((h: any) => typeof h.command === "string" && h.command.includes(pathSuffix));
     // Explicit `bash` + quoted path: Claude runs hook commands via `/bin/sh -c`, which is
     // dash on Debian-family hosts — the scripts are bash, and a bare shebang-reliant path
     // has been seen to fail there. Quoting keeps a path with spaces from silently exiting 127.
     const desiredCommand = `bash "${path}"`;
+    // Any `bash "…/.config/claude0/hooks/<script>"` command is already correct in
+    // either home spelling ($HOME or absolute) — rewriting it to this machine's
+    // absolute path would break the portable form a shared settings.json uses.
+    const commandOk = (cmd: string) => cmd.startsWith('bash "') && cmd.endsWith(`${pathSuffix}"`);
     if (!existing) {
       const hook: Record<string, unknown> = { type: "command", command: desiredCommand };
       if (timeout !== undefined) hook.timeout = timeout;
@@ -922,7 +942,7 @@ export async function setup(): Promise<void> {
       // install from an older version keeps its stale command form / timeout forever
       // otherwise — and that timeout is the kill deadline the hook's own poll window
       // has to stay inside.
-      if (existing.command !== desiredCommand) {
+      if (!commandOk(existing.command)) {
         existing.command = desiredCommand;
         settingsChanged = true;
       }
@@ -989,6 +1009,22 @@ async function installDaemonAgent(home: string): Promise<"installed" | "updated"
   // claude0-daemon.service user unit, installed by deploy/provision.sh like the
   // other units — setup must not scatter launchd artifacts there.
   if (process.platform !== "darwin") return "unchanged";
+  // One host owns the inbox. terminal.defaultTarget "remote" means this
+  // machine is a client of a remote tmux host — that host runs the daemon,
+  // and a local one would produce a second, divergent inbox (and its own
+  // snooze wakes). Skip the install, and retire any agent a pre-remote
+  // setup run left behind.
+  const { loadConfig } = await import("./core/config");
+  const config = await loadConfig().catch(() => null);
+  if (config?.terminal?.defaultTarget === "remote") {
+    if (!process.env.CLAUDE0_HOME) {
+      const uid = process.getuid?.() ?? 501;
+      await Bun.$`launchctl bootout gui/${uid}/com.claude0.daemon`.quiet().nothrow();
+    }
+    rmSync(`${home}/Library/LaunchAgents/com.claude0.daemon.plist`, { force: true });
+    console.log("Inbox daemon not installed: terminal.defaultTarget is \"remote\" — the remote host owns the inbox.");
+    return "unchanged";
+  }
   const { resolve } = await import("node:path");
   const agentDir = `${home}/Library/LaunchAgents`;
   const plistPath = `${agentDir}/com.claude0.daemon.plist`;
