@@ -161,8 +161,23 @@ the token once and silently resubscribes to push on its next PWA launch.
 ```sh
 launchctl bootout "gui/$(id -u)/com.csm.daemon" 2>/dev/null || true
 rm -f ~/Library/LaunchAgents/com.csm.daemon.plist
-mv ~/.config/csm ~/.config/c0
+# A prior c0 run may already have minted ~/.config/c0 — mv would then NEST the
+# old dir inside it as ~/.config/c0/csm and strand all pre-rebrand state.
+[ -e ~/.config/c0 ] && echo 'NOTE: ~/.config/c0 already exists — merge from ~/.config/csm by hand' \
+  || mv ~/.config/csm ~/.config/c0
+rm -f ~/.local/bin/csm ~/.local/bin/csm-terminal
+# Deregister the pre-rebrand hooks — their scripts rode the mv, so every
+# Claude lifecycle event would otherwise fire a nonexistent command forever.
+cp ~/.claude/settings.json ~/.claude/settings.json.pre-rebrand.bak
+jq '.hooks |= with_entries(
+      .value |= map(select((.hooks // [] | map(.command // "") | any(contains("/.config/csm/hooks/"))) | not))
+      | select(.value | length > 0))' \
+  ~/.claude/settings.json.pre-rebrand.bak > ~/.claude/settings.json
 ```
+
+Then delete the two old import lines (and their `# CSM integration` comment)
+from `~/.tmux.conf` and `~/.zshrc` by hand — `c0 setup` appends the new ones
+but never edits personal dotfile content.
 
 Personal dotfiles are never rewritten: the pre-flight prints every `csm`
 reference it finds in `~/.tmux.conf`, `~/.zshrc`, and `~/.config/tmux/*.conf`

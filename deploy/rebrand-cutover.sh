@@ -148,7 +148,9 @@ done
 # move, and `c0 setup` registers the ~/.config/c0 set fresh.
 SETTINGS="$HOME/.claude/settings.json"
 if [[ -f "$SETTINGS" ]]; then
-  cp "$SETTINGS" "$SETTINGS.pre-rebrand.bak"
+  # Keep the FIRST run's backup — a resume must not overwrite the true
+  # pre-rebrand settings with an already-stripped copy.
+  [[ -f "$SETTINGS.pre-rebrand.bak" ]] || cp "$SETTINGS" "$SETTINGS.pre-rebrand.bak"
   jq 'if (.hooks? // null | type) == "object"
       then .hooks |= with_entries(
         .value |= map(select((.hooks // [] | map(.command // "") | any(contains("/.config/csm/hooks/"))) | not))
