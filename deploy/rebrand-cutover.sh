@@ -95,13 +95,17 @@ for f in "$NEW_CFG/resurrect-sessions.json" "$NEW_CFG"/panes/*; do
 done
 # The priority list may pin this repo by its old name. Scoped with jq — a
 # blanket sed would rewrite any other string field that happens to be "csm".
-# The if/else form tolerates a config without .repositories.priority (a bare
-# `|=` path expression errors on it); a real jq failure aborts loudly (set -e).
+# The `// null` keeps the condition total: without it, a non-object
+# .repositories makes `.priority?` the empty stream and the whole filter emits
+# NOTHING with exit 0 — the mv would then install a 0-byte config. With it,
+# every input takes the else-branch identity; a real jq failure exits non-zero
+# and set -e aborts before the mv.
 if [[ -f "$NEW_CFG/config.json" ]]; then
-  jq 'if (.repositories.priority? | type) == "array"
+  jq 'if ((.repositories.priority? // null) | type) == "array"
       then .repositories.priority |= map(if . == "csm" then "claude0" else . end)
       else . end' \
     "$NEW_CFG/config.json" > "$NEW_CFG/config.json.tmp"
+  [[ -s "$NEW_CFG/config.json.tmp" ]] || die "config.json rewrite produced empty output — config.json left untouched"
   mv "$NEW_CFG/config.json.tmp" "$NEW_CFG/config.json"
 fi
 # inbox.db snapshot rows carry absolute repoPath. Live rows self-heal at the

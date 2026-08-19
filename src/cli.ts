@@ -877,9 +877,11 @@ export async function setup(): Promise<void> {
     const oldStateDir = `${home}/.config/csm`;
     const { existsSync, renameSync, readdirSync, rmdirSync, mkdirSync } = await import("node:fs");
     if (existsSync(oldStateDir)) {
-      // Stop the pre-rebrand daemon FIRST — it is KeepAlive and writes to the
-      // old dir by absolute path every 3s, so migrating under it would let it
-      // recreate ~/.config/csm moments later.
+      // Stop the pre-rebrand daemon first — it is KeepAlive and writes to the
+      // old dir by absolute path every 3s. Other old-name writers (a tmux
+      // status-right still invoking `csm status`, pre-rebrand hooks until they
+      // are deregistered below) may still drop ephemeral files into the old
+      // dir; the per-entry skip-don't-overwrite move below tolerates that.
       if (!process.env.CLAUDE0_HOME) {
         const uid = process.getuid?.() ?? 501;
         await Bun.$`launchctl bootout gui/${uid}/com.csm.daemon`.quiet().nothrow();
@@ -897,7 +899,11 @@ export async function setup(): Promise<void> {
         renameSync(`${oldStateDir}/${name}`, to);
         moved++;
       }
-      if (skipped.length === 0) rmdirSync(oldStateDir);
+      // A surviving old-name writer can land a file between readdir and here —
+      // then the dir simply stays for the next run; never abort setup over it.
+      if (skipped.length === 0) {
+        try { rmdirSync(oldStateDir); } catch {}
+      }
       if (moved > 0) console.log(`Migrated state: ${oldStateDir} → ${PATHS.dir} (${moved} entries)`);
       if (skipped.length > 0) {
         console.log(`NOTE: kept newer ${PATHS.dir} copies of: ${skipped.join(", ")} — the pre-rebrand versions remain in ${oldStateDir}; merge or delete it manually.`);
