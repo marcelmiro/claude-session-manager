@@ -13,7 +13,18 @@
  */
 
 import { createHash, timingSafeEqual, randomUUID } from "node:crypto";
-import { existsSync, readdirSync, statSync, rmSync, openSync, closeSync, unlinkSync, mkdirSync } from "node:fs";
+import {
+  existsSync,
+  readdirSync,
+  statSync,
+  rmSync,
+  openSync,
+  closeSync,
+  unlinkSync,
+  mkdirSync,
+  watch,
+  type FSWatcher,
+} from "node:fs";
 import { relative } from "node:path";
 import { discoverSessions } from "../core/sessions";
 import {
@@ -80,6 +91,7 @@ import { InboxStore } from "../core/inbox-store";
 import { composeSessions, isWakePreset, presetWakeAt, type InboxSession } from "../core/inbox-model";
 import { orderInboxRows, type DiscoverySeen } from "./inbox-payload";
 import { withDeadline } from "../core/deadline";
+import * as stream from "./stream";
 import { loadAllSessions, filterAndRankEntries, type SearchEntry } from "../core/search";
 import { fixtureData } from "./fixtures";
 import type { RestoreState, Session } from "../types";
@@ -104,6 +116,8 @@ const STATIC: Record<string, string> = {
   "/tap-target.js": "../../shared/tap-target.js",
   // Wake countdown, shared with the sidebar (sidebar/ansi.ts) — served unbuilt.
   "/wake-format.js": "../../shared/wake-format.js",
+  // Stream-event apply logic (versioned state push), shared with its test suite.
+  "/sync.js": "../../shared/sync.js",
   "/manifest.json": "manifest.json",
   "/icon-512.png": "icon-512.png",
   "/apple-touch-icon.png": "apple-touch-icon.png",
@@ -324,8 +338,7 @@ async function markSessionRead(sessionId: string): Promise<void> {
   state.lastUpdatedBy = "bridge";
   state.lastUpdatedAt = Date.now();
   await saveState(state);
-  sessionsCache = null;
-  broadcast({ type: "session-changed", id: sessionId });
+  kickSessionsPush(sessionId);
 }
 
 // Repos available for a new session: active-session repos (worktrees deduped to base)
@@ -541,7 +554,8 @@ async function sessionSkills(sessionId: string): Promise<unknown> {
  * been missed on a dead socket), the request WAITS for the recompute: a resume must
  * paint the current world, not however-old the last connected moment was. Nothing
  * cached at all (first request / explicit `sessionsCache = null` invalidation) also
- * waits. A changed recompute broadcasts `session-changed` so live clients converge.
+ * waits. A changed recompute pushes the fresh payload to every stream client
+ * (`stream.pushSessions`), so live clients converge without a refetch.
  */
 const SESSIONS_FRESH_MS = 1000;
 const SESSIONS_MAX_STALE_MS = 10_000;
@@ -550,14 +564,15 @@ let sessionsRefreshing: Promise<unknown> | null = null;
 /** One deduped recompute; rejections propagate to awaiting callers (never resolves null). */
 function startSessionsRefresh(): Promise<unknown> {
   if (!sessionsRefreshing) {
-    const prev = sessionsCache ? JSON.stringify(sessionsCache.value) : null;
     // Watchdog: every request funnels into this one promise, so if the compute never
     // settles (a subprocess await lost by the runtime — see core/deadline.ts) it must
     // reject rather than pin the bridge forever. The finally then clears the slot, so
     // the next request starts a fresh compute instead of joining a dead one.
     sessionsRefreshing = withDeadline(computeSessionsPayload(), 30_000, "sessions compute")
       .then((value) => {
-        if (prev !== null && JSON.stringify(value) !== prev) broadcast({ type: "session-changed" });
+        // Push unconditionally — pushSessions dedupes against the last pushed JSON,
+        // so an unchanged recompute stays quiet on the wire.
+        stream.pushSessions(value, sessionsCache?.ts ?? Date.now());
         return value;
       })
       .finally(() => {
@@ -846,8 +861,7 @@ function maybeGenerateNames(sessions: Session[], cache: NameCache): void {
         const fresh = await loadNameCache();
         for (const [id, name] of named) fresh.names[id] = name;
         await saveNameCache(fresh);
-        sessionsCache = null; // force re-projection with the new names
-        for (const [id] of named) broadcast({ type: "session-changed", id });
+        kickSessionsPush(); // re-project + push with the new names
       }
     } catch {
       // naming is best-effort — never let it crash the server
@@ -859,14 +873,11 @@ function maybeGenerateNames(sessions: Session[], cache: NameCache): void {
 }
 
 // ---------------------------------------------------------------------------
-// SSE — one stream per client; a single watchEvents subscription fans changes
-// out to all. Heartbeat every 15s (iOS drops idle background sockets ~30s).
+// SSE — versioned state push (src/bridge/stream.ts owns the registry/protocol).
+// Connect delivers a `sessions` snapshot (+ the device's subscribed transcript),
+// so a foregrounding phone paints correct state in one round-trip. Heartbeat
+// every 15s (iOS drops idle background sockets ~30s).
 // ---------------------------------------------------------------------------
-
-// controller → deviceId of the client behind it (undefined for pre-deviceId clients);
-// the heartbeat keeps each connected device's consumer marker fresh.
-const clients = new Map<ReadableStreamDefaultController, string | undefined>();
-const encoder = new TextEncoder();
 
 // Liveness marker for the focus-aware question-intercept hook: its mtime is the only
 // on-disk signal that a phone is actually connected (the `clients` set is in-memory).
@@ -909,25 +920,106 @@ function deviceOf(req: Request): string | undefined {
   return isValidDeviceId(d) ? d : undefined;
 }
 
-function pushAll(frame: Uint8Array): void {
-  for (const c of clients.keys()) {
-    try {
-      c.enqueue(frame);
-    } catch {
-      clients.delete(c); // controller closed between cancel and broadcast
-    }
+/**
+ * Invalidate the /sessions projection and kick one recompute; the recompute
+ * pushes the fresh payload to every stream client when it differs from the last
+ * pushed one (dedupe lives in stream.pushSessions). This replaces the old
+ * `session-changed` doorbell: the push carries the data, so clients apply
+ * instead of refetching. A sessionId additionally schedules a transcript push
+ * for that session's subscribers.
+ */
+function kickSessionsPush(sessionId?: string): void {
+  // Fixtures mode: the canned payload IS the state — never let a real recompute
+  // (whose discovery output would differ) get pushed over it.
+  if (FIXTURES) {
+    if (sessionId) scheduleTranscriptPush(sessionId);
+    return;
+  }
+  sessionsCache = null;
+  if (sessionsRefreshing) {
+    // A compute is mid-flight and won't see this change (turn-end bursts: the Stop
+    // event lands while the last PostToolUse's compute runs) — run one more after
+    // it. Concurrent chains dedupe: the first re-kick claims the slot, the rest join.
+    sessionsRefreshing.catch(() => {}).then(() => void startSessionsRefresh().catch(() => {}));
+  } else {
+    void startSessionsRefresh().catch(() => {});
+  }
+  if (sessionId) scheduleTranscriptPush(sessionId);
+}
+
+// Debounced per-session transcript pushes: hook events (150ms upstream debounce)
+// and the per-subscription JSONL watcher (500ms) both funnel here; one compose
+// serves every subscribed device with its own append/snapshot delta.
+const txPushTimers = new Map<string, ReturnType<typeof setTimeout>>();
+function scheduleTranscriptPush(sessionId: string, delayMs = 150): void {
+  if (!stream.hasSubscribers(sessionId)) return;
+  const existing = txPushTimers.get(sessionId);
+  if (existing) clearTimeout(existing);
+  txPushTimers.set(
+    sessionId,
+    setTimeout(() => {
+      txPushTimers.delete(sessionId);
+      void pushTranscriptNow(sessionId);
+    }, delayMs),
+  );
+}
+
+async function pushTranscriptNow(sessionId: string): Promise<void> {
+  if (!stream.hasSubscribers(sessionId)) return;
+  try {
+    const payload = FIXTURES
+      ? (fixtureData("GET", `/sessions/${sessionId}/transcript`) as Record<string, unknown>)
+      : await composeTranscriptPayload(sessionId);
+    if (payload) stream.pushTranscript(sessionId, payload as { turns?: unknown[] } & Record<string, unknown>);
+  } catch {
+    // compose failed this pass — the next change (or the client's fallback GET) covers it
   }
 }
 
-function broadcast(obj: unknown): void {
-  pushAll(encoder.encode(`data: ${JSON.stringify(obj)}\n\n`));
+// One JSONL watcher per subscribed device: the transcript grows mid-turn with no
+// hook event (streamed assistant text, queue consumption), and this is what makes
+// those pushes live. Watches the PARENT dir filtered to the file's basename —
+// fs.watch on the file itself breaks on atomic rename-replace, and the file may
+// not exist yet at all (a fork before its first turn).
+const subWatchers = new Map<string, FSWatcher>();
+// Per-device call generation: an older watchSubscription call whose async path
+// resolution finishes AFTER a newer call must never install its watcher — a
+// subscription-equality check alone can't tell A→B→A apart from plain A.
+const subWatcherGen = new Map<string, number>();
+async function watchSubscription(deviceId: string, sessionId: string | null): Promise<void> {
+  const gen = (subWatcherGen.get(deviceId) ?? 0) + 1;
+  subWatcherGen.set(deviceId, gen);
+  const old = subWatchers.get(deviceId);
+  if (old) {
+    subWatchers.delete(deviceId);
+    try {
+      old.close();
+    } catch {}
+  }
+  if (!sessionId || FIXTURES) return;
+  try {
+    const txId = (await parkedJobSessions()).get(sessionId) ?? sessionId;
+    const path = await resolveTranscriptPath(txId);
+    if (!path) return; // no file yet — hook-event pushes still cover it
+    const cut = path.lastIndexOf("/");
+    const dir = path.slice(0, cut);
+    const base = path.slice(cut + 1);
+    const w = watch(dir, (_event, filename) => {
+      if (filename === base) scheduleTranscriptPush(sessionId, 500);
+    });
+    // A newer call superseded this one while the path resolved — never leak a watcher.
+    if (subWatcherGen.get(deviceId) === gen) subWatchers.set(deviceId, w);
+    else w.close();
+  } catch {
+    // watcher is an enhancement — hook events + safety polls still drive pushes
+  }
 }
 
 /**
  * After an interrupt, wait for Claude's native status to leave "running" (busy→idle
- * ~1.5s later) and broadcast so clients refetch the now-"ready" status. `nativeStatus`
+ * ~1.5s later) and push so clients see the now-"ready" status. `nativeStatus`
  * has a ~1s cache TTL, so ~500ms polling is the practical resolution floor; ~3.5s of
- * budget covers the flip. Always broadcasts on exit (even at timeout) so a missed
+ * budget covers the flip. Always pushes on exit (even at timeout) so a missed
  * native write doesn't strand the client on the stale "running". Fire-and-forget.
  */
 function reconcileAfterInterrupt(id: string): void {
@@ -937,33 +1029,96 @@ function reconcileAfterInterrupt(id: string): void {
       const status = await nativeStatus(id);
       if (status && status !== "running") break;
     }
-    sessionsCache = null; // drop the 1s projection cache so the refetch re-derives status
-    broadcast({ type: "session-changed", id });
+    kickSessionsPush(id);
   })();
 }
 
 function streamResponse(deviceId?: string): Response {
   let self: ReadableStreamDefaultController;
-  const stream = new ReadableStream({
+  const body = new ReadableStream({
     start(controller) {
       self = controller;
-      clients.set(controller, deviceId);
+      stream.addClient(controller, deviceId);
       touchMarker(BRIDGE_CONSUMER); // a phone is now connected — mark it fresh
       if (deviceId) touchDeviceConsumer(deviceId); // this device is watching live
-      controller.enqueue(encoder.encode(": connected\n\n"));
+      controller.enqueue(new TextEncoder().encode(": connected\n\n"));
+      // Snapshot-on-connect, to THIS controller only: the current sessions payload
+      // (plus a fresh recompute behind it) and, if this device has a transcript
+      // subscription, a forced-snapshot transcript push. This replaces the client's
+      // three racing foreground refetches.
+      const cached = FIXTURES ? fixtureData("GET", "/sessions") : sessionsCache?.value;
+      if (cached) stream.pushSessions(cached, sessionsCache?.ts ?? Date.now(), controller);
+      if (!FIXTURES) void startSessionsRefresh().catch(() => {});
+      if (deviceId) {
+        const sub = stream.subscriptionFor(deviceId);
+        if (sub) {
+          stream.forceSnapshot(deviceId);
+          scheduleTranscriptPush(sub, 0);
+        }
+      }
     },
     cancel() {
-      clients.delete(self);
-      if (clients.size === 0) clearMarker(BRIDGE_CONSUMER); // last phone gone — go stale now
+      if (stream.removeClient(self) === 0) clearMarker(BRIDGE_CONSUMER); // last phone gone — go stale now
     },
   });
-  return new Response(stream, {
+  return new Response(body, {
     headers: {
       "content-type": "text/event-stream",
       "cache-control": "no-cache",
       connection: "keep-alive",
     },
   });
+}
+
+// ---------------------------------------------------------------------------
+// Transcript composition — shared by the GET route and the stream pusher, so
+// both surfaces always agree on the payload shape.
+// ---------------------------------------------------------------------------
+
+// Real awaiting-decision approval (blocking hook), NOT the in-flight pendingTool —
+// so Allow/Deny only appears when a decision is genuinely required. Detached sessions
+// surface it via the pending-file; an ATTACHED session has no file, so confirm a
+// permission prompt is live on the pane and synthesize the same card shape from the
+// pending tool call (identical Allow/Deny UI; /decision drives the keys instead).
+function resolveApproval(
+  txId: string,
+  id: string,
+  pt: ReturnType<typeof pendingToolCall>,
+  pane: string | null,
+  capture: string,
+) {
+  const blocked = listPendingApprovals().find((a) => a.sessionId === txId) ?? null;
+  if (blocked || !pane || !pt) return blocked;
+  if (pt.name === "AskUserQuestion" && pt.question) return null;
+  if (!isPermissionPrompt(capture)) return null;
+  return {
+    sessionId: id,
+    ts: 0,
+    tool: pt.name,
+    tool_use_id: pt.toolUseId,
+    input: { command: pt.command, file_path: pt.filePath, description: pt.description },
+  };
+}
+
+/**
+ * The full transcript payload for a session — the whole active branch
+ * (reconstructed leaf→root; a rewind can shrink the conversation) plus the
+ * volatile pane/hook state (approval, statusline, permission mode). While a live
+ * parked job (kind:"bg") owns this session's pane, the conversation on screen
+ * belongs to the JOB session — answer with its transcript + hook state.
+ * Pane-scoped fields (capture, statusline) stay on the listed id, whose pane it is.
+ */
+async function composeTranscriptPayload(id: string): Promise<Record<string, unknown>> {
+  const txId = (await parkedJobSessions()).get(id) ?? id;
+  // Transcript read and pane resolution share no state — overlap them.
+  const [tx, pane] = await Promise.all([getTranscript(txId), resolveSessionPane(id)]);
+  // One capture serves both the permission-prompt check and the statusline scrape.
+  const capture = pane ? await capturePane(pane) : "";
+  const approval = resolveApproval(txId, id, pendingToolCall(txId), pane, capture);
+  // The live statusline + permission mode, scraped from the pane (the only faithful
+  // source for the user's custom statusline and the auto/plan mode).
+  const statusline = pane ? await readPaneStatusline(pane, capture) : {};
+  return { ...tx, approval, ...statusline };
 }
 
 // ---------------------------------------------------------------------------
@@ -1057,7 +1212,13 @@ async function route(req: Request): Promise<Response> {
   // socket), then beacons. Body is text/plain (sendBeacon can't set headers).
   if (method === "POST" && path === "/push/goodbye") {
     const d = (await req.text().catch(() => "")).trim();
-    if (isValidDeviceId(d)) clearDeviceConsumer(d);
+    if (isValidDeviceId(d)) {
+      clearDeviceConsumer(d);
+      // Backgrounded = not watching: drop the transcript subscription (and its JSONL
+      // watcher). The client re-subscribes on foreground via /stream/open.
+      stream.subscribe(d, null);
+      void watchSubscription(d, null);
+    }
     return json({ ok: true });
   }
   if (method === "GET" && path === "/repos") return json(await cachedRepos(""));
@@ -1075,32 +1236,6 @@ async function route(req: Request): Promise<Response> {
   const transcript = path.match(/^\/sessions\/([^/]+)\/transcript$/);
   if (method === "GET" && transcript) {
     const id = decodeURIComponent(transcript[1]!);
-    // While a live parked job (kind:"bg") owns this session's pane, the conversation on
-    // screen — the composer sends type into, and the hooks that fire — belongs to the
-    // JOB session; this id's own transcript sits frozen for the duration. Answer with
-    // the job's transcript + hook state so the phone reads the half of the pane that is
-    // actually moving. Pane-scoped fields (capture, statusline) stay on the listed id,
-    // whose pane it is. Falls back to the id itself the moment the job's pid dies.
-    const txId = (await parkedJobSessions()).get(id) ?? id;
-    // Real awaiting-decision approval (blocking hook), NOT the in-flight pendingTool —
-    // so Allow/Deny only appears when a decision is genuinely required. Detached sessions
-    // surface it via the pending-file; an ATTACHED session has no file, so confirm a
-    // permission prompt is live on the pane and synthesize the same card shape from the
-    // pending tool call (identical Allow/Deny UI; /decision drives the keys instead).
-    const resolveApproval = (pt: ReturnType<typeof pendingToolCall>, pane: string | null, capture: string) => {
-      const blocked = listPendingApprovals().find((a) => a.sessionId === txId) ?? null;
-      if (blocked || !pane || !pt) return blocked;
-      if (pt.name === "AskUserQuestion" && pt.question) return null;
-      if (!isPermissionPrompt(capture)) return null;
-      return {
-        sessionId: id,
-        ts: 0,
-        tool: pt.name,
-        tool_use_id: pt.toolUseId,
-        input: { command: pt.command, file_path: pt.filePath, description: pt.description },
-      };
-    };
-
     // Fast path: the client holds this exact file revision (`?rev=`), so skip rebuilding
     // and re-shipping the turns — the payload that scales with thread length. Everything
     // that can change WITHOUT the file changing still ships fresh: the pending
@@ -1109,6 +1244,7 @@ async function route(req: Request): Promise<Response> {
     // session file). The client merges these over its held turns.
     const wantRev = url.searchParams.get("rev");
     if (wantRev) {
+      const txId = (await parkedJobSessions()).get(id) ?? id;
       const at = await transcriptRevAt(txId);
       if (at && at.rev === wantRev) {
         const [pane, subagents] = await Promise.all([resolveSessionPane(id), listSubagents(at.path)]);
@@ -1120,23 +1256,37 @@ async function route(req: Request): Promise<Response> {
           rev: at.rev,
           ...pendingToolFields(pt),
           subagents, // always present here ([] clears) — the client overwrites its copy
-          approval: resolveApproval(pt, pane, capture),
+          approval: resolveApproval(txId, id, pt, pane, capture),
           ...statusline,
         });
       }
     }
+    return json(await composeTranscriptPayload(id));
+  }
 
-    // Full response: the whole active branch (reconstructed leaf→root) — a rewind can
-    // shrink the conversation, so an append-only delta would leak abandoned-branch turns.
-    // Transcript read and pane resolution share no state — overlap them.
-    const [tx, pane] = await Promise.all([getTranscript(txId), resolveSessionPane(id)]);
-    // One capture serves both the permission-prompt check and the statusline scrape below.
-    const capture = pane ? await capturePane(pane) : "";
-    const approval = resolveApproval(pendingToolCall(txId), pane, capture);
-    // The live statusline + permission mode, scraped from the pane (the only faithful
-    // source for the user's custom statusline and the auto/plan mode).
-    const statusline = pane ? await readPaneStatusline(pane, capture) : {};
-    return json({ ...tx, approval, ...statusline });
+  // Transcript subscription (versioned state push): the device tells the bridge which
+  // ONE session it has open; the bridge pushes that session's transcript over the
+  // stream — a forced snapshot now, then append/snapshot deltas as it changes (JSONL
+  // watcher + hook events). `sessionId: null` unsubscribes.
+  if (method === "POST" && path === "/stream/open") {
+    const body = (await req.json().catch(() => ({}))) as { sessionId?: unknown };
+    const sid = body.sessionId;
+    // Shape-check the id like deviceId below: it reaches resolveTranscriptPath's Glob,
+    // where metacharacters ("*", "../") would widen the scan past the named session.
+    if (sid !== null && (typeof sid !== "string" || !/^[A-Za-z0-9-]{1,100}$/.test(sid))) {
+      return json({ ok: false, reason: "bad-args" }, 400);
+    }
+    // Device identity rides the x-claude0-device header here (the app patches fetch);
+    // only /stream itself uses ?device=, since EventSource can't set headers.
+    const deviceId = deviceOf(req);
+    if (!deviceId) return json({ ok: false, reason: "no-device" }, 400);
+    stream.subscribe(deviceId, sid);
+    void watchSubscription(deviceId, sid);
+    if (sid) {
+      stream.forceSnapshot(deviceId);
+      void pushTranscriptNow(sid);
+    }
+    return json({ ok: true });
   }
 
   // Drill into ONE subagent's full conversation. Anchored like `…/transcript$` so it isn't
@@ -1359,9 +1509,8 @@ async function route(req: Request): Promise<Response> {
         // store write failed — the pane-kill result still answers the client
       }
     }
-    sessionsCache = null; // force re-projection — the killed pane drops from the next list
     historyCache = null; // the just-archived session should surface in History at once
-    broadcast({ type: "session-changed", id });
+    kickSessionsPush(id); // the killed pane drops from the next pushed list
     // A pane-less inbox row (parked/woken) archives successfully via the store alone.
     return result.ok || stored ? json({ ok: true }) : sendResult(result);
   }
@@ -1385,8 +1534,7 @@ async function route(req: Request): Promise<Response> {
     }
     seedInboxRow(store, id, now);
     await archiveSession(id).catch(() => {}); // kill the pane; no-pane is fine
-    sessionsCache = null;
-    broadcast({ type: "session-changed", id });
+    kickSessionsPush(id);
     return json({ ok: true });
   }
 
@@ -1400,8 +1548,7 @@ async function route(req: Request): Promise<Response> {
     if (!store.block(id, note, Date.now())) return json({ ok: false, reason: "archived" }, 409);
     seedInboxRow(store, id, Date.now());
     await archiveSession(id).catch(() => {});
-    sessionsCache = null;
-    broadcast({ type: "session-changed", id });
+    kickSessionsPush(id);
     return json({ ok: true });
   }
 
@@ -1416,8 +1563,7 @@ async function route(req: Request): Promise<Response> {
     if (store.clearDisposition(id, Date.now(), "manual") === null) {
       return json({ ok: false, reason: "not-parked" }, 409);
     }
-    sessionsCache = null;
-    broadcast({ type: "session-changed", id });
+    kickSessionsPush(id);
     return json({ ok: true });
   }
 
@@ -1427,9 +1573,8 @@ async function route(req: Request): Promise<Response> {
     const store = getInboxStore();
     if (!store) return json({ ok: false, reason: "no-store" }, 500);
     if (!store.unarchive(id, Date.now())) return json({ ok: false, reason: "not-archived" }, 409);
-    sessionsCache = null;
     historyCache = null;
-    broadcast({ type: "session-changed", id });
+    kickSessionsPush(id);
     return json({ ok: true });
   }
 
@@ -1458,9 +1603,8 @@ async function route(req: Request): Promise<Response> {
     // (and doesn't fail `restoreSession`'s isDirectory guard). Mirrors the TUI resume path.
     const effectivePath = await recoverWorktreeTranscript(id, repoPath!, basePath!);
     const result = await restoreSession(id, effectivePath);
-    sessionsCache = null; // drop the 1s projection cache so the refetch re-derives the now-live status
     historyCache = null; // the row's isActive/restorable just changed
-    broadcast({ type: "session-changed", id });
+    kickSessionsPush(id); // re-derive + push the now-live status
     return sendResult(result);
   }
 
@@ -1481,9 +1625,9 @@ async function route(req: Request): Promise<Response> {
       basePath = entry.baseRepoPath;
     }
     const result = await forkSession(id, repoPath!, basePath!, s?.name);
-    sessionsCache = null; // the fork is a new session — surface it on the next list
     historyCache = null;
-    if (result.ok && result.sessionId) broadcast({ type: "session-changed", id: result.sessionId });
+    // The fork is a new session — surface it on the next pushed list.
+    kickSessionsPush(result.ok ? result.sessionId : undefined);
     return sendResult(result);
   }
 
@@ -1565,40 +1709,32 @@ export function startBridge(): ReturnType<typeof Bun.serve> {
   if (!existsSync(EVENTS_DIR)) {
     console.error("EVENTS_DIR not found: live push disabled; restart bridge after claude0 setup");
   }
-  watchEvents((id) => {
-    broadcast({ type: "session-changed", id });
-    // The cached projection predates this event — drop it and recompute NOW, so a
-    // request landing after the event (a client refetch, or a phone foregrounding off
-    // a push tap) waits briefly for the post-event world instead of being served the
-    // pre-flip snapshot and correcting seconds later on a second broadcast.
-    sessionsCache = null;
-    if (sessionsRefreshing) {
-      // A compute is mid-flight and won't see this event (turn-end bursts: the Stop
-      // event lands while the last PostToolUse's compute runs) — run one more after
-      // it. Concurrent chains dedupe: the first re-kick claims the slot, the rest join.
-      sessionsRefreshing
-        .catch(() => {})
-        .then(() => void startSessionsRefresh().catch(() => {}));
-    } else {
-      void startSessionsRefresh().catch(() => {});
-    }
-  });
+  // Hook events (the fastest change signal) drive both surfaces: the sessions
+  // recompute+push and, for subscribers of the changed session, a transcript push.
+  watchEvents((id) => kickSessionsPush(id));
   setInterval(() => {
-    if (clients.size > 0) touchMarker(BRIDGE_CONSUMER); // keep the marker fresh while a phone is live
-    for (const deviceId of new Set(clients.values())) {
-      if (deviceId) touchDeviceConsumer(deviceId);
-    }
+    if (stream.clientCount() > 0) touchMarker(BRIDGE_CONSUMER); // keep the marker fresh while a phone is live
+    for (const deviceId of stream.connectedDeviceIds()) touchDeviceConsumer(deviceId);
     // Named `ping` (not a comment): EventSource surfaces it to a listener, so the
     // client can measure stream silence and rebuild a zombie socket that still
     // claims OPEN. A `:` comment keeps the socket alive but is invisible to JS.
-    pushAll(encoder.encode("event: ping\ndata: {}\n\n"));
+    stream.pushRaw("event: ping\ndata: {}\n\n");
+    // Drop subscriptions (and their JSONL watchers) whose device has been gone for a
+    // while — the goodbye beacon is the normal teardown; this catches a missed one.
+    for (const deviceId of stream.staleSubscriptions(60_000)) {
+      stream.subscribe(deviceId, null);
+      void watchSubscription(deviceId, null);
+    }
   }, 15_000);
 
   // Sync the unread/⚡ set from the monitor (which rewrites state.json ~every 3s). Only
-  // broadcast when the set of needs-attention panes actually changes, so a Mac-side
-  // focus-clear or a fresh attention reaches the phone within ~3s without refresh spam.
+  // push when the set of needs-attention panes actually changes, so a Mac-side
+  // focus-clear or a fresh attention reaches the phone without refresh spam. Watching
+  // the config dir (state.json is replaced in place; watching the file itself can lose
+  // the inode) removes the old 3s bridge-side poll from the ⚡ latency chain; if the
+  // watch can't be established, fall back to that poll.
   let lastUnreadKey: string | null = null;
-  setInterval(async () => {
+  const checkUnread = async () => {
     try {
       const state = await loadState();
       const key = Object.entries(state.sessions)
@@ -1607,18 +1743,28 @@ export function startBridge(): ReturnType<typeof Bun.serve> {
         .sort()
         .join(",");
       if (lastUnreadKey === null) {
-        lastUnreadKey = key; // first tick: establish baseline, don't broadcast
+        lastUnreadKey = key; // first sight: establish baseline, don't push
         return;
       }
       if (key !== lastUnreadKey) {
         lastUnreadKey = key;
-        sessionsCache = null; // force re-projection with the new unread flags
-        broadcast({ type: "session-changed" });
+        kickSessionsPush(); // re-project + push with the new unread flags
       }
     } catch {
-      // state.json missing/locked mid-write — try again next tick
+      // state.json missing/locked mid-write — the next change/tick retries
     }
-  }, 3000);
+  };
+  void checkUnread(); // establish the baseline
+  try {
+    let unreadTimer: ReturnType<typeof setTimeout> | null = null;
+    watch(PATHS.dir, (_event, filename) => {
+      if (filename !== "state.json") return;
+      if (unreadTimer) clearTimeout(unreadTimer);
+      unreadTimer = setTimeout(() => void checkUnread(), 300);
+    });
+  } catch {
+    setInterval(() => void checkUnread(), 3000);
+  }
 
   const server = Bun.serve({
     hostname: host,

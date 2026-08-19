@@ -1,0 +1,94 @@
+# 18. The bridge pushes versioned state, not doorbells
+
+Date: 2026-08-19
+
+## Status
+
+Accepted
+
+## Context
+
+The SSE stream carried exactly one event — `{"type":"session-changed"}` with no
+data. Every event made the phone refetch `/sessions` and (if a session was open)
+`/transcript`, and those refetches raced the client's own optimistic patches.
+Five persistent symptoms traced to that shape:
+
+- **Flicker/clobber**: optimistic bubbles, approval cards and status flips were
+  reconciled by heuristics (`VOLATILE_FIELDS` merge, `rewindFloor` rev checks,
+  the `interruptedId` suppression hack) against refetches that could resolve out
+  of order or carry pre-action state.
+- **Rewind chimera**: the `?rev=` conditional fetch merged volatile fields over
+  held turns; around a branch flip that merge could present a thread that never
+  existed, and the post-rewind status/composer lagged.
+- **Wake-up staleness**: foregrounding fired three racing refetches
+  (list/transcript/subagent) with no retry — on a flaky link a silently-failed
+  transcript fetch left the thread ending at the user's own message even though
+  the turn-complete push notification had already arrived.
+- **⚡ lag**: the bridge polled `state.json` every 3s on top of the monitor's own
+  ~3s write cadence.
+- **Send-echo lag**: nothing told the user the turn was starting until a full
+  discovery recompute landed.
+
+WebSockets were considered and rejected: every wanted property ("no polling,
+receive updates in real time") is a *protocol* property, not a transport one.
+SSE already pushes in real time; what was missing was data in the events. WS
+would add hand-rolled reconnect (EventSource reconnects itself), an unverified
+`tailscale serve` proxy path, a rebuilt iOS zombie-socket watchdog, and
+re-plumbing of the consumer-marker/goodbye contract — while fixing none of the
+symptoms above.
+
+## Decision
+
+Keep SSE; change what rides it (`src/bridge/stream.ts`, `src/shared/sync.js`):
+
+- **Every push carries data**, stamped `{seq, computedAt}`. `seq` is one
+  per-connection monotonic counter shared across event types (frames are
+  serialized per connection; it resets on reconnect).
+- **`sessions` events** carry the full `/sessions` payload, pushed on connect
+  and whenever a recompute differs from the last pushed JSON (dedupe in
+  `pushSessions`). Connect ⇒ snapshot: a foregrounding phone paints the current
+  world in one round-trip, replacing the three racing refetches — `resync()` is
+  now just "rebuild the stream".
+- **`transcript` events** serve a per-device subscription (`POST /stream/open`,
+  one session per device): `kind:"snapshot"` replaces wholesale (on subscribe
+  and on any non-extension change — rewind, branch flip, compaction);
+  `kind:"append"` extends from `fromIndex` (the previously-pushed turn list is a
+  prefix, the last turn allowed to have grown — streamed assistant text). The
+  non-turn fields ride every event; an omitted field means cleared, as explicit
+  protocol. The client never merges heuristically — it applies
+  (`applyTranscriptEvent`), which makes the rewind chimera structurally
+  impossible. A per-subscription `fs.watch` on the transcript JSONL (parent dir,
+  basename-filtered; ~1 watcher per device) makes mid-turn appends push live,
+  debounced 500ms.
+- **Truthful snapshots, client-side optimism.** The server never stamps a state
+  it hasn't observed. The phone applies status overlays at payload-apply time
+  (send/approve/answer → `running`, interrupt → `ready`) that retire on
+  **confirmation or expiry, never contradiction** (`overlayResolved`) — a
+  snapshot computed before the action landed can't clobber the overlay
+  backwards. This replaced the `interruptedId` mutation hack.
+- **`state.json` is watched**, not polled (bridge-side), removing up to 3s from
+  the ⚡ chain; the 3s poll remains only as fallback when the watch can't be
+  established.
+- **Staleness is surfaced, not hidden**: a pushed payload whose `computedAt` was
+  already old shows a non-blocking "syncing" band.
+
+Kept deliberately: the GET endpoints (fallback + non-stream consumers, with the
+bounded-staleness contract), the 40s iOS zombie-socket watchdog, the 15s
+heartbeat + consumer-marker/goodbye contract (push suppression and the question
+hold depend on it), the conditional safety polls (2.5s in-flight-send, 15s
+background work), and the request-seq guards — pushes participate in them as
+"newest", so a slow GET can never overwrite a push.
+
+## Consequences
+
+- The doorbell (`broadcast`) is gone; every former call site funnels through
+  `kickSessionsPush`, which recomputes and pushes only on change.
+- Fixtures mode pushes canned snapshots over the same stream (a real recompute
+  is suppressed), so the design loop and `bun run shoot` keep working.
+- Rewind keeps its optimistic thread truncation (`rewindFloor`): Claude's rewind
+  is in-memory until the next send, so no `replace` push arrives at rewind time
+  — an honest "no truncation" display would show the un-rewound thread. The
+  truncation is now safe because every applied payload is a wholesale
+  replacement.
+- A subscription is dropped on goodbye/unsubscribe/60s-disconnected; the client
+  re-declares it on every stream open, so a pruned subscription self-heals.

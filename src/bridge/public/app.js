@@ -14,6 +14,9 @@ import { parseDiffLines, narrowIndent } from "/diff-lines.js";
 import { formatWakeIn } from "/wake-format.js";
 // Notification-tap attribution, served unbuilt and covered by shared/tap-target.test.ts.
 import { tapTarget } from "/tap-target.js";
+// Stream-event apply logic (versioned state push), served unbuilt and covered by
+// shared/sync.test.ts.
+import { applyTranscriptEvent, overlayResolved } from "/sync.js";
 
 const html = htm.bind(h);
 
@@ -300,11 +303,81 @@ const stripImagePrefix = (t) => String(t || "").replace(/^(?:\[Image #\d+\]\s*)+
 
 // --- data ---------------------------------------------------------------
 
+// --- optimistic status overlays (versioned state push) -----------------------
+// A verb whose effect the server hasn't observed yet gets a client-side status
+// overlay instead of trusting the next payload: send/approve/answer → `running`,
+// interrupt → `ready`. Overlays are applied over every incoming sessions payload
+// (never by mutating a payload in place), so a snapshot computed BEFORE the verb
+// landed can't clobber them backwards; they retire on confirmation or expiry
+// (`overlayResolved` in shared/sync.js), never on contradiction.
+const statusOverlays = new Map(); // sid → {status: "running"|"ready", until}
+let rawSessions = null; // the last server-truth list, before overlays
+
+function overlaidSessions() {
+  const base = rawSessions || [];
+  if (statusOverlays.size === 0) return base;
+  const now = Date.now();
+  return base.map((s) => {
+    const o = statusOverlays.get(s.id);
+    if (!o) return s;
+    if (overlayResolved(o, s.status, now)) {
+      statusOverlays.delete(s.id);
+      return s;
+    }
+    return { ...s, status: o.status };
+  });
+}
+
+function setStatusOverlay(sid, status, ms = 10000) {
+  statusOverlays.set(sid, { status, until: Date.now() + ms });
+  sessions.value = overlaidSessions();
+  // Re-derive at expiry so the true status resurfaces even with no new payload.
+  setTimeout(() => {
+    if (statusOverlays.has(sid)) sessions.value = overlaidSessions();
+  }, ms + 100);
+}
+
+function clearStatusOverlay(sid) {
+  if (statusOverlays.delete(sid)) sessions.value = overlaidSessions();
+}
+
 // Order list responses by request sequence, same as the transcript path: concurrent
-// refreshes (SSE bursts + foreground resync) can resolve out of order, and a slow stale
-// response landing last would overwrite a fresher list until the next broadcast.
+// refreshes (SSE pushes + fallback GETs) can resolve out of order, and a slow stale
+// response landing last would overwrite a fresher list until the next push.
 let listReqSeq = 0;
 let listAppliedSeq = 0;
+// The server's `computedAt` on the last applied sessions push — when the payload
+// itself was old at push time (server served a stale cache), the list shows a
+// non-blocking "syncing" band instead of silently presenting old state as current.
+const listStale = signal(false);
+
+// Apply one /sessions payload (from a stream push or a fallback GET) to the app's
+// state. Returns false on a malformed payload (never poison the render with it).
+function applySessions(data) {
+  // Payload is `{sessions, inboxStale}`; a bare array (older server) still parses.
+  const list = Array.isArray(data) ? data : data && Array.isArray(data.sessions) ? data.sessions : null;
+  if (!list) return false;
+  rawSessions = list;
+  // Prune overlays whose session left the list entirely (killed/archived mid-action) —
+  // overlaidSessions only retires entries it visits, so these would otherwise linger.
+  for (const id of statusOverlays.keys()) {
+    if (!list.some((s) => s.id === id)) statusOverlays.delete(id);
+  }
+  sessions.value = overlaidSessions();
+  inboxStale.value = !Array.isArray(data) && !!data.inboxStale;
+  if (!Array.isArray(data)) inboxAware.value = true;
+  followClearedSession(); // /clear or /compact on the open session → follow to its successor
+  authed.value = true;
+  if (error.value === "bridge unreachable") error.value = ""; // recovered — drop the banner
+  // Persist for the next cold open (iOS evicts the page constantly): boot hydrates
+  // from this so reopening paints the list instantly instead of a spinner.
+  try {
+    localStorage.setItem("claude0-sessions", JSON.stringify(list));
+  } catch {
+    /* private mode / quota — persistence is best-effort */
+  }
+  return true;
+}
 
 async function refreshSessions() {
   const seq = ++listReqSeq;
@@ -313,24 +386,10 @@ async function refreshSessions() {
     if (r.status === 401) return (authed.value = false);
     if (!r.ok) return;
     const data = await r.json();
-    // Payload is `{sessions, inboxStale}`; a bare array (older server) still parses.
-    const list = Array.isArray(data) ? data : data && Array.isArray(data.sessions) ? data.sessions : null;
-    if (!list) return; // malformed payload — never poison the render with it
     if (seq < listAppliedSeq) return; // a newer response already applied — never regress
+    if (!applySessions(data)) return;
     listAppliedSeq = seq;
-    sessions.value = list;
-    inboxStale.value = !Array.isArray(data) && !!data.inboxStale;
-    if (!Array.isArray(data)) inboxAware.value = true;
-    followClearedSession(); // /clear or /compact on the open session → follow to its successor
-    authed.value = true;
-    if (error.value === "bridge unreachable") error.value = ""; // recovered — drop the banner
-    // Persist for the next cold open (iOS evicts the page constantly): boot hydrates
-    // from this so reopening paints the list instantly instead of a spinner.
-    try {
-      localStorage.setItem("claude0-sessions", JSON.stringify(sessions.value));
-    } catch {
-      /* private mode / quota — persistence is best-effort */
-    }
+    listStale.value = false; // a direct GET is fresh-enough by construction (bounded staleness)
   } catch {
     error.value = "bridge unreachable";
   }
@@ -398,95 +457,100 @@ async function refreshTranscript() {
     }
     if (seq < txAppliedSeq) return; // a newer response already applied — never regress
     txAppliedSeq = seq;
-    // The server always returns the full active conversation branch (reconstructed
-    // leaf→root), so we replace rather than append — a rewind can shrink the conversation.
-    transcript.value = data;
-    cacheTranscript(id, data);
-    // Retire the optimistic approve/answer flip once the card is actually gone from the
-    // refetched transcript (the decision resolved server-side).
-    if (deciding.value === id && !(data.approval || data.openQuestions || data.openQuestion)) {
-      deciding.value = null;
-    }
-    // Retire the optimistic answer once ITS question left the payload — either resolved
-    // (no question) or replaced (different toolUseId, whose card must show immediately).
-    const dq = decidingQuestion.value;
-    if (dq && dq.id === id) {
-      const openId = data.pendingTool && data.pendingTool.toolUseId;
-      const sameStillOpen = (data.openQuestions || data.openQuestion) && openId === dq.toolUseId;
-      if (!sameStillOpen) decidingQuestion.value = null;
-    }
-    // Retire the optimistic rewind view once the transcript file actually changed on disk
-    // (the resend's append bumps `rev` even for a byte-identical resend) — the real active
-    // branch is now the truncated one, so stop overriding it.
-    if (rewindFloor.value && data.rev !== rewindFloor.value.rev) rewindFloor.value = null;
-    // Retire the optimistic "Chat about this" flip once the declined question is actually
-    // gone from the transcript (the deny resolved → PostToolUse cleared openQuestions).
-    if (clarifying.value === id && !(data.openQuestions || data.openQuestion)) clarifying.value = null;
-    // Resolve a pending restore-on-interrupt — mirroring the Mac TUI exactly (verified by
-    // driving a live claude pane through timed interrupts and reading both the pane and
-    // the JSONL). Claude Code REVERTS a prompt (moves the text back into its input box,
-    // never draws it) only when nothing of the reply was drawn yet, and that state has one
-    // JSONL signature: the prompt is the branch tip, childless — a bare leaf, NO interrupt
-    // marker. Every marker means Claude Code KEPT the message in the conversation (with an
-    // "Interrupted" line), so portkey keeps it too and restores nothing. The bare leaf
-    // stays the served branch tip until the next send forks past it, hence the transient
-    // hide; `gone` covers the post-fork state where the turn already fell off the branch.
-    const ir = interruptRestore.value;
-    if (ir && ir.sessionId === id) {
-      const txt = ir.text.trim();
-      const turns = transcript.value.turns || [];
-      const last = turns[turns.length - 1];
-      const reverted =
-        last &&
-        isPromptTurn(last) &&
-        (last.content || []).some((b) => b.type === "text" && (b.text || "").trim() === txt);
-      const gone =
-        !userTurnTexts(transcript.value).has(txt) &&
-        !(transcript.value.queuedPending || []).some((q) => q.trim() === txt);
-      if (reverted || gone) {
-        if (reverted) {
-          hiddenInterrupts.value = [...hiddenInterrupts.value, { sessionId: id, index: turns.length - 1, text: txt }];
-          // The revert parked the same text in the Mac pane's input box. Clear it (the
-          // text now lives in this composer): a lingering occupied input silently flips
-          // every future pre-stream interrupt from revert to keep, and feeds the next
-          // send's draft guard a phantom draft. Recoverable at the Mac via C-y.
-          fetch(`/sessions/${encodeURIComponent(id)}/clear-input`, { method: "POST" }).catch(() => {});
-        }
-        composerPrefill.value = { text: ir.text, sessionId: id, keepDraft: true };
-        pendingSends.value = pendingSends.value.filter((p) => p !== ir.text);
-        interruptRestore.value = null;
-        // iOS won't raise the keyboard from a programmatic focus this long after the Stop
-        // tap, so announce the restore where the user is looking.
-        flashNotice("interrupted — message returned to the input box");
-      } else if (Date.now() > ir.until) {
-        interruptRestore.value = null; // Claude kept the message (marker shape) — mirror it
-      }
-    }
-    // Drop optimistic bubbles that have now materialized as real user turns — or as
-    // server-confirmed queue entries (the dim queued bubble takes over from there).
-    if (pendingSends.value.length) {
-      const seen = userTurnTexts(transcript.value);
-      for (const q of transcript.value.queuedPending || []) seen.add(q.trim());
-      const remaining = pendingSends.value.filter((p) => !seen.has(bangKey(p)));
-      if (remaining.length !== pendingSends.value.length) pendingSends.value = remaining;
-    }
-    // Same for optimistic image bubbles, matched on the prefix-stripped caption (an
-    // image-only send has caption "" and the transcript text is just "[Image #N]" → "").
-    if (pendingImageSends.value.length) {
-      const seen = new Set();
-      for (const turn of transcript.value.turns || []) {
-        if (turn.role !== "user") continue;
-        for (const b of turn.content || []) if (b.type === "text") seen.add(stripImagePrefix(b.text).trim());
-      }
-      const keep = [];
-      for (const e of pendingImageSends.value) {
-        if (seen.has(stripImagePrefix(e.text).trim())) e.urls.forEach(URL.revokeObjectURL);
-        else keep.push(e);
-      }
-      if (keep.length !== pendingImageSends.value.length) pendingImageSends.value = keep;
-    }
+    applyTranscript(id, data);
   } catch {
     /* keep last-known */
+  }
+}
+
+// Apply one complete transcript payload (from a fallback GET or a stream push) and
+// reconcile every optimistic transient against it. The payload is always the full
+// active conversation branch — replace, never merge (a rewind can shrink it).
+function applyTranscript(id, data) {
+  transcript.value = data;
+  cacheTranscript(id, data);
+  // Retire the optimistic approve/answer flip once the card is actually gone from the
+  // refetched transcript (the decision resolved server-side).
+  if (deciding.value === id && !(data.approval || data.openQuestions || data.openQuestion)) {
+    deciding.value = null;
+  }
+  // Retire the optimistic answer once ITS question left the payload — either resolved
+  // (no question) or replaced (different toolUseId, whose card must show immediately).
+  const dq = decidingQuestion.value;
+  if (dq && dq.id === id) {
+    const openId = data.pendingTool && data.pendingTool.toolUseId;
+    const sameStillOpen = (data.openQuestions || data.openQuestion) && openId === dq.toolUseId;
+    if (!sameStillOpen) decidingQuestion.value = null;
+  }
+  // Retire the optimistic rewind view once the transcript file actually changed on disk
+  // (the resend's append bumps `rev` even for a byte-identical resend) — the real active
+  // branch is now the truncated one, so stop overriding it.
+  if (rewindFloor.value && data.rev !== rewindFloor.value.rev) rewindFloor.value = null;
+  // Retire the optimistic "Chat about this" flip once the declined question is actually
+  // gone from the transcript (the deny resolved → PostToolUse cleared openQuestions).
+  if (clarifying.value === id && !(data.openQuestions || data.openQuestion)) clarifying.value = null;
+  // Resolve a pending restore-on-interrupt — mirroring the Mac TUI exactly (verified by
+  // driving a live claude pane through timed interrupts and reading both the pane and
+  // the JSONL). Claude Code REVERTS a prompt (moves the text back into its input box,
+  // never draws it) only when nothing of the reply was drawn yet, and that state has one
+  // JSONL signature: the prompt is the branch tip, childless — a bare leaf, NO interrupt
+  // marker. Every marker means Claude Code KEPT the message in the conversation (with an
+  // "Interrupted" line), so portkey keeps it too and restores nothing. The bare leaf
+  // stays the served branch tip until the next send forks past it, hence the transient
+  // hide; `gone` covers the post-fork state where the turn already fell off the branch.
+  const ir = interruptRestore.value;
+  if (ir && ir.sessionId === id) {
+    const txt = ir.text.trim();
+    const turns = transcript.value.turns || [];
+    const last = turns[turns.length - 1];
+    const reverted =
+      last &&
+      isPromptTurn(last) &&
+      (last.content || []).some((b) => b.type === "text" && (b.text || "").trim() === txt);
+    const gone =
+      !userTurnTexts(transcript.value).has(txt) &&
+      !(transcript.value.queuedPending || []).some((q) => q.trim() === txt);
+    if (reverted || gone) {
+      if (reverted) {
+        hiddenInterrupts.value = [...hiddenInterrupts.value, { sessionId: id, index: turns.length - 1, text: txt }];
+        // The revert parked the same text in the Mac pane's input box. Clear it (the
+        // text now lives in this composer): a lingering occupied input silently flips
+        // every future pre-stream interrupt from revert to keep, and feeds the next
+        // send's draft guard a phantom draft. Recoverable at the Mac via C-y.
+        fetch(`/sessions/${encodeURIComponent(id)}/clear-input`, { method: "POST" }).catch(() => {});
+      }
+      composerPrefill.value = { text: ir.text, sessionId: id, keepDraft: true };
+      pendingSends.value = pendingSends.value.filter((p) => p !== ir.text);
+      interruptRestore.value = null;
+      // iOS won't raise the keyboard from a programmatic focus this long after the Stop
+      // tap, so announce the restore where the user is looking.
+      flashNotice("interrupted — message returned to the input box");
+    } else if (Date.now() > ir.until) {
+      interruptRestore.value = null; // Claude kept the message (marker shape) — mirror it
+    }
+  }
+  // Drop optimistic bubbles that have now materialized as real user turns — or as
+  // server-confirmed queue entries (the dim queued bubble takes over from there).
+  if (pendingSends.value.length) {
+    const seen = userTurnTexts(transcript.value);
+    for (const q of transcript.value.queuedPending || []) seen.add(q.trim());
+    const remaining = pendingSends.value.filter((p) => !seen.has(bangKey(p)));
+    if (remaining.length !== pendingSends.value.length) pendingSends.value = remaining;
+  }
+  // Same for optimistic image bubbles, matched on the prefix-stripped caption (an
+  // image-only send has caption "" and the transcript text is just "[Image #N]" → "").
+  if (pendingImageSends.value.length) {
+    const seen = new Set();
+    for (const turn of transcript.value.turns || []) {
+      if (turn.role !== "user") continue;
+      for (const b of turn.content || []) if (b.type === "text") seen.add(stripImagePrefix(b.text).trim());
+    }
+    const keep = [];
+    for (const e of pendingImageSends.value) {
+      if (seen.has(stripImagePrefix(e.text).trim())) e.urls.forEach(URL.revokeObjectURL);
+      else keep.push(e);
+    }
+    if (keep.length !== pendingImageSends.value.length) pendingImageSends.value = keep;
   }
 }
 
@@ -537,16 +601,42 @@ const refreshTranscriptSoon = coalesce(refreshTranscript);
 let lastStreamActivity = Date.now();
 const stampStream = () => (lastStreamActivity = Date.now());
 
+// Tell the bridge which session this device has open (null = none). The server
+// answers with a forced transcript snapshot over the stream and keeps pushing
+// append/snapshot deltas (JSONL watcher + hook events) until unsubscribed.
+// Serialized through a promise chain: the server keeps ONE subscription per
+// device, last-request-wins, so two parallel POSTs from a rapid A→B switch
+// could land out of order and leave the server pushing A while B is on screen.
+let openSubChain = Promise.resolve();
+function openSubscription(sessionId) {
+  openSubChain = openSubChain.then(() =>
+    fetch("/stream/open", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ sessionId }),
+    }).catch(() => {
+      /* the fallback GET path still keeps the thread alive */
+    }),
+  );
+}
+
+// After a foreground resync, the notification-tap check must run against a FRESH
+// list (the pre-background copy predates the push that brought us here). Normally
+// the on-connect sessions snapshot satisfies it; a fallback timer covers a
+// connect that never delivers one.
+let pendingTapCheck = false;
+
 function connectStream() {
   if (es) es.close();
   es = new EventSource(`/stream?device=${encodeURIComponent(DEVICE_ID)}`);
-  // Re-snapshot on every (re)connect. EventSource reconnects on its own but never resends
-  // state, so without this the list stays stale after a dropped socket reconnects.
+  // On every (re)connect the SERVER pushes fresh snapshots (sessions + the
+  // subscribed transcript) — that replaces the old re-fetch-everything dance.
+  // The subscription itself must be re-declared: a goodbye/prune may have
+  // dropped it while the socket was down.
   es.onopen = () => {
     stampStream();
     connected.value = true;
-    refreshSessions();
-    if (selectedId.value) refreshTranscript();
+    if (selectedId.value) openSubscription(selectedId.value);
     if (openSubagent.value) refreshSubagent();
   };
   // The server heartbeats a named `ping` every 15s — named events bypass onmessage,
@@ -564,15 +654,27 @@ function connectStream() {
     } catch {
       return;
     }
-    if (msg.type === "session-changed") {
-      refreshSessionsSoon();
-      // Refresh the open transcript on EVERY broadcast, not just id-matched ones: the
-      // list-recompute broadcasts carry no id, and they're the signal that still arrives
-      // when a targeted refresh was lost (failed fetch, dropped-socket moment) — without
-      // this the thread freezes until remount while the list keeps updating. Near-free:
-      // the rev-conditional fetch returns a tiny "unchanged" body when nothing moved.
-      if (selectedId.value) refreshTranscriptSoon();
-      if (msg.id === selectedId.value && openSubagent.value) refreshSubagent();
+    if (msg.type === "sessions") {
+      // A push is by definition the newest state — supersede any in-flight GET.
+      listAppliedSeq = ++listReqSeq;
+      if (applySessions(msg.payload)) {
+        // The payload was already old when pushed (server served a stale cache) →
+        // surface it honestly instead of presenting old state as current.
+        listStale.value = !!msg.computedAt && Date.now() - msg.computedAt > 30_000;
+        if (pendingTapCheck) {
+          pendingTapCheck = false;
+          followNotificationTap();
+        }
+      }
+      return;
+    }
+    if (msg.type === "transcript") {
+      if (msg.sessionId !== selectedId.value) return; // stale subscription push
+      const r = applyTranscriptEvent(transcript.value, msg);
+      if (r.needsFetch) return refreshTranscript(); // append base lost — fall back to a full GET
+      txAppliedSeq = ++txReqSeq; // pushes supersede in-flight GETs
+      applyTranscript(msg.sessionId, r.data);
+      if (openSubagent.value) refreshSubagent();
     }
   };
 }
@@ -846,7 +948,8 @@ function open(id) {
   diffView.value = null; // drop any diff / changed-files view from the previous session
   filesView.value = false;
   clearAttachments();
-  refreshTranscript();
+  openSubscription(id); // the pushed snapshot is the primary paint…
+  refreshTranscript(); // …the GET is the fallback (races are settled by seq)
   markRead(id);
 }
 
@@ -924,6 +1027,9 @@ function markRead(id) {
       readTimers.delete(id);
       const cur = sessions.value.find((x) => x.id === id);
       if (!cur || !cur.unread || cur.modified !== seen) return; // gone, or a fresh turn arrived → keep ⚡
+      // Clear in the raw list too — overlays re-derive from it, and a re-derive from a
+      // copy still flagged unread would resurrect the glow until the server's own clear.
+      if (rawSessions) rawSessions = rawSessions.map((x) => (x.id === id ? { ...x, unread: false } : x));
       sessions.value = sessions.value.map((x) => (x.id === id ? { ...x, unread: false } : x));
       fetch(`/sessions/${encodeURIComponent(id)}/read`, { method: "POST" }).catch(() => {});
     }, 3000),
@@ -931,6 +1037,7 @@ function markRead(id) {
 }
 
 function back() {
+  openSubscription(null); // tear down the transcript push + its server-side watcher
   selectedId.value = null;
   transcript.value = null;
   historySession.value = null; // the stand-in belongs to the closed detail only
@@ -1660,6 +1767,8 @@ function List() {
         ${inbox &&
         inboxStale.value &&
         html`<div class="staleband">inbox snapshot is stale — showing last known state</div>`}
+        ${listStale.value &&
+        html`<div class="staleband">list may be out of date — syncing…</div>`}
         ${inbox &&
         inboxAware.value &&
         inboxGroups.length === 0 &&
@@ -2093,6 +2202,8 @@ function QuestionCard({ questions, toolUseId }) {
   const post = (selections) => {
     const id = selectedId.value;
     decidingQuestion.value = { id, toolUseId };
+    // An answered question resumes the turn — optimistic running, like a send.
+    setStatusOverlay(id, "running");
     const active = () => {
       const dq = decidingQuestion.value;
       return dq && dq.id === id && dq.toolUseId === toolUseId;
@@ -2119,6 +2230,7 @@ function QuestionCard({ questions, toolUseId }) {
           }, 8000);
         } else {
           decidingQuestion.value = null;
+          clearStatusOverlay(id); // the answer didn't land — no turn is resuming
           const reason = (d && d.reason) || "answer failed";
           if (reason === "stale-question") {
             flashError("✗ question changed — refreshing");
@@ -2132,6 +2244,7 @@ function QuestionCard({ questions, toolUseId }) {
       })
       .catch(() => {
         if (active()) decidingQuestion.value = null;
+        clearStatusOverlay(id);
         flashError("✗ bridge unreachable");
       });
   };
@@ -2309,8 +2422,15 @@ function ApprovalCard({ approval }) {
   function decide(decision) {
     const id = selectedId.value;
     deciding.value = id;
+    // Allow unblocks the tool — the turn resumes running; the overlay says so now
+    // rather than after the server's recompute. (Deny also resumes: Claude continues
+    // the turn with the refusal.)
+    setStatusOverlay(id, "running");
     action(`/sessions/${encodeURIComponent(id)}/decision`, { decision }).then((ok) => {
-      if (!ok && deciding.value === id) deciding.value = null;
+      if (!ok) {
+        clearStatusOverlay(id);
+        if (deciding.value === id) deciding.value = null;
+      }
     });
     setTimeout(() => {
       if (deciding.value === id) deciding.value = null;
@@ -2382,12 +2502,6 @@ function Composer({ disabled, status }) {
   const [hasText, setHasText] = useState(false); // drives the Stop⇄Send toggle; uncontrolled textarea
   const stopArmed = useRef(false); // first Stop tap arms; a second within 3s fires (double-tap confirm)
   const disarmTimer = useRef(null);
-  // Session id we just interrupted. While set AND that session still reads "running", the Stop
-  // button is suppressed (Send shown) so an unrelated /sessions refetch can't flicker Stop back
-  // before native status settles to ready. Cleared when the flip lands, on failure, on session
-  // switch, or by a safety timeout — so it never strands the button hidden on a running turn.
-  const interruptedId = useRef(null);
-  const interruptTimer = useRef(null);
   // Bash mode: a typed leading "!" flips the composer into command mode — the "!" lifts
   // out of the text into an in-field glyph, and the textarea remounts (keyed by mode)
   // with autocorrect/spellcheck off, since iOS only honors those attributes at focus
@@ -2464,15 +2578,12 @@ function Composer({ disabled, status }) {
       rerender();
     }
   }
-  function clearInterrupted() {
-    clearTimeout(interruptTimer.current);
-    interruptedId.current = null;
-  }
-  // Double-tap Stop: first tap arms (relabels), a second within 3s interrupts. Firing flips
-  // the session's status to "ready" optimistically so the button becomes Send this frame; a
-  // bare POST (not action(), which would immediately refetch and revert the optimism before
-  // native settles) sends the interrupt. The server's reconciler broadcasts the real "ready"
-  // ~1.5-3s later. On failure we refetch to restore the true "running" (Stop returns).
+  // Double-tap Stop: first tap arms (relabels), a second within 3s interrupts. Firing sets
+  // an optimistic "ready" STATUS OVERLAY so the button becomes Send this frame — the
+  // overlay is applied over every incoming payload, so a snapshot computed pre-interrupt
+  // can't flicker Stop back; it retires when the server shows non-running, or expires.
+  // A bare POST (not action(), which would immediately refetch) sends the interrupt; the
+  // server's reconciler pushes the real "ready" ~1.5-3s later.
   function onStop() {
     if (!stopArmed.current) {
       stopArmed.current = true;
@@ -2484,17 +2595,7 @@ function Composer({ disabled, status }) {
     clearTimeout(disarmTimer.current);
     stopArmed.current = false;
     const id = selectedId.value;
-    interruptedId.current = id; // suppress Stop until the running→ready flip lands
-    clearTimeout(interruptTimer.current);
-    interruptTimer.current = setTimeout(() => {
-      // Safety: if native never flips (or the flip is missed), stop suppressing so a
-      // genuinely-running turn shows Stop again for a retry.
-      if (interruptedId.current === id) {
-        clearInterrupted();
-        refreshSessions();
-      }
-    }, 5000);
-    sessions.value = sessions.value.map((s) => (s.id === id ? { ...s, status: "ready" } : s));
+    setStatusOverlay(id, "ready");
     // Arm restore-on-interrupt: if the refetched transcript shows the last-sent message
     // fell off the active branch, it comes back into the composer (see interruptRestore).
     const lastText = lastSentText.get(id);
@@ -2508,9 +2609,8 @@ function Composer({ disabled, status }) {
     }
     const restore = (reason) => {
       flashError(`✗ ${reason}`);
-      clearInterrupted(); // failed → don't keep Stop suppressed
+      clearStatusOverlay(id); // failed → the true "running" resurfaces (Stop returns)
       interruptRestore.value = null; // the turn keeps running — nothing was handed back
-      refreshSessions(); // revert optimism to the true status
     };
     fetch(`/sessions/${encodeURIComponent(id)}/interrupt`, {
       method: "POST",
@@ -2630,11 +2730,15 @@ function Composer({ disabled, status }) {
     el.blur(); // drop focus so the soft keyboard dismisses on submit
     // Exit bash mode after dispatch; no refocus — the blur above dismissed the keyboard.
     if (bashRef.current) exitBash({ focus: false });
+    // Optimistic status: a delivered message means the turn is (about to be) running —
+    // don't wait for the server's recompute to say so. Retires on confirmation/expiry.
+    setStatusOverlay(sid, "running");
     if (items.length === 0) {
       pendingSends.value = [...pendingSends.value, text];
       lastSentText.set(sid, text); // restore-on-interrupt candidate
       const ok = await action(`/sessions/${encodeURIComponent(sid)}/message`, { text });
       if (!ok) {
+        clearStatusOverlay(sid); // never reached the pane — no turn is starting
         const idx = pendingSends.value.lastIndexOf(text);
         if (idx >= 0) pendingSends.value = pendingSends.value.filter((_, i) => i !== idx);
         lastSentText.delete(sid); // never reached the pane — an interrupt can't hand it back
@@ -2656,6 +2760,7 @@ function Composer({ disabled, status }) {
     attachments.value = [];
     const ok = await actionForm(`/sessions/${encodeURIComponent(sid)}/message`, fd);
     if (!ok) {
+      clearStatusOverlay(sid); // never reached the pane — no turn is starting
       // Restore so nothing is silently lost; keep the URLs alive for the retry.
       pendingImageSends.value = pendingImageSends.value.filter((e) => e !== entry);
       attachments.value = items;
@@ -2749,15 +2854,11 @@ function Composer({ disabled, status }) {
   useEffect(() => {
     closeSlash();
     disarmStop();
-    clearInterrupted();
-  }, [sid]); // reset the menu + any armed Stop + interrupt-suppression on session switch
+  }, [sid]); // reset the menu + any armed Stop on session switch
   useEffect(() => {
-    // A turn leaving "running" means the interrupt flip landed (or the turn just ended):
-    // stop suppressing Stop and disarm so it never carries a stale arm into the next turn.
-    if (status !== "running") {
-      disarmStop();
-      clearInterrupted();
-    }
+    // A turn leaving "running" (the interrupt overlay, or the turn just ending):
+    // disarm so Stop never carries a stale arm into the next turn.
+    if (status !== "running") disarmStop();
   }, [status]);
   useEffect(() => () => clearTimeout(disarmTimer.current), []); // clear the disarm timer on unmount
   // Apply the carried draft after a bash-mode flip: the keyed textarea was just recreated
@@ -2877,7 +2978,7 @@ function Composer({ disabled, status }) {
               disabled=${disabled}
               onInput=${onInput}
             ></textarea>`}
-        ${!hasText && attachments.value.length === 0 && status === "running" && !disabled && interruptedId.current !== sid
+        ${!hasText && attachments.value.length === 0 && status === "running" && !disabled
           ? html`<button
               class=${"stop" + (stopArmed.current ? " armed" : "")}
               onClick=${onStop}
@@ -4210,19 +4311,23 @@ async function dismissNotifications() {
 function resync() {
   if (!authed.value) return;
   tick.value = Date.now(); // ages froze while the tab was hidden — catch them up first
-  // Follow a notification tap only AFTER the fresh list lands. markRead() is a one-shot
-  // check against sessions.value, and the pre-background copy predates the turn whose
-  // completion fired the push — stale data reads unread:false (or a stale `modified`),
-  // so the tap would open the session without ever clearing its ⚡.
-  refreshSessions().then(followNotificationTap);
-  if (selectedId.value) refreshTranscript();
-  if (openSubagent.value) refreshSubagent();
-  // ALWAYS rebuild the stream on foreground — no readyState check. iOS can resume the
-  // page with the socket long dead but no error ever delivered, so the EventSource
-  // still claims OPEN; gating on readyState keeps that zombie and the app never hears
-  // another broadcast. Reconnecting is one cheap request; a phantom-open stream is a
-  // permanently silent app.
+  // Foregrounding is ONE action now: rebuild the stream. The server's on-connect
+  // snapshots (sessions + the re-subscribed transcript) replace the old three racing
+  // refetches, so the first paint after a wake is already the current world.
+  // ALWAYS rebuild — no readyState check: iOS can resume the page with the socket long
+  // dead but no error ever delivered, so the EventSource still claims OPEN; gating on
+  // readyState keeps that zombie and the app never hears another push.
+  // The notification-tap check runs against the FRESH list: the on-connect snapshot
+  // satisfies it (see pendingTapCheck in onmessage); if no snapshot lands within 2.5s
+  // (connect failing/slow), fall back to a direct GET so a tap is never dropped.
+  pendingTapCheck = true;
+  setTimeout(() => {
+    if (!pendingTapCheck) return;
+    pendingTapCheck = false;
+    refreshSessions().then(followNotificationTap);
+  }, 2500);
   connectStream();
+  if (openSubagent.value) refreshSubagent();
 }
 // Advance the age clock once a minute while the page is visible — the labels' finest
 // unit is minutes, so anything faster is wasted renders. A backgrounded tab stops
@@ -4368,6 +4473,7 @@ async function followNotificationTap() {
 try {
   const saved = JSON.parse(localStorage.getItem("claude0-sessions") || "null");
   if (Array.isArray(saved) && saved.length) {
+    rawSessions = saved; // overlays re-derive from the raw list — keep it in step
     sessions.value = saved;
     authed.value = true;
     boot();

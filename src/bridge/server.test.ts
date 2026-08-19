@@ -99,3 +99,90 @@ test("/sw.js is served no-cache (a stale service worker would render old payload
   expect(res.headers.get("cache-control")).toBe("no-cache");
   expect(res.headers.get("content-type")).toContain("javascript");
 });
+
+// --- versioned state push (stream.ts protocol over a live server) -------------
+
+// Read SSE frames from /stream until `pred` matches one parsed `data:` event (or
+// the deadline passes). Returns the matched event, or null.
+async function readStreamUntil(
+  path: string,
+  pred: (ev: Record<string, unknown>) => boolean,
+  ms = 5000,
+): Promise<Record<string, unknown> | null> {
+  const res = await fetch(`${base}${path}`, { headers: { cookie } });
+  expect(res.status).toBe(200);
+  expect(res.headers.get("content-type")).toContain("text/event-stream");
+  const reader = res.body!.getReader();
+  const decoder = new TextDecoder();
+  let buf = "";
+  const deadline = Date.now() + ms;
+  try {
+    while (Date.now() < deadline) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      for (const line of buf.split("\n")) {
+        if (!line.startsWith("data: ")) continue;
+        let ev: Record<string, unknown>;
+        try {
+          ev = JSON.parse(line.slice(6));
+        } catch {
+          continue;
+        }
+        if (pred(ev)) return ev;
+      }
+    }
+  } finally {
+    await reader.cancel().catch(() => {});
+  }
+  return null;
+}
+
+test("/stream pushes a seq-stamped sessions snapshot on connect", async () => {
+  const ev = await readStreamUntil("/stream?device=stream-test-dev", (e) => e.type === "sessions");
+  expect(ev).not.toBeNull();
+  expect(typeof ev!.seq).toBe("number");
+  expect(typeof ev!.computedAt).toBe("number");
+  const payload = ev!.payload as { sessions: unknown[] };
+  expect(Array.isArray(payload.sessions)).toBe(true);
+});
+
+test("/stream/open subscribes the device and pushes a transcript snapshot", async () => {
+  const sub = await fetch(`${base}/stream/open`, {
+    method: "POST",
+    headers: { cookie, "x-claude0-device": "stream-test-dev" },
+    body: JSON.stringify({ sessionId: "no-such-session" }),
+  });
+  expect(await sub.json()).toEqual({ ok: true });
+  // A reconnect after subscribing must deliver the transcript snapshot on connect.
+  const ev = await readStreamUntil(
+    "/stream?device=stream-test-dev",
+    (e) => e.type === "transcript" && e.sessionId === "no-such-session",
+  );
+  expect(ev).not.toBeNull();
+  expect(ev!.kind).toBe("snapshot");
+  const payload = ev!.payload as { turns: unknown[] };
+  expect(Array.isArray(payload.turns)).toBe(true);
+});
+
+test("/stream/open validates its body and requires a device", async () => {
+  const noDevice = await post("/stream/open", { sessionId: "x" });
+  expect(noDevice.status).toBe(400);
+  const badBody = await fetch(`${base}/stream/open`, {
+    method: "POST",
+    headers: { cookie, "x-claude0-device": "stream-test-dev" },
+    body: JSON.stringify({ sessionId: 42 }),
+  });
+  expect(badBody.status).toBe(400);
+});
+
+test("/stream/open rejects a sessionId with glob/path metacharacters", async () => {
+  for (const bad of ["*", "../../etc/passwd", "a/b", "a?b", "a[b]", "**", "x".repeat(101)]) {
+    const res = await fetch(`${base}/stream/open`, {
+      method: "POST",
+      headers: { cookie, "x-claude0-device": "stream-test-dev" },
+      body: JSON.stringify({ sessionId: bad }),
+    });
+    expect(res.status).toBe(400);
+  }
+});

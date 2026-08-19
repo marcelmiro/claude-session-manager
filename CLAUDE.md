@@ -232,6 +232,29 @@ Examples: `claude0`, `claude0/fix-auth`, `⚡claude0/fix-auth`, `🔄api`, `clau
 Multi-pane same repo: `{repo}`. Multi-pane mixed: `{repo1}+{repo2}`.
 Helpers in `notifications.ts`: `buildBaseName()`, `extractAIName()`, `extractRepoFromWindowName()`.
 
+### Portkey sync (versioned state push)
+
+The bridge's SSE stream carries **data, not doorbells** (`src/bridge/stream.ts`; apply
+logic in `src/shared/sync.js`, served unbuilt as `/sync.js`). Every push is stamped
+`{seq, computedAt}` (seq = per-connection counter, resets on reconnect). `sessions`
+events carry the full list payload — pushed on connect (the wake-up fix: one
+round-trip replaces the old three racing foreground refetches; `resync()` is just a
+stream rebuild) and on every changed recompute (`kickSessionsPush` → dedupe in
+`pushSessions`). `transcript` events serve a per-device subscription
+(`POST /stream/open`, one session per device, torn down on goodbye/60s-disconnect,
+re-declared on every stream open): `kind:"snapshot"` replaces wholesale (subscribe,
+rewind, branch flip, compaction), `kind:"append"` extends from `fromIndex` (last
+pushed turn may have grown — streamed text, via a per-subscription `fs.watch` on the
+JSONL, 500ms debounce); non-turn fields ride every event, omitted = cleared. The
+client is apply-only — no heuristic merges — and layers status overlays on top
+(send/approve → `running`, interrupt → `ready`) that retire on confirmation or
+expiry, **never contradiction**, so a pre-action snapshot can't clobber them
+backwards. Server snapshots stay truthful (no server-side provisional status).
+`state.json` is fs-watched (3s poll only as fallback). GET endpoints, the 40s iOS
+zombie watchdog, heartbeat/consumer markers, and the conditional safety polls all
+remain as fallbacks; pushes supersede in-flight GETs via the request-seq guards.
+Decision record + rejected WebSocket design: [ADR 18](docs/adr/0018-versioned-state-push.md).
+
 ### Portkey model/effort switcher
 
 `/model` or `/effort` in the phone composer opens a selection sheet; tapping an option `POST`s to `/sessions/:id/config`, which sends the arg-form slash command via the existing send path and toasts Claude's confirmation. Validated against `MODEL_ARGS`/`EFFORT_ARGS` (`session-api.ts`). Scoping, the statusline prerequisite and the smoke test: [ADR 4](docs/adr/0004-model-effort-switcher-scope.md).
