@@ -484,22 +484,18 @@ export function runSidebarRenderer(): void {
       const dir = (await resolveRestoreTarget(s.id, s.repoPath ?? home)) ?? s.repoPath ?? home;
       // -d is load-bearing: a NON-detached new-window from the tty-less
       // daemon never returns (verified live — the Bun.$ promise just hangs),
-      // so spawn detached and select the window explicitly. The -t pin
-      // matters too: outside tmux, an untargeted new-window lands in the
-      // most recently USED session, not the one on screen.
-      const attached = (
-        await Bun.$`tmux list-clients -F ${"#{client_session}"}`.quiet().text()
-      )
-        .trim()
-        .split("\n")[0];
+      // so spawn detached and select the window explicitly. -a beside the
+      // invoking sidebar's window (fork parity): resuming is a detour from
+      // that window, so kill-window/prefix-l land back where the user was.
+      // The window-id target also pins the session — an untargeted
+      // new-window from outside tmux lands in the most recently USED
+      // session, not the one on screen.
       // ONE string, not word-split argv: tmux direct-execs a multi-arg
       // command with no shell, and the daemon's PATH has no claude — the
       // single string goes through `$SHELL -c`, where zshenv restores PATH
       const cmd = `exec claude -r ${s.id}`;
       const spawned = (
-        attached
-          ? await Bun.$`tmux new-window -d -P -F ${"#{window_id}"} -t ${attached + ":"} -c ${dir} ${cmd}`.quiet().text()
-          : await Bun.$`tmux new-window -d -P -F ${"#{window_id}"} -c ${dir} ${cmd}`.quiet().text()
+        await Bun.$`tmux new-window -d -a -P -F ${"#{window_id}"} -t ${win.windowId} -c ${dir} ${cmd}`.quiet().text()
       ).trim();
       if (spawned) await Bun.$`tmux select-window -t ${spawned}`.quiet();
       showFlash(win, "pane gone — resuming in new window");
